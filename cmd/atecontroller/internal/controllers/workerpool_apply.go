@@ -28,6 +28,10 @@ import (
 // uid so each worker pod is a distinct telemetry source.
 const ateomOTelResourceAttributes = "k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.pod.uid=$(POD_UID),service.instance.id=$(POD_UID)"
 
+// workerTerminationGracePeriodSeconds is the hardcoded pod termination grace
+// period for worker pods (60 minutes).
+const workerTerminationGracePeriodSeconds int64 = 3600
+
 // ateomOTelSettings is the telemetry configuration propagated to ateom worker
 // pods. A zero value leaves the pods without telemetry env.
 type ateomOTelSettings struct {
@@ -46,6 +50,12 @@ type ateomOTelSettings struct {
 	// MetricExportTimeout overrides the SDK's  per-export timeout, in the same
 	// whole-millisecond form as MetricExportInterval. Empty keeps the default.
 	MetricExportTimeout string
+	// TracesSampler and TracesSamplerArg are the raw OTEL_TRACES_SAMPLER and
+	// OTEL_TRACES_SAMPLER_ARG values, passed through untouched: ateom's own
+	// serverboot resolution validates them. Empty sampler keeps the worker's
+	// default and drops the arg, which is dead config on its own.
+	TracesSampler    string
+	TracesSamplerArg string
 }
 
 const (
@@ -136,7 +146,7 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 	applyWorkerPoolPodTemplate(podSpecAC, containerAC, wp.Spec.Template)
 	maybeApplyMicroVMPodShape(podSpecAC, containerAC, wp.Spec.SandboxClass)
 	podSpecAC.WithContainers(containerAC)
-	podSpecAC.WithTerminationGracePeriodSeconds(int64(workerTerminationGracePeriodSeconds(wp)))
+	podSpecAC.WithTerminationGracePeriodSeconds(workerTerminationGracePeriodSeconds)
 
 	return appsv1ac.Deployment(wp.Name, wp.Namespace).
 		WithOwnerReferences(metav1ac.OwnerReference().
@@ -182,6 +192,16 @@ func ateomContainerEnv(otel ateomOTelSettings) []*corev1ac.EnvVarApplyConfigurat
 		envs = append(envs, corev1ac.EnvVar().
 			WithName("OTEL_METRIC_EXPORT_TIMEOUT").
 			WithValue(otel.MetricExportTimeout))
+	}
+	if otel.TracesSampler != "" {
+		envs = append(envs, corev1ac.EnvVar().
+			WithName("OTEL_TRACES_SAMPLER").
+			WithValue(otel.TracesSampler))
+		if otel.TracesSamplerArg != "" {
+			envs = append(envs, corev1ac.EnvVar().
+				WithName("OTEL_TRACES_SAMPLER_ARG").
+				WithValue(otel.TracesSamplerArg))
+		}
 	}
 	return envs
 }
@@ -232,19 +252,6 @@ func ateomSecurityContext(class atev1alpha1.SandboxClass) *corev1ac.SecurityCont
 			WithAdd(ateomGvisorCapabilities...)).
 		WithAppArmorProfile(corev1ac.AppArmorProfile().
 			WithType(corev1.AppArmorProfileTypeUnconfined))
-}
-
-// defaultTerminationGracePeriodSeconds is the fallback pod termination grace
-// period for worker pods (5 minutes), used when a WorkerPool does not set
-// spec.terminationGracePeriodSeconds. It matches the CRD default and gives
-// actors ample time to trap SIGTERM and save state before SIGKILL.
-const defaultTerminationGracePeriodSeconds int32 = 300
-
-func workerTerminationGracePeriodSeconds(wp *atev1alpha1.WorkerPool) int32 {
-	if wp.Spec.TerminationGracePeriodSeconds != nil {
-		return *wp.Spec.TerminationGracePeriodSeconds
-	}
-	return defaultTerminationGracePeriodSeconds
 }
 
 // maybeApplyMicroVMPodShape adds the /dev/kvm device and node placement a

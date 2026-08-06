@@ -304,7 +304,7 @@ func (x *RunRequest) GetSandboxAssets() *SandboxAssets {
 }
 
 // AssetFile is one content-addressed file atelet fetches for a sandbox runtime
-// (e.g. the gVisor runsc binary).
+// (e.g. the gVisor release tarball).
 type AssetFile struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// gs:// URL to download the asset from.
@@ -408,7 +408,8 @@ func (x *ArchAssets) GetFiles() map[string]*AssetFile {
 // SandboxAssets is the generic, backend-agnostic description of the sandbox
 // binaries for an actor: a sandbox class plus assets keyed first by
 // architecture (GOARCH) and then by asset name. atelet's backend code
-// interprets the asset names (gVisor expects "runsc").
+// interprets the asset names (gVisor expects "gvisor", the release tarball;
+// legacy "runsc", a bare binary, is still accepted).
 type SandboxAssets struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SandboxClass  string                 `protobuf:"bytes,1,opt,name=sandbox_class,json=sandboxClass,proto3" json:"sandbox_class,omitempty"`                                           // e.g. "gvisor"
@@ -907,10 +908,13 @@ func (x *EnvEntry) GetValue() string {
 // Readyz describes how to check that a container is ready to serve.
 // Only HTTP is supported today.
 type Readyz struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	HttpGet       *HTTPGetAction         `protobuf:"bytes,1,opt,name=http_get,json=httpGet,proto3" json:"http_get,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	HttpGet *HTTPGetAction         `protobuf:"bytes,1,opt,name=http_get,json=httpGet,proto3" json:"http_get,omitempty"`
+	// How long to keep polling before giving up and failing the actor start.
+	// Zero means the ateom's default.
+	TimeoutSeconds int32 `protobuf:"varint,2,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Readyz) Reset() {
@@ -948,6 +952,13 @@ func (x *Readyz) GetHttpGet() *HTTPGetAction {
 		return x.HttpGet
 	}
 	return nil
+}
+
+func (x *Readyz) GetTimeoutSeconds() int32 {
+	if x != nil {
+		return x.TimeoutSeconds
+	}
+	return 0
 }
 
 // HTTPGetAction performs an HTTP GET against the container.
@@ -1612,9 +1623,10 @@ const file_atelet_proto_rawDesc = "" +
 	"\rvolume_mounts\x18\x06 \x03(\v2\x13.atelet.VolumeMountR\fvolumeMounts\"4\n" +
 	"\bEnvEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value\":\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"c\n" +
 	"\x06Readyz\x120\n" +
-	"\bhttp_get\x18\x01 \x01(\v2\x15.atelet.HTTPGetActionR\ahttpGet\"7\n" +
+	"\bhttp_get\x18\x01 \x01(\v2\x15.atelet.HTTPGetActionR\ahttpGet\x12'\n" +
+	"\x0ftimeout_seconds\x18\x02 \x01(\x05R\x0etimeoutSeconds\"7\n" +
 	"\rHTTPGetAction\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\x05R\x04port\"\r\n" +

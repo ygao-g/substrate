@@ -309,30 +309,15 @@ func TestAteomSecurityContextByClass(t *testing.T) {
 	}
 }
 
-// TestTerminationGracePeriodSeconds asserts the pod's grace period is the pool's
-// explicit setting when present, and the 300s default otherwise.
+// TestTerminationGracePeriodSeconds asserts the pod's grace period is hardcoded to 3600s.
 func TestTerminationGracePeriodSeconds(t *testing.T) {
-	override := int32(120)
-	tests := []struct {
-		name string
-		set  *int32
-		want int64
-	}{
-		{name: "default when unset", set: nil, want: int64(defaultTerminationGracePeriodSeconds)},
-		{name: "explicit override honored", set: &override, want: 120},
+	wp := testWorkerPoolApplyConfig(nil)
+	ps := buildDeploymentApplyConfig(wp, ateomOTelSettings{}).Spec.Template.Spec
+	if ps.TerminationGracePeriodSeconds == nil {
+		t.Fatalf("TerminationGracePeriodSeconds not set")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			wp := testWorkerPoolApplyConfig(nil)
-			wp.Spec.TerminationGracePeriodSeconds = tt.set
-			ps := buildDeploymentApplyConfig(wp, ateomOTelSettings{}).Spec.Template.Spec
-			if ps.TerminationGracePeriodSeconds == nil {
-				t.Fatalf("TerminationGracePeriodSeconds not set")
-			}
-			if *ps.TerminationGracePeriodSeconds != tt.want {
-				t.Errorf("TerminationGracePeriodSeconds = %d, want %d", *ps.TerminationGracePeriodSeconds, tt.want)
-			}
-		})
+	if *ps.TerminationGracePeriodSeconds != 3600 {
+		t.Errorf("TerminationGracePeriodSeconds = %d, want 3600", *ps.TerminationGracePeriodSeconds)
 	}
 }
 
@@ -433,6 +418,63 @@ func TestBuildDeploymentApplyConfigMetricExportTuning(t *testing.T) {
 				Spec.Template.Spec.Containers[0]
 			env := envByName(c.Env)
 			for _, k := range []string{"OTEL_METRIC_EXPORT_INTERVAL", "OTEL_METRIC_EXPORT_TIMEOUT"} {
+				got, ok := env[k]
+				want, wantSet := tt.want[k]
+				if ok != wantSet {
+					t.Errorf("%s present = %v, want %v", k, ok, wantSet)
+					continue
+				}
+				if ok && got.value != want {
+					t.Errorf("%s = %q, want %q", k, got.value, want)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildDeploymentApplyConfigTracesSamplerPropagation asserts the sampler
+// env pair reaches the ateom container only alongside an endpoint, and the arg
+// only alongside a sampler: an arg without a sampler name is dead config the
+// SDK ignores.
+func TestBuildDeploymentApplyConfigTracesSamplerPropagation(t *testing.T) {
+	const endpoint = "http://collector.otel-system.svc:4317"
+	tests := []struct {
+		name string
+		otel ateomOTelSettings
+		want map[string]string // value by env name; absent key means must not be set
+	}{
+		{
+			name: "unset keeps binary default",
+			otel: ateomOTelSettings{Endpoint: endpoint},
+			want: nil,
+		},
+		{
+			name: "sampler and arg with endpoint",
+			otel: ateomOTelSettings{Endpoint: endpoint, TracesSampler: "parentbased_traceidratio", TracesSamplerArg: "0.25"},
+			want: map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_traceidratio", "OTEL_TRACES_SAMPLER_ARG": "0.25"},
+		},
+		{
+			name: "sampler alone",
+			otel: ateomOTelSettings{Endpoint: endpoint, TracesSampler: "parentbased_always_on"},
+			want: map[string]string{"OTEL_TRACES_SAMPLER": "parentbased_always_on"},
+		},
+		{
+			name: "arg alone stays unset",
+			otel: ateomOTelSettings{Endpoint: endpoint, TracesSamplerArg: "0.25"},
+			want: nil,
+		},
+		{
+			name: "ignored without endpoint",
+			otel: ateomOTelSettings{TracesSampler: "parentbased_traceidratio", TracesSamplerArg: "0.25"},
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := buildDeploymentApplyConfig(testWorkerPoolApplyConfig(nil), tt.otel).
+				Spec.Template.Spec.Containers[0]
+			env := envByName(c.Env)
+			for _, k := range []string{"OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG"} {
 				got, ok := env[k]
 				want, wantSet := tt.want[k]
 				if ok != wantSet {
@@ -570,7 +612,7 @@ func expectedDeploymentApplyConfig(mutatePodSpec func(*corev1ac.PodSpecApplyConf
 	podSpecAC.Tolerations = []corev1ac.TolerationApplyConfiguration{}
 	podSpecAC.WithPriorityClassName("")
 	podSpecAC.WithAffinity(corev1ac.Affinity())
-	podSpecAC.WithTerminationGracePeriodSeconds(int64(defaultTerminationGracePeriodSeconds))
+	podSpecAC.WithTerminationGracePeriodSeconds(workerTerminationGracePeriodSeconds)
 	if mutatePodSpec != nil {
 		mutatePodSpec(podSpecAC)
 	}
