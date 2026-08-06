@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dns-workaround-node-hosts
+  namespace: kube-system
+  labels:
+    k8s-app: dns-workaround
+spec:
+  selector:
+    matchLabels:
+      k8s-app: dns-workaround
+  template:
+    metadata:
+      labels:
+        k8s-app: dns-workaround
+    spec:
+      hostNetwork: true
+      initContainers:
+      - name: update-hosts
+        image: alpine:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          if ! grep -q "fd20:ce::254 metadata.google.internal" /host_etc/hosts; then
+            echo "fd20:ce::254 metadata.google.internal" >> /host_etc/hosts
+            echo "Updated /host_etc/hosts with metadata.google.internal"
+          else
+            echo "metadata.google.internal already exists in /host_etc/hosts"
+          fi
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: host-etc
+          mountPath: /host_etc
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.9
+      volumes:
+      - name: host-etc
+        hostPath:
+          path: /etc
+          type: Directory

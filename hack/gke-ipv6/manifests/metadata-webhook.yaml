@@ -1,0 +1,35 @@
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: inject-metadata-host
+spec:
+  failurePolicy: Ignore
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >
+          Object{
+            spec: Object{
+              containers: object.spec.containers.map(c,
+                Object{
+                  name: c.name,
+                  env: c.?env.orValue([]) + [Object{name: "GCE_METADATA_HOST", value: "metadata.google.internal"}]
+                }
+              )
+            }
+          }
+---
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: inject-metadata-host-binding
+spec:
+  policyName: inject-metadata-host
+  matchResources:
+    namespaceSelector: {}
