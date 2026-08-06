@@ -155,6 +155,22 @@ func TestXdsServer_UpdateSnapshot(t *testing.T) {
 		if sa.GetAddress() != "0.0.0.0" {
 			t.Errorf("Expected address '0.0.0.0', got %s", sa.GetAddress())
 		}
+		
+		addrs := l.GetAdditionalAddresses()
+		if len(addrs) == 0 {
+			t.Errorf("Expected additional addresses, got none")
+		} else {
+			asa := addrs[0].GetAddress().GetSocketAddress()
+			if asa.GetAddress() != "::" {
+				t.Errorf("Expected additional address '::', got %s", asa.GetAddress())
+			}
+			if asa.GetIpv4Compat() {
+				t.Errorf("Expected additional address Ipv4Compat to be false")
+			}
+			if asa.GetPortValue() != 8081 {
+				t.Errorf("Expected additional port 8081, got %d", asa.GetPortValue())
+			}
+		}
 	}
 }
 
@@ -192,6 +208,25 @@ func TestXdsServer_UpdateSnapshot_WithHttps(t *testing.T) {
 		sa := l.GetAddress().GetSocketAddress()
 		if sa.GetPortValue() != 8443 {
 			t.Errorf("Expected port 8443, got %d", sa.GetPortValue())
+		}
+		if sa.GetAddress() != "0.0.0.0" {
+			t.Errorf("Expected address '0.0.0.0', got %s", sa.GetAddress())
+		}
+		
+		addrs := l.GetAdditionalAddresses()
+		if len(addrs) == 0 {
+			t.Errorf("Expected additional addresses, got none")
+		} else {
+			asa := addrs[0].GetAddress().GetSocketAddress()
+			if asa.GetAddress() != "::" {
+				t.Errorf("Expected additional address '::', got %s", asa.GetAddress())
+			}
+			if asa.GetIpv4Compat() {
+				t.Errorf("Expected additional address Ipv4Compat to be false")
+			}
+			if asa.GetPortValue() != 8443 {
+				t.Errorf("Expected additional port 8443, got %d", asa.GetPortValue())
+			}
 		}
 
 		// Verify the TLS config references the serving cert via SDS rather

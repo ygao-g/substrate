@@ -731,6 +731,21 @@ func (x *XdsServer) buildListener() *listenerv3.Listener {
 				},
 			},
 		},
+		AdditionalAddresses: []*listenerv3.AdditionalAddress{
+			{
+				Address: &corev3.Address{
+					Address: &corev3.Address_SocketAddress{
+						SocketAddress: &corev3.SocketAddress{
+							Address:    "::",
+							Ipv4Compat: false,
+							PortSpecifier: &corev3.SocketAddress_PortValue{
+								PortValue: uint32(x.ingressPort),
+							},
+						},
+					},
+				},
+			},
+		},
 		FilterChains: []*listenerv3.FilterChain{
 			{
 				Filters: []*listenerv3.Filter{
@@ -774,6 +789,21 @@ func (x *XdsServer) buildHttpsListener() *listenerv3.Listener {
 					Address: "0.0.0.0",
 					PortSpecifier: &corev3.SocketAddress_PortValue{
 						PortValue: uint32(x.httpsPort),
+					},
+				},
+			},
+		},
+		AdditionalAddresses: []*listenerv3.AdditionalAddress{
+			{
+				Address: &corev3.Address{
+					Address: &corev3.Address_SocketAddress{
+						SocketAddress: &corev3.SocketAddress{
+							Address:    "::",
+							Ipv4Compat: false,
+							PortSpecifier: &corev3.SocketAddress_PortValue{
+								PortValue: uint32(x.httpsPort),
+							},
+						},
 					},
 				},
 			},
