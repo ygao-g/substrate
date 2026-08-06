@@ -21,11 +21,46 @@ KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kind}"
 reg_name="kind-registry"
 reg_port="5001"
 
+# Address families the cluster's pods and Services get: ipv4 (the default and
+# what CI runs), dual, or ipv6. "dual" makes IPv4 the primary family, so a
+# Service with no ipFamilyPolicy still gets a v4 ClusterIP and a pod's
+# status.podIP is still v4 — i.e. it is additive and every IPv4 path keeps
+# working. "ipv6" makes v6 primary and is the setting that actually exercises
+# the single-family code paths (pod.Status.PodIP, PodIPs[0], the CoreDNS
+# "IN A" answer). See notes/ipv6/area-f-testenv.md.
+KIND_IP_FAMILY="${KIND_IP_FAMILY:-dual}"
+case "${KIND_IP_FAMILY}" in
+  ipv4)
+    # kind's own defaults for a single-stack IPv4 cluster; pinned here so all
+    # three families are described in one place.
+    pod_subnet="10.244.0.0/16"
+    service_subnet="10.96.0.0/16"
+    ;;
+  ipv6)
+    # ULA (fc00::/7) rather than GUA: nothing routes off the Docker host, and a
+    # /56 pod subnet leaves each node the /64 kubeadm's
+    # node-cidr-mask-size-ipv6 default hands out. kube-apiserver caps the
+    # Service CIDR at 65536 addresses, so /112 is the largest it accepts.
+    pod_subnet="fd00:10:244::/56"
+    service_subnet="fd00:10:96::/112"
+    ;;
+  dual)
+    # Order is significant: the first entry of each list is the cluster's
+    # primary family.
+    pod_subnet="10.244.0.0/16,fd00:10:244::/56"
+    service_subnet="10.96.0.0/16,fd00:10:96::/112"
+    ;;
+  *)
+    echo "error: KIND_IP_FAMILY must be one of ipv4, ipv6, dual (got '${KIND_IP_FAMILY}')" >&2
+    exit 1
+    ;;
+esac
+
 mkdir -p "${ROOT}/bin"
 
 # 1. Create registry container unless it already exists
 echo "Setting up local docker registry '${reg_name}' on port ${reg_port}..."
-if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" == "true" ]; then
+if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" = "true" ]; then
   if ! docker port "${reg_name}" | grep -q "${reg_port}"; then
     echo "Registry exists but is not mapped to port ${reg_port}. Recreating..."
     docker rm -f "${reg_name}"
@@ -33,6 +68,11 @@ if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true
 fi
 
 if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" != "true" ]; then
+  # Both loopback families are published, so `ko` pushing to localhost:5001 from
+  # the host works whichever family its resolver picks. This already covers the
+  # host side for an IPv6 or dual-stack cluster; the *node* side is separate and
+  # goes over the "kind" Docker network below (step 4), where Docker's embedded
+  # DNS answers "kind-registry" with whatever families that network has.
   docker run \
     -d --restart=always \
     --label created-by=agent-substrate \
@@ -57,10 +97,14 @@ else
   echo "/dev/kvm not available: micro-VM support disabled (gVisor still works)."
 fi
 
-echo "Creating kind configuration for cluster '${KIND_CLUSTER_NAME}'..."
+echo "Creating kind configuration for cluster '${KIND_CLUSTER_NAME}' (ipFamily=${KIND_IP_FAMILY})..."
 cat <<EOF > "${ROOT}/bin/kind-config.yaml"
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  ipFamily: ${KIND_IP_FAMILY}
+  podSubnet: "${pod_subnet}"
+  serviceSubnet: "${service_subnet}"
 nodes:
 - role: control-plane
 EOF
@@ -85,6 +129,21 @@ runtimeConfig:
   "certificates.k8s.io/v1beta1": "true"
 EOF
 
+# An IPv6 or dual-stack cluster needs the "kind" Docker network to have IPv6.
+# kind creates it that way, but a network left over from an older kind (or from
+# a daemon that had IPv6 off) is reused as-is and the nodes then come up with no
+# v6 address at all — which surfaces much later as pods stuck at ContainerCreating.
+if [ "${KIND_IP_FAMILY}" != "ipv4" ]; then
+  net_ipv6="$(docker network inspect kind --format '{{.EnableIPv6}}' 2>/dev/null || echo "absent")"
+  if [ "${net_ipv6}" = "false" ]; then
+    echo "error: the 'kind' Docker network exists without IPv6 enabled." >&2
+    echo "       Detach everything from it and remove it, then re-run:" >&2
+    echo "         docker network disconnect kind ${reg_name} && docker network rm kind" >&2
+    echo "       Also confirm the daemon has IPv6 enabled (\"ip6tables\": true)." >&2
+    exit 1
+  fi
+fi
+
 echo "Deleting existing kind cluster '${KIND_CLUSTER_NAME}' if it exists..."
 "${ROOT}"/hack/kind.sh delete cluster --name "${KIND_CLUSTER_NAME}" || true
 
@@ -94,7 +153,20 @@ echo "Creating kind cluster '${KIND_CLUSTER_NAME}'..."
 # 2.5 Enable Proxy ARP on kind nodes for gVisor loopback pod-to-pod networking
 echo "Enabling Proxy ARP on kind nodes..."
 for node in $("${ROOT}"/hack/kind.sh get nodes --name "${KIND_CLUSTER_NAME}"); do
+  # Left on unconditionally: harmless on a v6-only cluster (the nodes still
+  # carry IPv4 on the Docker bridge) and it keeps the IPv4 path byte-identical.
   docker exec "${node}" sysctl net.ipv4.conf.all.proxy_arp=1
+  if [ "${KIND_IP_FAMILY}" != "ipv4" ]; then
+    # proxy_ndp is the IPv6 counterpart, but only in name: proxy_arp answers for
+    # every address the node has a route to, whereas proxy_ndp answers only for
+    # addresses explicitly added with `ip -6 neigh add proxy <addr> dev <dev>`.
+    # This flag is therefore necessary and not sufficient. It is also inert
+    # today: the actor interior network is IPv4-only (169.254.17.0/30), so
+    # nothing asks a node to proxy a v6 neighbour until the ateomnet dual-stack
+    # work lands, which is when the per-address entries have to be added too.
+    docker exec "${node}" sysctl net.ipv6.conf.all.forwarding=1
+    docker exec "${node}" sysctl net.ipv6.conf.all.proxy_ndp=1
+  fi
 done
 
 # 2.6 When KVM is available: make /dev/kvm usable inside the node and label
