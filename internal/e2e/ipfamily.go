@@ -33,7 +33,8 @@ const (
 	APIService   = "api"
 	// APIAppLabel selects the ate-api-server pods.
 	APIAppLabel = "app=ate-api-server"
-	// APIGRPCPort is the control-plane gRPC port, the one F2 is about.
+	// APIGRPCPort is the control-plane gRPC port, the listener that has to bind
+	// both families.
 	APIGRPCPort = 443
 )
 

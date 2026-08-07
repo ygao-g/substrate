@@ -113,7 +113,10 @@ func TestDataPathServicesAreDualStack(t *testing.T) {
 // TestAteAPIServerAcceptsBothFamilies dials the control-plane gRPC port on each
 // family of an ate-api-server pod's own address, from inside the cluster.
 //
-// This is the live half of F2. ate-api-server's Deployment used to pass
+// It is the live counterpart to the ClusterIP assertions above: a Service can
+// be dual-stack while the process behind it is not.
+//
+// ate-api-server's Deployment used to pass
 // --grpc-listen-addr=0.0.0.0:443, and the IPv4 wildcard binds one family: the
 // process listens on v4 and nothing answers on v6, however dual-stack the
 // cluster and the Service are. Dropping the override lets the Go default
