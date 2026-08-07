@@ -4,6 +4,7 @@ metadata:
   name: inject-metadata-host
 spec:
   failurePolicy: Ignore
+  reinvocationPolicy: Never
   matchConstraints:
     resourceRules:
       - apiGroups: [""]

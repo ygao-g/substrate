@@ -16,6 +16,7 @@ gcloud container clusters create "${CLUSTER_NAME}" \
   --cluster-dns clouddns \
   --cluster-dns-scope cluster \
   --enable-ip-alias \
-  --stack-type IPV4_IPV6
+  --stack-type ipv4-ipv6 \
+  --enable-kubernetes-alpha
 
 echo "Cluster creation completed successfully!"
