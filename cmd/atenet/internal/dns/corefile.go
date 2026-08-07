@@ -44,9 +44,39 @@ func buildTemplate() string {
 	directives = append(directives, fmt.Sprintf("template IN A %s {", resources.ActorDNSSuffix))
 	// Escape the suffix's dots so they match literally; the final \. matches the FQDN's trailing dot.
 	escapedSuffix := strings.ReplaceAll(resources.ActorDNSSuffix, ".", `\.`)
-	directives = append(directives, fmt.Sprintf(`  match "^%s\.%s\.%s\.$"`, resources.ResourceNameRegexPattern, resources.ResourceNameRegexPattern, escapedSuffix))
+	actorMatch := fmt.Sprintf(`  match "^%s\.%s\.%s\.$"`, resources.ResourceNameRegexPattern, resources.ResourceNameRegexPattern, escapedSuffix)
+	directives = append(directives, actorMatch)
 	// Note the %s -- this will be filled with the router IP.
 	directives = append(directives, `  answer "{{ .Name }} 60 IN A %s"`)
+	directives = append(directives, "}")
+
+	// The template above is the whole plugin chain for this zone, so anything it
+	// does not answer would fall through to a nil Next and become SERVFAIL. That
+	// is fatal for musl libc (Alpine) clients, which map rcode 2 to EAI_AGAIN and
+	// abandon the lookup without reading the paired A answer. The two templates
+	// below turn those cases into proper, cacheable negative answers. An SOA in
+	// the authority section is what makes them cacheable.
+	//
+	// Order matters: the template plugin evaluates templates in Corefile order,
+	// so the IN A template must stay first, and the regex-matched NODATA template
+	// must precede the NXDOMAIN catch-all. Do not add "fallthrough" -- with a nil
+	// Next it still returns SERVFAIL, and a non-matching template with
+	// fallthrough stops evaluating the templates that follow it.
+	soa := `  authority "{{ .Zone }} 60 IN SOA ns.dns.{{ .Zone }} hostmaster.{{ .Zone }} (1 60 60 60 60)"`
+
+	// NODATA for a real actor name queried with a qtype other than A (AAAA,
+	// HTTPS, SRV, ...). NXDOMAIN here would break musl, which treats rcode 3 on
+	// either half of its parallel A/AAAA pair as "no addresses at all".
+	directives = append(directives, fmt.Sprintf("template ANY ANY %s {", resources.ActorDNSSuffix))
+	directives = append(directives, actorMatch)
+	directives = append(directives, "  rcode NOERROR")
+	directives = append(directives, soa)
+	directives = append(directives, "}")
+
+	// Terminal catch-all: any other name in the zone genuinely does not exist.
+	directives = append(directives, fmt.Sprintf("template ANY ANY %s {", resources.ActorDNSSuffix))
+	directives = append(directives, "  rcode NXDOMAIN")
+	directives = append(directives, soa)
 	directives = append(directives, "}")
 
 	// Generate the template.
