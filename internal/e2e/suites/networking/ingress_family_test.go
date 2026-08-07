@@ -72,6 +72,10 @@ type envoyListeners struct {
 type envoySocketAddress struct {
 	Address   string `json:"address"`
 	PortValue int    `json:"port_value"`
+	// Ipv4Compat is proto3-omitted from the admin JSON when false, so an absent
+	// field decodes to the value this test wants. See the assertion below for
+	// why false is load-bearing on the "::" socket.
+	Ipv4Compat bool `json:"ipv4_compat"`
 }
 
 // TestRouterListenerAddresses asserts, from Envoy's own view of itself, that
@@ -117,19 +121,19 @@ func TestRouterListenerAddresses(t *testing.T) {
 		t.Fatalf("Envoy reports no listeners at all; xDS has not converged. Body: %s", raw)
 	}
 
-	// One entry per listener name: every address it is bound on.
-	bound := map[string][]string{}
+	// One entry per listener name: every socket it is bound on.
+	bound := map[string][]envoySocketAddress{}
 	for _, ls := range listeners.ListenerStatuses {
-		addrs := []string{ls.LocalAddress.SocketAddress.Address}
+		sockets := []envoySocketAddress{ls.LocalAddress.SocketAddress}
 		for _, extra := range ls.AdditionalLocalAddresses {
-			addrs = append(addrs, extra.SocketAddress.Address)
+			sockets = append(sockets, extra.SocketAddress)
 		}
-		bound[ls.Name] = addrs
+		bound[ls.Name] = sockets
 	}
 
 	for _, name := range []string{ingressHTTPListener, ingressHTTPSListener} {
 		t.Run(name, func(t *testing.T) {
-			addrs, ok := bound[name]
+			sockets, ok := bound[name]
 			if !ok {
 				if name == ingressHTTPSListener {
 					// The HTTPS listener only exists when --port-https is set.
@@ -138,6 +142,11 @@ func TestRouterListenerAddresses(t *testing.T) {
 					t.Skipf("router has no %s; listeners present: %v", name, slices.Sorted(maps.Keys(bound)))
 				}
 				t.Fatalf("router has no %s; listeners present: %v", name, slices.Sorted(maps.Keys(bound)))
+			}
+
+			addrs := make([]string, 0, len(sockets))
+			for _, s := range sockets {
+				addrs = append(addrs, s.Address)
 			}
 			// The IPv4 socket is the one that carries all production traffic
 			// today; losing it is the expensive regression, so assert it first.
@@ -148,6 +157,21 @@ func TestRouterListenerAddresses(t *testing.T) {
 				t.Errorf("%s is bound on %v; want an IPv6 wildcard socket (::) as well. "+
 					"Envoy binds it on a single-stack cluster too, so this failing means the "+
 					"listener lost its additional_addresses entry", name, addrs)
+			}
+
+			// ipv4_compat on the "::" socket would clear IPV6_V6ONLY and make it
+			// accept IPv4 too -- colliding with the 0.0.0.0 socket already bound
+			// to the same port. Envoy fails the whole listener when an additional
+			// address cannot bind, so this does not degrade IPv6: it takes all
+			// ingress down, both families. The xDS side is pinned in
+			// cmd/atenet/internal/router/xds_test.go; this asserts it survived
+			// the trip into Envoy.
+			for _, s := range sockets {
+				if s.Address == "::" && s.Ipv4Compat {
+					t.Errorf("%s has ipv4_compat set on its :: socket (port %d); want false. "+
+						"It collides with the 0.0.0.0 socket on the same port and Envoy rejects "+
+						"the entire listener, dropping IPv4 ingress along with IPv6", name, s.PortValue)
+				}
 			}
 		})
 	}
