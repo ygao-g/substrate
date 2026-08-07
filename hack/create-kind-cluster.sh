@@ -21,14 +21,28 @@ KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kind}"
 reg_name="kind-registry"
 reg_port="5001"
 
-# Address families the cluster's pods and Services get: ipv4 (the default and
-# what CI runs), dual, or ipv6. "dual" makes IPv4 the primary family, so a
-# Service with no ipFamilyPolicy still gets a v4 ClusterIP and a pod's
-# status.podIP is still v4 — i.e. it is additive and every IPv4 path keeps
-# working. "ipv6" makes v6 primary and is the setting that actually exercises
-# the single-family code paths (pod.Status.PodIP, PodIPs[0], the CoreDNS
-# "IN A" answer). See notes/ipv6/area-f-testenv.md.
-KIND_IP_FAMILY="${KIND_IP_FAMILY:-dual}"
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    -h|--help)
+      echo "Usage: $0"
+      echo "Creates the kind cluster '${KIND_CLUSTER_NAME}' and a local registry container on port ${reg_port}."
+      echo
+      echo "Configured through the environment:"
+      echo "  KIND_CLUSTER_NAME  Name of the cluster to create (default: kind)."
+      echo "  KIND_IP_FAMILY     Address families for pods and Services: ipv4, ipv6 or dual (default: ipv4)."
+      exit 0
+      ;;
+  esac
+fi
+
+# Address families the cluster's pods and Services get: ipv4 (the default, and
+# what every CI job but the dual-stack one runs), dual, or ipv6. "dual" makes
+# IPv4 the primary family, so a Service with no ipFamilyPolicy still gets a v4
+# ClusterIP and a pod's status.podIP is still v4 — i.e. it is additive and every
+# IPv4 path keeps working. "ipv6" makes v6 primary and is the setting that
+# actually exercises the single-family code paths (pod.Status.PodIP, PodIPs[0],
+# the CoreDNS "IN A" answer).
+KIND_IP_FAMILY="${KIND_IP_FAMILY:-ipv4}"
 case "${KIND_IP_FAMILY}" in
   ipv4)
     # kind's own defaults for a single-stack IPv4 cluster; pinned here so all
