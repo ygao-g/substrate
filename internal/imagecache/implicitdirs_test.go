@@ -141,9 +141,16 @@ func TestResolveImplicitDirFixups_NoRepairCases(t *testing.T) {
 // view rather than failing or following the shadow.
 func TestApplyDirFixups_SkipsShadowedPaths(t *testing.T) {
 	rootfs := t.TempDir()
-	if err := os.WriteFile(filepath.Join(rootfs, "afile"), nil, 0o644); err != nil {
+	afilePath := filepath.Join(rootfs, "afile")
+	if err := os.WriteFile(afilePath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	initialFi, err := os.Lstat(afilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialMode := initialFi.Mode().Perm()
+
 	fixups := []dirFixup{
 		{Path: "missing", Mode: 0o700},
 		{Path: "afile", Mode: 0o700},
@@ -151,7 +158,7 @@ func TestApplyDirFixups_SkipsShadowedPaths(t *testing.T) {
 	if err := applyDirFixups(rootfs, fixups); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if fi, _ := os.Lstat(filepath.Join(rootfs, "afile")); fi.Mode().Perm() != 0o644 {
-		t.Errorf("non-directory was chmodded: %v", fi.Mode())
+	if fi, _ := os.Lstat(afilePath); fi.Mode().Perm() != initialMode {
+		t.Errorf("non-directory was chmodded: %v (initially %v)", fi.Mode().Perm(), initialMode)
 	}
 }

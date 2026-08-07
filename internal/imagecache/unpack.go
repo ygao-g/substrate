@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -263,7 +262,6 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 
 		default:
 			tfStr := string([]byte{hdr.Typeflag})
-			slog.ErrorContext(ctx, "Unhandled tar entry typeflag", slog.String("typeflag", tfStr), slog.Any("hdr", hdr))
 			return nil, fmt.Errorf("unhandled tar entry typeflag %q", tfStr)
 		}
 	}

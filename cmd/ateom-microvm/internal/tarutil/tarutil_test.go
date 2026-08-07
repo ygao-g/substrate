@@ -130,13 +130,19 @@ func TestRoundTrip(t *testing.T) {
 	})
 
 	t.Run("modes", func(t *testing.T) {
-		for rel, want := range map[string]os.FileMode{
-			"a.txt":     0o644,
-			"sub/b.txt": 0o600,
-			"ro/c.txt":  0o444,
-			"ro":        0o500,
-			"empty":     0o755,
+		for _, rel := range []string{
+			"a.txt",
+			"sub/b.txt",
+			"ro/c.txt",
+			"ro",
+			"empty",
 		} {
+			srcSt, err := os.Lstat(filepath.Join(src, rel))
+			if err != nil {
+				t.Fatalf("lstat src %q: %v", rel, err)
+			}
+			want := srcSt.Mode().Perm()
+
 			st, err := os.Lstat(filepath.Join(dst, rel))
 			if err != nil {
 				t.Errorf("lstat %q: %v", rel, err)
