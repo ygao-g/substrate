@@ -49,9 +49,9 @@ const (
 	// that benign-ness is the property under test.
 	DNSEmpty
 	// DNSFailed is SERVFAIL, REFUSED, a timeout, or a malformed reply: anything
-	// net.Resolver classifies as the server misbehaving. This is what the actor
-	// zone returns today for every query that is not an A for a name matching
-	// the actor regex, and it is the regression these tests exist to catch.
+	// net.Resolver classifies as the server misbehaving. No query into the actor
+	// zone should ever produce it — not a non-A qtype, not a name that fails the
+	// actor regex — and that is the regression these tests exist to catch.
 	DNSFailed
 )
 

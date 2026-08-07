@@ -27,8 +27,11 @@ import (
 )
 
 const (
-	routerNamespace = "ate-system"
-	routerService   = "atenet-router"
+	// RouterNamespace and RouterService locate the atenet router. Exported so
+	// that suites addressing the same Service or its pods do not have to
+	// redeclare them.
+	RouterNamespace = "ate-system"
+	RouterService   = "atenet-router"
 )
 
 // RouterClient sends HTTP requests to actors through the atenet router, the
@@ -53,7 +56,7 @@ func NewRouterClient(ctx context.Context) (*RouterClient, error) {
 		return nil, fmt.Errorf("creating k8s client: %w", err)
 	}
 
-	localPort, stop, err := portforward.ServicePortForward(ctx, config, clientset, routerNamespace, routerService, 80)
+	localPort, stop, err := portforward.ServicePortForward(ctx, config, clientset, RouterNamespace, RouterService, 80)
 	if err != nil {
 		return nil, err
 	}
