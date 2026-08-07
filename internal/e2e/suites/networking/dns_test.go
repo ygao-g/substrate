@@ -61,8 +61,11 @@ func mustDNSClient(t *testing.T, ctx context.Context) *e2e.DNSClient {
 // names, a regex-matched `template ANY ANY` returning NOERROR plus an SOA
 // authority (NODATA) for other qtypes on a well-formed actor name, and a
 // terminal `template ANY ANY` returning NXDOMAIN plus an SOA authority for
-// everything else in the zone. The two subtests below are what keeps that from
-// being collapsed back into a single block.
+// everything else in the zone. The first two carry a bare `fallthrough`, which
+// is load-bearing: the plugin walks past a class or qtype mismatch by itself,
+// but a *regex* miss returns SERVFAIL immediately unless the block declares it.
+// The two subtests below are what keeps that from being collapsed back into a
+// single block.
 //
 // This test is family-agnostic and is expected to run, not skip, on a
 // single-stack cluster.
@@ -109,15 +112,14 @@ func TestActorDNSZone(t *testing.T) {
 
 	t.Run("a name outside the actor pattern is not a server failure", func(t *testing.T) {
 		// A single-label name inside the zone: the zone matches, the qtype
-		// matches, the actor regex does not. Both regex-matched templates
-		// decline it, and with nothing else in the block the query would reach
-		// plugin.NextOrFailure and SERVFAIL; the terminal catch-all `template
-		// ANY ANY` is what makes it NXDOMAIN instead. `fallthrough` is not the
-		// remedy and must not be added: with a nil Next it still ends in
-		// plugin.NextOrFailure, and CoreDNS's template plugin returns
-		// immediately from a non-matching template that carries it rather than
-		// trying the next template in the block, so it would skip the very
-		// blocks doing the work here.
+		// matches, the actor regex does not. This is the case that depends on
+		// both halves of the corefile fix at once. A regex miss is the one kind
+		// of non-match the template plugin does not walk past on its own -- it
+		// consults fall.Through() and, absent a bare `fallthrough`, answers
+		// SERVFAIL without evaluating any later block. So the two regex-matched
+		// templates each need `fallthrough` to decline the name, and the
+		// terminal catch-all `template ANY ANY` is what turns it into NXDOMAIN.
+		// Drop either piece and this subtest goes red.
 		bogus := "not-an-actor." + resources.ActorDNSSuffix
 		_, rcode, err := dns.Lookup(ctx, "ip4", bogus)
 		if rcode == e2e.DNSFailed {
