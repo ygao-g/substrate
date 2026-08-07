@@ -29,8 +29,10 @@ import (
 )
 
 const (
-	dnsNamespace = "ate-system"
-	dnsService   = "dns"
+	// DNSNamespace and DNSService locate the atenet DNS Service. Exported so
+	// suites can assert on the Service object itself, not only query through it.
+	DNSNamespace = "ate-system"
+	DNSService   = "dns"
 	// dnsServicePort is the Service port; the Service exposes 53 twice, once
 	// UDP and once TCP, and the port-forward tunnel is TCP either way.
 	dnsServicePort = 53
@@ -94,7 +96,7 @@ func NewDNSClient(ctx context.Context) (*DNSClient, error) {
 		return nil, fmt.Errorf("creating k8s client: %w", err)
 	}
 
-	localPort, stop, err := portforward.ServicePortForward(ctx, config, clientset, dnsNamespace, dnsService, dnsServicePort)
+	localPort, stop, err := portforward.ServicePortForward(ctx, config, clientset, DNSNamespace, DNSService, dnsServicePort)
 	if err != nil {
 		return nil, err
 	}
