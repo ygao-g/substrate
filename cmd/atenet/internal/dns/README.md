@@ -20,15 +20,36 @@ These are defined in manifests/ate-install/atenet-dns.yaml.
   * Deployment `ate-system:dns`.
   * Service `ate-system:dns` pointing to the Deployment.
 
-ConfigMap `ate-system:dns`:
+`corefile.go` renders the zone below; the controller writes it to
+`--corefile-path` on an emptyDir shared with the CoreDNS container and signals
+a reload.
 
 ```
-# Match any 'A' query for an actor name + atespace pattern under actors.resources.substrate.ate.dev
+# Answer any 'A' query for an actor name + atespace pattern under actors.resources.substrate.ate.dev
     template IN A actors.resources.substrate.ate.dev {
         match "^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.actors\\.resources\\.substrate\\.ate\\.dev\\.$"
         answer "{{ .Name }} 60 IN A <router service address>"
+        fallthrough
+    }
+# NODATA for a well-formed actor name on any other qtype (AAAA, HTTPS, SRV, ...).
+    template ANY ANY actors.resources.substrate.ate.dev {
+        match "^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.actors\\.resources\\.substrate\\.ate\\.dev\\.$"
+        rcode NOERROR
+        authority "{{ .Zone }} 60 IN SOA ns.dns.{{ .Zone }} hostmaster.{{ .Zone }} (1 60 60 60 60)"
+        fallthrough
+    }
+# Terminal catch-all: NXDOMAIN for anything else in the zone.
+    template ANY ANY actors.resources.substrate.ate.dev {
+        rcode NXDOMAIN
+        authority "{{ .Zone }} 60 IN SOA ns.dns.{{ .Zone }} hostmaster.{{ .Zone }} (1 60 60 60 60)"
     }
 ```
+
+The last two blocks keep the zone from ever answering SERVFAIL, which musl libc
+maps to `EAI_AGAIN` — sinking the paired A query with it — and which cannot be
+cached negatively. The `fallthrough` on the first two is load-bearing: the
+template plugin walks past a class or qtype mismatch on its own, but a regex
+miss returns SERVFAIL immediately unless the block declares it.
 
 ## Integration
 
