@@ -60,9 +60,9 @@ func ClusterIPsByFamily(svc *corev1.Service) (v4, v6 string) {
 // RouterClusterIPs returns the atenet-router Service's IPv4 and IPv6
 // ClusterIPs. Either may be "".
 func RouterClusterIPs(ctx context.Context) (v4, v6 string, err error) {
-	svc, err := GetClients().K8s.CoreV1().Services(routerNamespace).Get(ctx, routerService, metav1.GetOptions{})
+	svc, err := GetClients().K8s.CoreV1().Services(RouterNamespace).Get(ctx, RouterService, metav1.GetOptions{})
 	if err != nil {
-		return "", "", fmt.Errorf("getting Service %s/%s: %w", routerNamespace, routerService, err)
+		return "", "", fmt.Errorf("getting Service %s/%s: %w", RouterNamespace, RouterService, err)
 	}
 	v4, v6 = ClusterIPsByFamily(svc)
 	return v4, v6, nil

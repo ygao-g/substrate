@@ -45,13 +45,24 @@ func mustDNSClient(t *testing.T, ctx context.Context) *e2e.DNSClient {
 // router's ClusterIP, and — the part no other test covers — that everything
 // else it is asked returns a *benign* rcode rather than SERVFAIL.
 //
-// The rcode matters more than the missing record. NODATA is what every stub
-// resolver expects for "this name has no address in this family"; SERVFAIL is a
-// transport fault, and resolvers disagree about it. musl treats a SERVFAIL on
-// either parallel query as a hard failure, so an Alpine-based client cannot
-// resolve an actor name at all; glibc retries and pays the resolver timeout; and
-// unlike NODATA it cannot be negatively cached, so every request pays again.
-// Go's resolver masks it, which is why nothing in this repo has noticed.
+// The rcode matters more than the missing record. NODATA and NXDOMAIN are what
+// every stub resolver expects for "there is no address here"; SERVFAIL is a
+// transport fault, and resolvers disagree about it. musl maps it to EAI_AGAIN
+// and abandons the whole getaddrinfo — and because musl issues the A and AAAA
+// queries in parallel, one SERVFAIL sinks the other with it, so an Alpine-based
+// client cannot resolve an actor name at all, not even its A record. glibc
+// retries and pays the resolver timeout instead. And unlike NODATA and
+// NXDOMAIN, SERVFAIL carries no SOA to cache negatively against, so every
+// request re-pays that cost. Go's resolver masks all of this, which is why no
+// test in this repo caught it before these.
+//
+// The zone gets the rcodes right with three `template` blocks in
+// cmd/atenet/internal/dns/corefile.go: the `IN A` block that answers actor
+// names, a regex-matched `template ANY ANY` returning NOERROR plus an SOA
+// authority (NODATA) for other qtypes on a well-formed actor name, and a
+// terminal `template ANY ANY` returning NXDOMAIN plus an SOA authority for
+// everything else in the zone. The two subtests below are what keeps that from
+// being collapsed back into a single block.
 //
 // This test is family-agnostic and is expected to run, not skip, on a
 // single-stack cluster.
@@ -82,22 +93,31 @@ func TestActorDNSZone(t *testing.T) {
 	})
 
 	t.Run("AAAA is not a server failure", func(t *testing.T) {
-		// On a single-stack cluster the right answer is NODATA. This subtest
-		// fails today, because the zone's only template is `template IN A`: a
-		// qtype mismatch falls through to a plugin chain with nothing after it,
-		// and plugin.NextOrFailure with a nil Next returns SERVFAIL.
+		// The name is well-formed, so NODATA is the answer owed here on a
+		// single-stack cluster: it exists, it just has no address in this
+		// family. That needs a block that matches the qtype. Were the `IN A`
+		// template the zone's only one, a qtype mismatch would fall through to
+		// a plugin chain with nothing after it, and plugin.NextOrFailure with a
+		// nil Next returns SERVFAIL.
 		_, rcode, err := dns.Lookup(ctx, "ip6", name)
 		if rcode == e2e.DNSFailed {
-			t.Fatalf("AAAA %s: %v (%v); want NODATA. Every non-A qtype in this zone "+
-				"SERVFAILs, which breaks musl-based clients on IPv4 clusters too", name, rcode, err)
+			t.Fatalf("AAAA %s: %v (%v); want NODATA. A SERVFAIL on a non-A qtype in this "+
+				"zone breaks musl-based clients on IPv4-only clusters too, because it takes "+
+				"their parallel A query down with it", name, rcode, err)
 		}
 	})
 
 	t.Run("a name outside the actor pattern is not a server failure", func(t *testing.T) {
 		// A single-label name inside the zone: the zone matches, the qtype
-		// matches, the actor regex does not. Without `fallthrough` on the
-		// template the plugin returns SERVFAIL rather than NXDOMAIN. Also fails
-		// today, and also on IPv4.
+		// matches, the actor regex does not. Both regex-matched templates
+		// decline it, and with nothing else in the block the query would reach
+		// plugin.NextOrFailure and SERVFAIL; the terminal catch-all `template
+		// ANY ANY` is what makes it NXDOMAIN instead. `fallthrough` is not the
+		// remedy and must not be added: with a nil Next it still ends in
+		// plugin.NextOrFailure, and CoreDNS's template plugin returns
+		// immediately from a non-matching template that carries it rather than
+		// trying the next template in the block, so it would skip the very
+		// blocks doing the work here.
 		bogus := "not-an-actor." + resources.ActorDNSSuffix
 		_, rcode, err := dns.Lookup(ctx, "ip4", bogus)
 		if rcode == e2e.DNSFailed {

@@ -36,11 +36,10 @@ import (
 )
 
 const (
-	routerNamespace = "ate-system"
-	routerAppLabel  = "app=atenet-router"
+	routerAppLabel = "app=atenet-router"
 	// envoyAdminPort is the admin listener in the router pod's envoy container.
-	// It is bound on 0.0.0.0 and not published by the Service, so the pod proxy
-	// subresource is the only way at it from a test.
+	// It is not published by the Service, so the pod proxy subresource is the
+	// only way at it from a test.
 	envoyAdminPort = 9901
 
 	// Listener names from cmd/atenet/internal/router/xds.go. They cannot be
@@ -93,7 +92,7 @@ func TestRouterListenerAddresses(t *testing.T) {
 	pod := mustRouterPodName(t, ctx)
 
 	raw, err := clients.K8s.CoreV1().RESTClient().Get().
-		Namespace(routerNamespace).
+		Namespace(e2e.RouterNamespace).
 		Resource("pods").
 		Name(pod+":"+strconv.Itoa(envoyAdminPort)).
 		SubResource("proxy").
@@ -102,13 +101,12 @@ func TestRouterListenerAddresses(t *testing.T) {
 		DoRaw(ctx)
 	if err != nil {
 		// The pods/proxy subresource reaches the pod on its primary-family
-		// PodIP. Envoy's admin listener is bound on 0.0.0.0
-		// (manifests/ate-install/atenet-router.yaml), so on a v6-primary
-		// cluster this read fails with a connection error before it can assert
-		// anything — that is hop 6, not a fault in this test.
-		t.Fatalf("reading Envoy admin /listeners from %s/%s: %v "+
-			"(on an IPv6-primary cluster, check that the admin listener is not still bound to 0.0.0.0)",
-			routerNamespace, pod, err)
+		// PodIP, so this hop used to be family-sensitive. It no longer is: the
+		// admin listener binds "::" with ipv4_compat
+		// (manifests/ate-install/atenet-router.yaml), which accepts connections
+		// from either family. A failure here means the admin interface is not
+		// answering — the container is not up, or the proxy path is blocked.
+		t.Fatalf("reading Envoy admin /listeners from %s/%s: %v", e2e.RouterNamespace, pod, err)
 	}
 
 	var listeners envoyListeners
@@ -206,7 +204,7 @@ func TestActorIngressPerFamily(t *testing.T) {
 
 func mustRouterPodName(t *testing.T, ctx context.Context) string {
 	t.Helper()
-	pods, err := e2e.GetClients().K8s.CoreV1().Pods(routerNamespace).List(ctx, metav1.ListOptions{
+	pods, err := e2e.GetClients().K8s.CoreV1().Pods(e2e.RouterNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: routerAppLabel,
 	})
 	if err != nil {
@@ -217,7 +215,7 @@ func mustRouterPodName(t *testing.T, ctx context.Context) string {
 			return pods.Items[i].Name
 		}
 	}
-	t.Fatalf("no ready atenet-router pod in %s", routerNamespace)
+	t.Fatalf("no ready atenet-router pod in %s", e2e.RouterNamespace)
 	return ""
 }
 
