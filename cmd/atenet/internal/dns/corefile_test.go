@@ -122,9 +122,15 @@ func TestMakeCoreFileNegativeAnswers(t *testing.T) {
 		t.Errorf("makeCoreFile() has %d SOA authority directives, want 2 (one per negative answer template)\nGot:\n%s", soas, got)
 	}
 
-	// A fallthrough would land in plugin.NextOrFailure with a nil Next and
-	// SERVFAIL anyway, and would stop later templates from being evaluated.
-	if strings.Contains(got, "fallthrough") {
-		t.Errorf("makeCoreFile() contains a fallthrough directive, which would reintroduce SERVFAIL\nGot:\n%s", got)
+	// Every block with a "match" needs a "fallthrough": on a regex miss the
+	// plugin consults fall.Through(), and without it returns SERVFAIL on the
+	// spot rather than evaluating the blocks that follow. Two match directives
+	// therefore mean exactly two fallthroughs, and the catch-all must not have
+	// one -- it is what terminates the chain.
+	if fts := strings.Count(got, "fallthrough"); fts != 2 {
+		t.Errorf("makeCoreFile() has %d fallthrough directives, want 2 (one per template carrying a match)\nGot:\n%s", fts, got)
+	}
+	if lastFallthrough := strings.LastIndex(got, "fallthrough"); lastFallthrough > nxdomain {
+		t.Errorf("makeCoreFile() has a fallthrough at offset %d inside the NXDOMAIN catch-all at offset %d, want the catch-all to be terminal\nGot:\n%s", lastFallthrough, nxdomain, got)
 	}
 }
