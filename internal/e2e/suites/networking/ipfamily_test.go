@@ -42,10 +42,10 @@ import (
 // ipFamilyPolicy is what is really under test. Absent it, the API server
 // defaults a Service to SingleStack and allocates an IPv4 ClusterIP only, which
 // makes every downstream IPv6 change -- AAAA records, dual-stack Envoy
-// listeners, a v6-capable control-plane bind -- inert. The manifest side is
-// pinned statically by internal/installmanifests; this is the live half, and it
-// also catches the case where the manifest is right but the cluster refused the
-// second family.
+// listeners, a v6-capable control-plane bind -- inert. Nothing pins the
+// manifests statically, so this is the only check that the policy is set at
+// all, and it additionally catches the case where the manifest is right but the
+// cluster refused the second family.
 func TestDataPathServicesAreDualStack(t *testing.T) {
 	ctx := context.Background()
 
