@@ -22,6 +22,12 @@ The e2e tests assume you have a cluster set up with Agent Substrate installed,
 for example via `hack/install-ate.sh --deploy-ate-system` or
 `hack/install-ate-kind.sh --deploy-ate-system`.
 
+`hack/create-kind-cluster.sh` builds an IPv4 cluster by default. Set
+`KIND_IP_FAMILY=dual` (or `ipv6`) to give pods and Services a second address
+family; `hack/create-kind-cluster.sh -h` lists that and the subnet overrides.
+CI runs one dual-stack e2e cell alongside the IPv4 ones. `ipv6` is not wired
+into CI and does not pass yet — the actor interior network is still IPv4-only.
+
 ## After a failure
 
 A suite deletes the namespaces it created only when it passed. A failed run

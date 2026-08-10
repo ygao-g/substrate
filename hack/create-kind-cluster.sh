@@ -28,20 +28,27 @@ if [ "$#" -gt 0 ]; then
       echo "Creates the kind cluster '${KIND_CLUSTER_NAME}' and a local registry container on port ${reg_port}."
       echo
       echo "Configured through the environment:"
-      echo "  KIND_CLUSTER_NAME  Name of the cluster to create (default: kind)."
-      echo "  KIND_IP_FAMILY     Address families for pods and Services: ipv4, ipv6 or dual (default: ipv4)."
+      echo "  KIND_CLUSTER_NAME    Name of the cluster to create (default: kind)."
+      echo "  KIND_IP_FAMILY       Address families for pods and Services: ipv4, ipv6 or dual (default: ipv4)."
+      echo "  KIND_POD_SUBNET      Override the pod CIDR(s) KIND_IP_FAMILY selects."
+      echo "  KIND_SERVICE_SUBNET  Override the Service CIDR(s) KIND_IP_FAMILY selects."
       exit 0
       ;;
   esac
 fi
 
 # Address families the cluster's pods and Services get: ipv4 (the default, and
-# what every CI job but the dual-stack one runs), dual, or ipv6. "dual" makes
-# IPv4 the primary family, so a Service with no ipFamilyPolicy still gets a v4
-# ClusterIP and a pod's status.podIP is still v4 — i.e. it is additive and every
-# IPv4 path keeps working. "ipv6" makes v6 primary and is the setting that
-# actually exercises the single-family code paths (pod.Status.PodIP, PodIPs[0],
-# the CoreDNS "IN A" answer).
+# what every CI job but the dual-stack one runs), dual, or ipv6.
+#
+# "dual" makes IPv4 the primary family, so a Service with no ipFamilyPolicy
+# still gets a v4 ClusterIP and a pod's status.podIP is still v4 — it is
+# additive, and what it catches is code that breaks once a *second* family
+# exists (PodIPs[0] taken as "the" address, host:port split without bracket
+# handling). "ipv6" makes v6 primary and is the setting that exercises the
+# single-family paths, but it does not pass yet: the actor interior network is
+# still IPv4-only (169.254.17.0/30), so it stays a manual setting until the
+# ateomnet dual-stack work lands. CI runs "dual" because it is the strongest
+# cell that passes today, not because it is the interesting one.
 KIND_IP_FAMILY="${KIND_IP_FAMILY:-ipv4}"
 case "${KIND_IP_FAMILY}" in
   ipv4)
@@ -69,12 +76,16 @@ case "${KIND_IP_FAMILY}" in
     exit 1
     ;;
 esac
+# The ULA prefixes above are arbitrary; override them if fd00:10:244::/56 or
+# fd00:10:96::/112 collide with something already on the host.
+pod_subnet="${KIND_POD_SUBNET:-${pod_subnet}}"
+service_subnet="${KIND_SERVICE_SUBNET:-${service_subnet}}"
 
 mkdir -p "${ROOT}/bin"
 
 # 1. Create registry container unless it already exists
 echo "Setting up local docker registry '${reg_name}' on port ${reg_port}..."
-if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" = "true" ]; then
+if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" == "true" ]; then
   if ! docker port "${reg_name}" | grep -q "${reg_port}"; then
     echo "Registry exists but is not mapped to port ${reg_port}. Recreating..."
     docker rm -f "${reg_name}"
@@ -82,16 +93,14 @@ if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true
 fi
 
 if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" != "true" ]; then
-  # Both loopback families are published, so `ko` pushing to localhost:5001 from
-  # the host works whichever family its resolver picks. This already covers the
-  # host side for an IPv6 or dual-stack cluster; the *node* side is separate and
-  # goes over the "kind" Docker network below (step 4), where Docker's embedded
-  # DNS answers "kind-registry" with whatever families that network has.
+  # The v4 loopback publish is enough for every family: it only serves `ko`
+  # pushing to localhost:5001 from the host. The *node* side never goes through
+  # loopback — it resolves "kind-registry" on the "kind" Docker network (step 4),
+  # where Docker's embedded DNS answers with whatever families that network has.
   docker run \
     -d --restart=always \
     --label created-by=agent-substrate \
     -p "127.0.0.1:${reg_port}:5000" \
-    -p "[::1]:${reg_port}:5000" \
     --network bridge --name "${reg_name}" \
     registry:3
 fi
@@ -143,23 +152,26 @@ runtimeConfig:
   "certificates.k8s.io/v1beta1": "true"
 EOF
 
+echo "Deleting existing kind cluster '${KIND_CLUSTER_NAME}' if it exists..."
+"${ROOT}"/hack/kind.sh delete cluster --name "${KIND_CLUSTER_NAME}" || true
+
 # An IPv6 or dual-stack cluster needs the "kind" Docker network to have IPv6.
-# kind creates it that way, but a network left over from an older kind (or from
-# a daemon that had IPv6 off) is reused as-is and the nodes then come up with no
-# v6 address at all — which surfaces much later as pods stuck at ContainerCreating.
-if [ "${KIND_IP_FAMILY}" != "ipv4" ]; then
-  net_ipv6="$(docker network inspect kind --format '{{.EnableIPv6}}' 2>/dev/null || echo "absent")"
-  if [ "${net_ipv6}" = "false" ]; then
-    echo "error: the 'kind' Docker network exists without IPv6 enabled." >&2
-    echo "       Detach everything from it and remove it, then re-run:" >&2
-    echo "         docker network disconnect kind ${reg_name} && docker network rm kind" >&2
-    echo "       Also confirm the daemon has IPv6 enabled (\"ip6tables\": true)." >&2
+# kind creates it that way, but a network left over from an IPv4 run (or from a
+# daemon that had IPv6 off) is reused as-is and the nodes then come up with no
+# v6 address at all — which surfaces much later as pods stuck at
+# ContainerCreating. The cluster is gone by this point, so the only thing still
+# holding the network is our own registry: detach it and drop the network, and
+# kind recreates it with IPv6 below.
+if [ "${KIND_IP_FAMILY}" != "ipv4" ] &&
+   [ "$(docker network inspect kind --format '{{.EnableIPv6}}' 2>/dev/null || echo absent)" == "false" ]; then
+  echo "The 'kind' Docker network exists without IPv6. Recreating it..."
+  docker network disconnect kind "${reg_name}" 2>/dev/null || true
+  if ! docker network rm kind; then
+    echo "error: could not remove the IPv4-only 'kind' network. Still attached:" >&2
+    docker network inspect kind --format '{{range .Containers}}{{.Name}} {{end}}' >&2 || true
     exit 1
   fi
 fi
-
-echo "Deleting existing kind cluster '${KIND_CLUSTER_NAME}' if it exists..."
-"${ROOT}"/hack/kind.sh delete cluster --name "${KIND_CLUSTER_NAME}" || true
 
 echo "Creating kind cluster '${KIND_CLUSTER_NAME}'..."
 "${ROOT}"/hack/kind.sh create cluster --name "${KIND_CLUSTER_NAME}" --config "${ROOT}/bin/kind-config.yaml"
@@ -171,15 +183,14 @@ for node in $("${ROOT}"/hack/kind.sh get nodes --name "${KIND_CLUSTER_NAME}"); d
   # carry IPv4 on the Docker bridge) and it keeps the IPv4 path byte-identical.
   docker exec "${node}" sysctl net.ipv4.conf.all.proxy_arp=1
   if [ "${KIND_IP_FAMILY}" != "ipv4" ]; then
-    # proxy_ndp is the IPv6 counterpart, but only in name: proxy_arp answers for
-    # every address the node has a route to, whereas proxy_ndp answers only for
-    # addresses explicitly added with `ip -6 neigh add proxy <addr> dev <dev>`.
-    # This flag is therefore necessary and not sufficient. It is also inert
-    # today: the actor interior network is IPv4-only (169.254.17.0/30), so
-    # nothing asks a node to proxy a v6 neighbour until the ateomnet dual-stack
-    # work lands, which is when the per-address entries have to be added too.
     docker exec "${node}" sysctl net.ipv6.conf.all.forwarding=1
-    docker exec "${node}" sysctl net.ipv6.conf.all.proxy_ndp=1
+    # No proxy_ndp counterpart here on purpose. It is not equivalent to
+    # proxy_arp: proxy_arp answers for every address the node has a route to,
+    # whereas proxy_ndp answers only for addresses explicitly added with
+    # `ip -6 neigh add proxy <addr> dev <dev>`. Setting it alone would do
+    # nothing, and nothing needs it while the actor interior network is
+    # IPv4-only (169.254.17.0/30). The ateomnet dual-stack work adds the flag
+    # and the per-address entries together.
   fi
 done
 

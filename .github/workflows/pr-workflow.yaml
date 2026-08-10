@@ -59,6 +59,12 @@ jobs:
         # disk-constrained runner. "dual" is not a value of the ip-family axis
         # above, so this include creates a third combination rather than being
         # merged into the cert/ipv4 one.
+        #
+        # "dual" and not "ipv6" because ipv6 does not pass yet: the actor
+        # interior network is still IPv4-only (169.254.17.0/30). Dual-stack is
+        # the strongest cell that passes today — it catches code that assumes a
+        # pod or Service has exactly one address, not code that assumes v4.
+        # Move this cell to ipv6 once the ateomnet dual-stack work lands.
         include:
         - ateapi-client-auth: cert
           ip-family: dual
@@ -96,11 +102,16 @@ jobs:
         sudo udevadm control --reload-rules
         sudo udevadm trigger --name-match=kvm
     - name: Enable IPv6 in the Docker daemon
-      # ubuntu-latest ships dockerd with IPv6 off, so kind would create its
-      # network v4-only, the nodes would come up with no v6 address, and the
-      # failure would only surface later as pods stuck at ContainerCreating.
-      # Merge the two keys into whatever daemon.json the runner image ships
-      # rather than replacing the file.
+      # "ip6tables" is the load-bearing key: without it dockerd will not set up
+      # v6 NAT/filtering for the user-defined "kind" network, kind's --ipv6
+      # network comes up unusable, and the failure only surfaces later as pods
+      # stuck at ContainerCreating. "ipv6" governs the *default* bridge, which
+      # kind does not use; it is set only because kind's own docs prescribe the
+      # pair. Note we deliberately omit "fixed-cidr-v6" — Docker Engine >= 27
+      # auto-allocates a ULA for the default bridge, and older daemons (which
+      # would refuse to start without it) predate this runner image.
+      # Merge the keys into whatever daemon.json the runner ships rather than
+      # replacing the file.
       if: matrix.ip-family != 'ipv4'
       run: |
         sudo mkdir -p /etc/docker
