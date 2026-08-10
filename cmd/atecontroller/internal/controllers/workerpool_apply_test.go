@@ -15,6 +15,7 @@
 package controllers
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -318,6 +319,34 @@ func TestTerminationGracePeriodSeconds(t *testing.T) {
 	}
 	if *ps.TerminationGracePeriodSeconds != 3600 {
 		t.Errorf("TerminationGracePeriodSeconds = %d, want 3600", *ps.TerminationGracePeriodSeconds)
+	}
+}
+
+// TestAtunnelListenAddressesByFamily pins which of the two atunnel listeners may
+// name an address family: ingress must not, egress must stay IPv4. They move
+// independently, so assert them independently.
+func TestAtunnelListenAddressesByFamily(t *testing.T) {
+	wp := testWorkerPoolApplyConfig(nil)
+	args := buildDeploymentApplyConfig(wp, ateomOTelSettings{}).Spec.Template.Spec.Containers[0].Args
+
+	find := func(flag string) string {
+		t.Helper()
+		for _, a := range args {
+			if strings.HasPrefix(a, flag+"=") {
+				return strings.TrimPrefix(a, flag+"=")
+			}
+		}
+		t.Fatalf("ateom args %v have no %s", args, flag)
+		return ""
+	}
+
+	if got := find("--atunnel-listen-address"); got != ":443" {
+		t.Errorf("--atunnel-listen-address = %q, want %q; naming a family binds only that one, "+
+			"and the worker's PodIP is IPv6 on an IPv6-only cluster", got, ":443")
+	}
+	if got := find("--atunnel-egress-listen-address"); got != "0.0.0.0:15001" {
+		t.Errorf("--atunnel-egress-listen-address = %q, want %q; this listener is IPv4-only "+
+			"deliberately", got, "0.0.0.0:15001")
 	}
 }
 
@@ -734,7 +763,7 @@ func expectedDeploymentApplyConfig(mutatePodSpec func(*corev1ac.PodSpecApplyConf
 			WithImage(wp.Spec.AteomImage).
 			WithArgs(
 				"--pod-uid=$(POD_UID)",
-				"--atunnel-listen-address=0.0.0.0:443",
+				"--atunnel-listen-address=:443",
 				"--atunnel-credential-bundle="+atunnelIdentityMountPath+"/credential-bundle.pem",
 				"--atunnel-trust-bundle="+atunnelIdentityMountPath+"/trust-bundle.pem",
 				"--atunnel-egress-listen-address=0.0.0.0:15001",

@@ -62,10 +62,15 @@ var (
 	showVersion  = flag.Bool("version", false, "Print version and exit.")
 	logLevelFlag = flag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
 
-	atunnelListenAddress       = flag.String("atunnel-listen-address", "0.0.0.0:443", "Address for actor ingress HTTPS")
-	workerCredentialBundle     = flag.String("atunnel-credential-bundle", "/run/podidentity.podcert.ate.dev/credential-bundle.pem", "Worker Pod credential bundle used by atunnel for inbound serving and outbound mTLS")
-	podIdentityTrustBundle     = flag.String("atunnel-trust-bundle", "/run/podidentity.podcert.ate.dev/trust-bundle.pem", "Pod identity trust bundle used for router clients and the node-local atelet")
-	atunnelClientIdentity      = flag.String("atunnel-client-identity", "spiffe://cluster.local/ns/ate-system/sa/atenet-router", "SPIFFE identity allowed to call actor ingress HTTPS")
+	// Ingress must not name a family: the router dials it at the worker's PodIP,
+	// which is IPv6 on an IPv6-only cluster. ":443" binds "::" and serves both.
+	atunnelListenAddress   = flag.String("atunnel-listen-address", ":443", "Address for actor ingress HTTPS")
+	workerCredentialBundle = flag.String("atunnel-credential-bundle", "/run/podidentity.podcert.ate.dev/credential-bundle.pem", "Worker Pod credential bundle used by atunnel for inbound serving and outbound mTLS")
+	podIdentityTrustBundle = flag.String("atunnel-trust-bundle", "/run/podidentity.podcert.ate.dev/trust-bundle.pem", "Pod identity trust bundle used for router clients and the node-local atelet")
+	atunnelClientIdentity  = flag.String("atunnel-client-identity", "spiffe://cluster.local/ns/ate-system/sa/atenet-router", "SPIFFE identity allowed to call actor ingress HTTPS")
+	// Egress is IPv4-only on purpose: it accepts only connections REDIRECTed out
+	// of the actor's IPv4-only interior veth, and TCPOriginalDestination reads
+	// them back with the IPv4 SOL_IP/SO_ORIGINAL_DST.
 	atunnelEgressListenAddress = flag.String("atunnel-egress-listen-address", "0.0.0.0:15001", "Address for transparently intercepted actor egress TCP")
 	egressGatewayTrustBundle   = flag.String("atunnel-egress-trust-bundle", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "Service DNS trust bundle for the remote egress gateway")
 )
