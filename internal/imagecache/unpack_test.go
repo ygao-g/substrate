@@ -17,7 +17,6 @@ package imagecache
 import (
 	"archive/tar"
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -82,7 +81,7 @@ func unpackInto(t *testing.T, dir string, tarBytes []byte) (*whiteoutSet, error)
 		t.Fatalf("os.OpenRoot(%q): %v", dir, err)
 	}
 	defer root.Close()
-	return unpackLayer(context.Background(), bytes.NewReader(tarBytes), root)
+	return unpackLayer(bytes.NewReader(tarBytes), root)
 }
 
 func runUnpack(t *testing.T, entries []tarEntry) (string, *whiteoutSet, error) {
@@ -576,6 +575,10 @@ func TestUnpackLayer_RejectSpecialFiles(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "unhandled tar entry typeflag") {
 				t.Errorf("error = %q, want it to mention 'unhandled tar entry typeflag'", err.Error())
+			}
+			// Nothing is logged, so the error has to name the entry itself.
+			if !strings.Contains(err.Error(), "weird") {
+				t.Errorf("error = %q, want it to name the offending entry %q", err.Error(), "weird")
 			}
 		})
 	}

@@ -16,12 +16,10 @@ package imagecache
 
 import (
 	"archive/tar"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -97,7 +95,10 @@ func validateTarName(name string) (cleaned string, skip bool, err error) {
 // are overlayfs's job now; the handling here only needs to cope with
 // duplicate entries within a single layer (real ko images repeat directory
 // entries).
-func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteoutSet, error) {
+//
+// No ctx: the layer stream is already ctx-bound (remote.WithContext), so an
+// aborted pull fails the read here rather than needing a check per entry.
+func unpackLayer(tarData io.Reader, root *os.Root) (*whiteoutSet, error) {
 	wh := &whiteoutSet{Version: 1}
 
 	// Directories are created owner-writable during extraction (so their children
@@ -262,9 +263,9 @@ func unpackLayer(ctx context.Context, tarData io.Reader, root *os.Root) (*whiteo
 			}
 
 		default:
-			tfStr := string([]byte{hdr.Typeflag})
-			slog.ErrorContext(ctx, "Unhandled tar entry typeflag", slog.String("typeflag", tfStr), slog.Any("hdr", hdr))
-			return nil, fmt.Errorf("unhandled tar entry typeflag %q", tfStr)
+			// Not logged: pull wraps and surfaces this error, so a log line
+			// here only double-reports it (onto test stderr, at that).
+			return nil, fmt.Errorf("unhandled tar entry typeflag %q for entry %q", string([]byte{hdr.Typeflag}), name)
 		}
 	}
 

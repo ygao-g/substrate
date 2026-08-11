@@ -570,7 +570,7 @@ func (s *Store) unpackLayerToPool(ctx context.Context, diffID v1.Hash, layer v1.
 	// The uncompressed tar stream is the recorded size: an optimistic
 	// estimate (tar framing vs. block rounding), cheap to capture here.
 	cr := &countingReader{r: rc}
-	wh, err := unpackLayer(ctx, cr, root)
+	wh, err := unpackLayer(cr, root)
 	if err != nil {
 		return err
 	}
