@@ -249,12 +249,16 @@ if [[ "${IP_FAMILY}" == "ipv6" ]]; then
     --timeout=120s
 
   # Probe from a pod, never from the node: the node is dual-stack and resolves
-  # both names either way, so a node-side check proves nothing.
+  # both names either way, so a node-side check proves nothing. The registry leg
+  # fetches rather than resolves, because the hosts entry above is AAAA-only and
+  # `nslookup kind-registry` fails on its A query even though every real client
+  # (getaddrinfo, and so containerd and atelet) is satisfied by the AAAA.
   echo "Verifying DNS from a pod..."
   if ! kubectl --context="${KUBECTL_CONTEXT}" run "coredns-probe-$$" \
     --rm --attach --quiet --restart=Never --image=busybox:1.36 --command -- \
-    sh -c "nslookup storage.googleapis.com && nslookup ${reg_name}"; then
-    echo "error: a pod cannot resolve both an external name and '${reg_name}'" >&2
+    sh -c "nslookup storage.googleapis.com >/dev/null &&
+           wget -q -T10 -O/dev/null http://${reg_name}:5000/v2/"; then
+    echo "error: a pod cannot resolve an external name and reach '${reg_name}'" >&2
     echo "       IPV6_DNS_UPSTREAM is '${IPV6_DNS_UPSTREAM}'; set it to a reachable resolver" >&2
     exit 1
   fi
