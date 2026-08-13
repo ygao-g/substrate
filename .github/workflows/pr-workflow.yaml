@@ -44,6 +44,45 @@ jobs:
       run: hack/run-root-tests.sh -race -v
     - name: verify
       run: hack/verify-all.sh
+  # IPv6-only, and deliberately not a cell of the e2e matrix below: it just
+  # brings up a bare cluster, with no ate install, no demos and no e2e suites.
+  # That is a few minutes rather than the matrix job's full run, and it is the
+  # only place v6 is the primary family — the matrix's dual-stack cell keeps
+  # IPv4 primary, so it never reaches the single-family paths. Grow this into a
+  # full cell once the dataplane actually supports v6.
+  kind-ipv6-networking:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      with:
+        go-version-file: 'go.mod'
+    - name: Enable IPv6 in the Docker daemon
+      # ubuntu-latest ships dockerd with IPv6 off, so kind would create its
+      # network v4-only and create-kind-cluster.sh would reject the cluster.
+      # Merge the two keys into whatever daemon.json the runner image ships
+      # rather than replacing the file.
+      run: |
+        sudo mkdir -p /etc/docker
+        [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
+        sudo cat /etc/docker/daemon.json \
+          | jq '. + {"ipv6": true, "ip6tables": true}' \
+          | sudo tee /etc/docker/daemon.json.new >/dev/null
+        sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json
+        cat /etc/docker/daemon.json
+        sudo systemctl restart docker
+        docker network inspect bridge --format 'bridge EnableIPv6={{.EnableIPv6}}'
+    - name: Create cluster
+      env:
+        IP_FAMILY: ipv6
+      run: hack/create-kind-cluster.sh
+    - name: Dump diagnostics on failure
+      if: failure()
+      run: |
+        kubectl --context kind-kind get nodes,pods -A -o wide || true
+        docker network inspect kind || true
   # One kind cluster exercises BOTH runtimes. Free x86-64 ubuntu-latest runners
   # expose /dev/kvm (with a udev rule), so create-kind-cluster.sh mounts it and the
   # micro-VM (kata + cloud-hypervisor) sandbox class works alongside gVisor.
@@ -53,7 +92,16 @@ jobs:
       fail-fast: false
       matrix:
         ateapi-client-auth: [cert, token]
-    name: e2e-test (${{ matrix.ateapi-client-auth }})
+        ip-family: [ipv4]
+        # One extra cell, not a second axis: a 2x2 cross product would double a
+        # job that already builds two demos and runs two e2e suites on a
+        # disk-constrained runner. "dual" is not a value of the ip-family axis
+        # above, so this include creates a third combination rather than being
+        # merged into the cert/ipv4 one.
+        include:
+        - ateapi-client-auth: cert
+          ip-family: dual
+    name: e2e-test (${{ matrix.ateapi-client-auth }}, ${{ matrix.ip-family }})
     steps:
     - name: Checkout
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -86,7 +134,25 @@ jobs:
           | sudo tee /etc/udev/rules.d/99-kvm4all.rules
         sudo udevadm control --reload-rules
         sudo udevadm trigger --name-match=kvm
+    - name: Enable IPv6 in the Docker daemon
+      # ubuntu-latest ships dockerd with IPv6 off, so kind would create its
+      # network v4-only and create-kind-cluster.sh would reject the cluster.
+      # Merge the two keys into whatever daemon.json the runner image ships
+      # rather than replacing the file.
+      if: matrix.ip-family != 'ipv4'
+      run: |
+        sudo mkdir -p /etc/docker
+        [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
+        sudo cat /etc/docker/daemon.json \
+          | jq '. + {"ipv6": true, "ip6tables": true}' \
+          | sudo tee /etc/docker/daemon.json.new >/dev/null
+        sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json
+        cat /etc/docker/daemon.json
+        sudo systemctl restart docker
+        docker network inspect bridge --format 'bridge EnableIPv6={{.EnableIPv6}}'
     - name: Create cluster
+      env:
+        IP_FAMILY: ${{ matrix.ip-family }}
       run: hack/create-kind-cluster.sh
     - name: Install Agent Substrate
       run: hack/install-ate-kind.sh --deploy-ate-system --ateapi-client-auth=${{ matrix.ateapi-client-auth }}
