@@ -528,7 +528,7 @@ func main() {
 	mux.HandleFunc("/api/task-status", handleTaskStatus)
 	mux.HandleFunc("/api/give-task", handleGiveTask)
 
-	addr := "0.0.0.0:" + port
+	addr := ":" + port
 	log.Printf("[ui] serving %s (namespace=%s ateapi=%s logs=%t)", addr, namespace, ateapiAddr, kubeClient != nil)
 
 	srv := &http.Server{
