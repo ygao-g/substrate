@@ -77,9 +77,11 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool, otel ateomOTelSettin
 		WithImage(wp.Spec.AteomImage).
 		WithArgs(
 			"--pod-uid=$(POD_UID)",
-			"--atunnel-listen-address=0.0.0.0:443",
+			// Ingress is family-agnostic deliberately. See the flag definitions in cmd/ateom-gvisor/main.go.
+			"--atunnel-listen-address=:443",
 			"--atunnel-credential-bundle="+atunnelIdentityMountPath+"/credential-bundle.pem",
 			"--atunnel-trust-bundle="+atunnelIdentityMountPath+"/trust-bundle.pem",
+			// Egress is IPv4-only deliberately. See the flag definitions in cmd/ateom-gvisor/main.go.
 			"--atunnel-egress-listen-address=0.0.0.0:15001",
 			"--atunnel-egress-trust-bundle="+atunnelEgressTrustMountPath+"/trust-bundle.pem",
 		).
