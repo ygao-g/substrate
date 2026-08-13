@@ -76,7 +76,13 @@ if [[ -z "${NODE}" ]]; then
   echo "error: no nodes found for kind cluster '${KIND_CLUSTER_NAME}'" >&2
   exit 1
 fi
-ENDPOINT="http://$(run_kubectl get svc rustfs -o jsonpath='{.spec.clusterIP}'):9000"
+RUSTFS_IP="$(run_kubectl get svc rustfs -o jsonpath='{.spec.clusterIP}')"
+# On an IPv6-only cluster the ClusterIP is a v6 literal, which needs brackets to
+# be a URL at all.
+if [[ "${RUSTFS_IP}" == *:* ]]; then
+  RUSTFS_IP="[${RUSTFS_IP}]"
+fi
+ENDPOINT="http://${RUSTFS_IP}:9000"
 
 echo ">> Uploading assets to s3://${BUCKET}/kata-assets/ via ${ENDPOINT} (netns of ${NODE})..."
 aws_cli() {
