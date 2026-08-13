@@ -383,6 +383,8 @@ metadata:
   namespace: ate-system
 spec:
   type: ClusterIP
+  # Prefer, not Require: Require fails Service creation on a single-stack cluster.
+  ipFamilyPolicy: PreferDualStack
   selector:
     app: atenet-egress
   ports:
