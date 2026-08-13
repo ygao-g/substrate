@@ -92,32 +92,42 @@ func PodIPsByFamily(pod *corev1.Pod) (v4, v6 string) {
 	return splitByFamily(ips)
 }
 
-// ClusterIsDualStack reports whether the cluster allocates both address
-// families, read from the nodes' pod CIDRs rather than from any Service.
+// ClusterFamilies reports which address families the cluster allocates, read
+// from the nodes' pod CIDRs rather than from any Service.
 //
 // The distinction is the whole point. A Service with no ipFamilyPolicy is
 // SingleStack and carries one ClusterIP even on a dual-stack cluster, so gating
-// a dual-stack assertion on the families of the Service under test makes that
-// assertion vacuous in exactly the case it exists to catch: the check skips,
-// the suite is green, and the Service is IPv4-only. kube-controller-manager
-// assigns one PodCIDR per configured family, so a node carrying two is the
-// cluster-level signal, independent of every Service spec.
+// an address-family assertion on the families of the Service under test makes
+// that assertion vacuous in exactly the case it exists to catch: the check
+// skips, the suite is green, and the Service is IPv4-only.
+// kube-controller-manager assigns one PodCIDR per configured family, so the
+// node CIDRs are the cluster-level signal, independent of every Service spec.
 //
-// Returns an error, not false, when no node reports a PodCIDR: a check that
-// cannot tell which families the cluster has must fail loudly rather than skip.
-// Clusters with external IPAM leave the field empty, but the kind path this
-// suite targets always populates it.
-func ClusterIsDualStack(ctx context.Context) (bool, error) {
+// Reporting the set rather than a single "is it dual-stack" bool is what lets a
+// single-stack run still assert something. Gating on dual-stack means an
+// IPv6-only cluster skips the very checks written for it, and an IPv4-only one
+// skips them too -- so the family the cluster does have goes unverified. With
+// the set, only the leg for an absent family is skipped and the leg for a
+// present family is held to the full assertion.
+//
+// Returns an error, not an empty set, when no node reports a PodCIDR: a check
+// that cannot tell which families the cluster has must fail loudly rather than
+// skip. Clusters with external IPAM leave the field empty, but the kind path
+// this suite targets always populates it.
+func ClusterFamilies(ctx context.Context) (hasV4, hasV6 bool, err error) {
 	nodes, err := GetClients().K8s.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return false, fmt.Errorf("listing nodes: %w", err)
+		return false, false, fmt.Errorf("listing nodes: %w", err)
 	}
-	return nodesAreDualStack(nodes.Items)
+	return nodesFamilies(nodes.Items)
 }
 
-// nodesAreDualStack holds the decision ClusterIsDualStack makes, separated from
-// the API call so it can be tested without a cluster or a fake client.
-func nodesAreDualStack(nodes []corev1.Node) (bool, error) {
+// nodesFamilies holds the decision ClusterFamilies makes, separated from the
+// API call so it can be tested without a cluster or a fake client.
+//
+// The families are unioned across nodes: one node carrying a CIDR of a family
+// means the cluster allocates it.
+func nodesFamilies(nodes []corev1.Node) (hasV4, hasV6 bool, err error) {
 	sawCIDR := false
 	for i := range nodes {
 		cidrs := nodes[i].Spec.PodCIDRs
@@ -129,7 +139,6 @@ func nodesAreDualStack(nodes []corev1.Node) (bool, error) {
 		}
 		sawCIDR = true
 
-		var hasV4, hasV6 bool
 		for _, cidr := range cidrs {
 			prefix, err := netip.ParsePrefix(cidr)
 			if err != nil {
@@ -141,14 +150,11 @@ func nodesAreDualStack(nodes []corev1.Node) (bool, error) {
 				hasV6 = true
 			}
 		}
-		if hasV4 && hasV6 {
-			return true, nil
-		}
 	}
 	if !sawCIDR {
-		return false, errors.New("no node reports spec.podCIDRs; cannot determine the cluster's address families")
+		return false, false, errors.New("no node reports spec.podCIDRs; cannot determine the cluster's address families")
 	}
-	return false, nil
+	return hasV4, hasV6, nil
 }
 
 // RouterClusterIPs returns the atenet-router Service's IPv4 and IPv6

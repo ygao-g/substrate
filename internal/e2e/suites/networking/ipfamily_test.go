@@ -49,12 +49,19 @@ import (
 func TestDataPathServicesAreDualStack(t *testing.T) {
 	ctx := context.Background()
 
-	dual, err := e2e.ClusterIsDualStack(ctx)
+	hasV4, hasV6, err := e2e.ClusterFamilies(ctx)
 	if err != nil {
 		t.Fatalf("determining the cluster's address families: %v", err)
 	}
-	if !dual {
-		t.Skip("single-stack cluster; no Service here can have two families")
+	// Assert against the families the cluster actually has rather than skipping
+	// everything below dual-stack. Skipping is what let an IPv6-only run report
+	// green while nothing checked that these Services had an IPv6 ClusterIP at
+	// all -- the precise blind spot this test was written to remove.
+	wantFamilies := 0
+	for _, has := range []bool{hasV4, hasV6} {
+		if has {
+			wantFamilies++
+		}
 	}
 
 	tests := []struct {
@@ -79,30 +86,34 @@ func TestDataPathServicesAreDualStack(t *testing.T) {
 				t.Fatalf("getting Service %s/%s: %v", tc.namespace, tc.service, err)
 			}
 
-			if policy := svc.Spec.IPFamilyPolicy; policy == nil || *policy == corev1.IPFamilyPolicySingleStack {
-				got := "unset"
-				if policy != nil {
-					got = string(*policy)
+			// Only meaningful where the cluster can actually hand out a second
+			// family: SingleStack is the correct policy on a single-stack cluster.
+			if wantFamilies == 2 {
+				if policy := svc.Spec.IPFamilyPolicy; policy == nil || *policy == corev1.IPFamilyPolicySingleStack {
+					got := "unset"
+					if policy != nil {
+						got = string(*policy)
+					}
+					t.Errorf("Service %s/%s has ipFamilyPolicy %s on a dual-stack cluster; want %s. "+
+						"Every IPv6 change downstream of this Service is inert until it has both families",
+						tc.namespace, tc.service, got, corev1.IPFamilyPolicyPreferDualStack)
 				}
-				t.Errorf("Service %s/%s has ipFamilyPolicy %s on a dual-stack cluster; want %s. "+
-					"Every IPv6 change downstream of this Service is inert until it has both families",
-					tc.namespace, tc.service, got, corev1.IPFamilyPolicyPreferDualStack)
 			}
 
-			if len(svc.Spec.IPFamilies) < 2 {
-				t.Errorf("Service %s/%s has ipFamilies %v; want both IPv4 and IPv6 on a dual-stack cluster",
-					tc.namespace, tc.service, svc.Spec.IPFamilies)
+			if len(svc.Spec.IPFamilies) < wantFamilies {
+				t.Errorf("Service %s/%s has ipFamilies %v; want %d (every family the cluster allocates: v4=%v v6=%v)",
+					tc.namespace, tc.service, svc.Spec.IPFamilies, wantFamilies, hasV4, hasV6)
 			}
 
 			if tc.headless {
 				return
 			}
 			v4, v6 := e2e.ClusterIPsByFamily(svc)
-			if v4 == "" {
+			if hasV4 && v4 == "" {
 				t.Errorf("Service %s/%s has no IPv4 ClusterIP (clusterIPs=%v); IPv4 carries all traffic today, "+
 					"so losing it is the expensive regression", tc.namespace, tc.service, svc.Spec.ClusterIPs)
 			}
-			if v6 == "" {
+			if hasV6 && v6 == "" {
 				t.Errorf("Service %s/%s has no IPv6 ClusterIP (clusterIPs=%v)",
 					tc.namespace, tc.service, svc.Spec.ClusterIPs)
 			}
@@ -155,22 +166,36 @@ func TestAteAPIServerAcceptsBothFamilies(t *testing.T) {
 		t.Fatalf("no running ate-api-server pod in %s", e2e.APINamespace)
 	}
 
+	hasV4, hasV6, err := e2e.ClusterFamilies(ctx)
+	if err != nil {
+		t.Fatalf("determining the cluster's address families: %v", err)
+	}
+
 	podV4, podV6 := e2e.PodIPsByFamily(target)
-	t.Logf("probing ate-api-server pod %s (v4=%q v6=%q)", target.Name, podV4, podV6)
+	t.Logf("probing ate-api-server pod %s (v4=%q v6=%q; cluster v4=%v v6=%v)", target.Name, podV4, podV6, hasV4, hasV6)
 
 	probeNS := e2e.CreateNamespace(t)
 	probePod := startProbePod(t, ctx, probeNS.Name)
 
-	for _, tc := range []struct{ family, addr string }{
-		{"ipv4", podV4},
-		{"ipv6", podV6},
+	for _, tc := range []struct {
+		family     string
+		addr       string
+		clusterHas bool
+	}{
+		{"ipv4", podV4, hasV4},
+		{"ipv6", podV6, hasV6},
 	} {
 		t.Run(tc.family, func(t *testing.T) {
+			if !tc.clusterHas {
+				// Nothing for the process to have bound: the cluster does not
+				// allocate this family at all.
+				t.Skipf("cluster allocates no %s pod CIDR", tc.family)
+			}
 			if tc.addr == "" {
-				// A single-stack cluster gives the pod one address. The other
-				// family is not a failure here -- there is nothing for the
-				// process to have bound.
-				t.Skipf("ate-api-server pod %s has no %s address", target.Name, tc.family)
+				// The cluster does hand out this family, so a pod without an
+				// address of it is a real defect, not a reason to skip.
+				t.Fatalf("cluster allocates %s but ate-api-server pod %s has no %s address (podIPs=%v)",
+					tc.family, target.Name, tc.family, target.Status.PodIPs)
 			}
 			// nc -z is a connect-and-close: exit 0 means the listener accepted.
 			// Same probe image and same flags the networkpolicy suite uses.

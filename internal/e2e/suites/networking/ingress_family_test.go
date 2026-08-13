@@ -185,17 +185,29 @@ func TestRouterListenerAddresses(t *testing.T) {
 // address family says nothing about which of the router's sockets served the
 // request.
 //
-// Skipped unless the router Service is dual-stack. On a single-stack cluster
-// there is exactly one ClusterIP and TestActorDirectAccess already covers it.
+// Each family the cluster allocates is exercised; a family it does not have is
+// skipped. Gating the whole test on the router being dual-stack instead meant an
+// IPv6-only cluster -- the one place the IPv6 path is the only path -- never
+// reached the router over IPv6 here at all.
 func TestActorIngressPerFamily(t *testing.T) {
 	ctx := context.Background()
+
+	hasV4, hasV6, err := e2e.ClusterFamilies(ctx)
+	if err != nil {
+		t.Fatalf("determining the cluster's address families: %v", err)
+	}
 
 	routerV4, routerV6, err := e2e.RouterClusterIPs(ctx)
 	if err != nil {
 		t.Fatalf("reading atenet-router ClusterIPs: %v", err)
 	}
-	if routerV4 == "" || routerV6 == "" {
-		t.Skipf("atenet-router is single-stack (v4=%q v6=%q); nothing to compare", routerV4, routerV6)
+	// A ClusterIP missing for a family the cluster does allocate is the
+	// regression this test exists to catch, so fail rather than skip past it.
+	if hasV4 && routerV4 == "" {
+		t.Fatalf("cluster allocates IPv4 but atenet-router has no IPv4 ClusterIP")
+	}
+	if hasV6 && routerV6 == "" {
+		t.Fatalf("cluster allocates IPv6 but atenet-router has no IPv6 ClusterIP")
 	}
 
 	actorName, _ := createAndResumeActor(t, ctx, "family", counterTemplate)
@@ -206,11 +218,18 @@ func TestActorIngressPerFamily(t *testing.T) {
 
 	// Both families, in one test: the point of dual-stack is that both work,
 	// and a change that turns the IPv4 socket off is the costly failure.
-	for _, tc := range []struct{ family, clusterIP string }{
-		{"ipv4", routerV4},
-		{"ipv6", routerV6},
+	for _, tc := range []struct {
+		family     string
+		clusterIP  string
+		clusterHas bool
+	}{
+		{"ipv4", routerV4, hasV4},
+		{"ipv6", routerV6, hasV6},
 	} {
 		t.Run(tc.family, func(t *testing.T) {
+			if !tc.clusterHas {
+				t.Skipf("cluster allocates no %s pod CIDR", tc.family)
+			}
 			// The request must carry the actor's DNS name as the Host: it is
 			// the only routing key the router's ext_proc has. Only the
 			// *connection* goes to the literal.

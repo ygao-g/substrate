@@ -137,7 +137,7 @@ func TestPodIPsByFamily(t *testing.T) {
 	}
 }
 
-func TestNodesAreDualStack(t *testing.T) {
+func TestNodesFamilies(t *testing.T) {
 	node := func(cidrs ...string) corev1.Node {
 		return corev1.Node{Spec: corev1.NodeSpec{PodCIDRs: cidrs}}
 	}
@@ -145,44 +145,50 @@ func TestNodesAreDualStack(t *testing.T) {
 	tests := []struct {
 		name    string
 		nodes   []corev1.Node
-		want    bool
+		wantV4  bool
+		wantV6  bool
 		wantErr bool
 	}{
 		{
-			name:  "dual-stack node",
-			nodes: []corev1.Node{node("10.244.0.0/24", "fd00:10:244::/64")},
-			want:  true,
+			name:   "dual-stack node",
+			nodes:  []corev1.Node{node("10.244.0.0/24", "fd00:10:244::/64")},
+			wantV4: true,
+			wantV6: true,
 		},
 		{
-			name:  "IPv6-primary dual-stack node",
-			nodes: []corev1.Node{node("fd00:10:244::/64", "10.244.0.0/24")},
-			want:  true,
+			name:   "IPv6-primary dual-stack node",
+			nodes:  []corev1.Node{node("fd00:10:244::/64", "10.244.0.0/24")},
+			wantV4: true,
+			wantV6: true,
 		},
 		{
-			name:  "single-stack IPv4",
-			nodes: []corev1.Node{node("10.244.0.0/24"), node("10.244.1.0/24")},
-			want:  false,
+			name:   "single-stack IPv4",
+			nodes:  []corev1.Node{node("10.244.0.0/24"), node("10.244.1.0/24")},
+			wantV4: true,
 		},
 		{
-			name:  "single-stack IPv6",
-			nodes: []corev1.Node{node("fd00:10:244::/64")},
-			want:  false,
+			// The case the whole change is for: the family is reported, so the
+			// IPv6 legs run instead of the test skipping itself away.
+			name:   "single-stack IPv6",
+			nodes:  []corev1.Node{node("fd00:10:244::/64")},
+			wantV6: true,
 		},
 		{
 			// One dual-stack node is enough: the cluster allocates both.
-			name:  "a mix reports dual-stack",
-			nodes: []corev1.Node{node("10.244.0.0/24"), node("10.244.1.0/24", "fd00:10:244:1::/64")},
-			want:  true,
+			name:   "a mix reports both families",
+			nodes:  []corev1.Node{node("10.244.0.0/24"), node("10.244.1.0/24", "fd00:10:244:1::/64")},
+			wantV4: true,
+			wantV6: true,
 		},
 		{
-			name:  "falls back to the scalar PodCIDR",
-			nodes: []corev1.Node{{Spec: corev1.NodeSpec{PodCIDR: "10.244.0.0/24"}}},
-			want:  false,
+			name:   "falls back to the scalar PodCIDR",
+			nodes:  []corev1.Node{{Spec: corev1.NodeSpec{PodCIDR: "10.244.0.0/24"}}},
+			wantV4: true,
 		},
 		{
-			// The check must not silently answer "single-stack" when it cannot
-			// tell -- that would turn every dual-stack assertion into a skip.
-			name:    "no CIDRs anywhere is an error, not a false",
+			// The check must not silently answer "no families" when it cannot
+			// tell -- that would turn every per-family assertion into a skip.
+			name:    "no CIDRs anywhere is an error, not an empty set",
 			nodes:   []corev1.Node{{}, {}},
 			wantErr: true,
 		},
@@ -192,26 +198,27 @@ func TestNodesAreDualStack(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:  "unparseable CIDRs are skipped, not fatal",
-			nodes: []corev1.Node{node("garbage", "fd00:10:244::/64")},
-			want:  false,
+			name:   "unparseable CIDRs are skipped, not fatal",
+			nodes:  []corev1.Node{node("garbage", "fd00:10:244::/64")},
+			wantV6: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := nodesAreDualStack(tc.nodes)
+			gotV4, gotV6, err := nodesFamilies(tc.nodes)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("nodesAreDualStack() error = nil, want an error")
+					t.Fatalf("nodesFamilies() error = nil, want an error")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("nodesAreDualStack() error = %v, want nil", err)
+				t.Fatalf("nodesFamilies() error = %v, want nil", err)
 			}
-			if got != tc.want {
-				t.Errorf("nodesAreDualStack() = %v, want %v", got, tc.want)
+			if gotV4 != tc.wantV4 || gotV6 != tc.wantV6 {
+				t.Errorf("nodesFamilies() = (v4=%v, v6=%v), want (v4=%v, v6=%v)",
+					gotV4, gotV6, tc.wantV4, tc.wantV6)
 			}
 		})
 	}
