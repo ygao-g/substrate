@@ -69,12 +69,51 @@ type envoyListeners struct {
 	} `json:"listener_statuses"`
 }
 
+// envoySocketAddress is a socket from /listeners. It deliberately has no
+// ipv4_compat field: /listeners reports the *resolved* address a listener bound,
+// and ipv4_compat is a config knob rather than a property of the bound address,
+// so Envoy never emits it there. Decoding it here would silently yield false for
+// every socket and make any assertion on it vacuous. Read it from
+// envoyConfiguredSockets instead.
 type envoySocketAddress struct {
 	Address   string `json:"address"`
 	PortValue int    `json:"port_value"`
-	// Ipv4Compat is proto3-omitted from the admin JSON when false, so an absent
-	// field decodes to the value this test wants. See the assertion below for
-	// why false is load-bearing on the "::" socket.
+}
+
+// envoyConfigDump is the subset of Envoy's admin /config_dump this test reads.
+// Ingress listeners arrive over xDS and land in dynamic_listeners; the egress
+// gateway's listener is static config and lands in static_listeners.
+type envoyConfigDump struct {
+	Configs []struct {
+		Type            string `json:"@type"`
+		StaticListeners []struct {
+			Listener envoyListenerConfig `json:"listener"`
+		} `json:"static_listeners"`
+		DynamicListeners []struct {
+			ActiveState struct {
+				Listener envoyListenerConfig `json:"listener"`
+			} `json:"active_state"`
+		} `json:"dynamic_listeners"`
+	} `json:"configs"`
+}
+
+type envoyListenerConfig struct {
+	Name    string `json:"name"`
+	Address struct {
+		SocketAddress envoyConfiguredSocket `json:"socket_address"`
+	} `json:"address"`
+	AdditionalAddresses []struct {
+		Address struct {
+			SocketAddress envoyConfiguredSocket `json:"socket_address"`
+		} `json:"address"`
+	} `json:"additional_addresses"`
+}
+
+type envoyConfiguredSocket struct {
+	Address   string `json:"address"`
+	PortValue int    `json:"port_value"`
+	// Ipv4Compat is proto3-omitted from the JSON when false, so an absent field
+	// decodes to false, which is the real configured value.
 	Ipv4Compat bool `json:"ipv4_compat"`
 }
 
@@ -92,44 +131,9 @@ type envoySocketAddress struct {
 // socket.
 func TestRouterListenerAddresses(t *testing.T) {
 	ctx := context.Background()
-	clients := e2e.GetClients()
-	pod := mustRouterPodName(t, ctx)
-
-	raw, err := clients.K8s.CoreV1().RESTClient().Get().
-		Namespace(e2e.RouterNamespace).
-		Resource("pods").
-		Name(pod+":"+strconv.Itoa(envoyAdminPort)).
-		SubResource("proxy").
-		Suffix("listeners").
-		Param("format", "json").
-		DoRaw(ctx)
-	if err != nil {
-		// The pods/proxy subresource reaches the pod on its primary-family
-		// PodIP, so this hop used to be family-sensitive. It no longer is: the
-		// admin listener binds "::" with ipv4_compat
-		// (manifests/ate-install/atenet-router.yaml), which accepts connections
-		// from either family. A failure here means the admin interface is not
-		// answering — the container is not up, or the proxy path is blocked.
-		t.Fatalf("reading Envoy admin /listeners from %s/%s: %v", e2e.RouterNamespace, pod, err)
-	}
-
-	var listeners envoyListeners
-	if err := json.Unmarshal(raw, &listeners); err != nil {
-		t.Fatalf("decoding /listeners response %q: %v", raw, err)
-	}
-	if len(listeners.ListenerStatuses) == 0 {
-		t.Fatalf("Envoy reports no listeners at all; xDS has not converged. Body: %s", raw)
-	}
-
-	// One entry per listener name: every socket it is bound on.
-	bound := map[string][]envoySocketAddress{}
-	for _, ls := range listeners.ListenerStatuses {
-		sockets := []envoySocketAddress{ls.LocalAddress.SocketAddress}
-		for _, extra := range ls.AdditionalLocalAddresses {
-			sockets = append(sockets, extra.SocketAddress)
-		}
-		bound[ls.Name] = sockets
-	}
+	pod := mustReadyPodName(t, ctx, e2e.RouterNamespace, routerAppLabel)
+	bound := envoyBoundSockets(t, ctx, e2e.RouterNamespace, pod, envoyAdminPort)
+	configured := envoyConfiguredSockets(t, ctx, e2e.RouterNamespace, pod, envoyAdminPort)
 
 	for _, name := range []string{ingressHTTPListener, ingressHTTPSListener} {
 		t.Run(name, func(t *testing.T) {
@@ -166,7 +170,11 @@ func TestRouterListenerAddresses(t *testing.T) {
 			// ingress down, both families. The xDS side is pinned in
 			// cmd/atenet/internal/router/xds_test.go; this asserts it survived
 			// the trip into Envoy.
-			for _, s := range sockets {
+			//
+			// This has to come from config_dump. /listeners reports resolved bound
+			// addresses and never carries ipv4_compat, so asserting on it there
+			// passes whatever the config says.
+			for _, s := range configured[name] {
 				if s.Address == "::" && s.Ipv4Compat {
 					t.Errorf("%s has ipv4_compat set on its :: socket (port %d); want false. "+
 						"It collides with the 0.0.0.0 socket on the same port and Envoy rejects "+
@@ -198,8 +206,8 @@ func TestActorIngressPerFamily(t *testing.T) {
 		t.Skipf("atenet-router is single-stack (v4=%q v6=%q); nothing to compare", routerV4, routerV6)
 	}
 
-	actorName, _ := createAndResumeActor(t, ctx, "family")
-	dnsName := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}.DNSName()
+	actorName, _ := createAndResumeActor(t, ctx, "family", counterTemplate)
+	dnsName := resources.ActorDNSName(resources.ActorRef{Atespace: networkingAtespace, Name: actorName})
 
 	probeNS := e2e.CreateNamespace(t)
 	probePod := startProbePod(t, ctx, probeNS.Name)
@@ -226,20 +234,115 @@ func TestActorIngressPerFamily(t *testing.T) {
 	}
 }
 
-func mustRouterPodName(t *testing.T, ctx context.Context) string {
+// envoyBoundSockets reads a gateway's Envoy admin /listeners and returns, per
+// listener name, every socket it is actually bound on: the primary first, then
+// any additional_local_addresses. Reading it back from Envoy rather than from
+// the config is the point — it is the only place a listener that failed to bind
+// shows up.
+func envoyBoundSockets(t *testing.T, ctx context.Context, namespace, pod string, adminPort int) map[string][]envoySocketAddress {
 	t.Helper()
-	pods, err := e2e.GetClients().K8s.CoreV1().Pods(e2e.RouterNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: routerAppLabel,
+	raw, err := e2e.GetClients().K8s.CoreV1().RESTClient().Get().
+		Namespace(namespace).
+		Resource("pods").
+		Name(pod+":"+strconv.Itoa(adminPort)).
+		SubResource("proxy").
+		Suffix("listeners").
+		Param("format", "json").
+		DoRaw(ctx)
+	if err != nil {
+		// The pods/proxy subresource reaches the pod on its primary-family
+		// PodIP, so this hop used to be family-sensitive. It no longer is: both
+		// admin listeners bind "::" with ipv4_compat, which accepts connections
+		// from either family. A failure here means the admin interface is not
+		// answering — the container is not up, or the proxy path is blocked.
+		t.Fatalf("reading Envoy admin /listeners from %s/%s: %v", namespace, pod, err)
+	}
+
+	var listeners envoyListeners
+	if err := json.Unmarshal(raw, &listeners); err != nil {
+		t.Fatalf("decoding /listeners response %q: %v", raw, err)
+	}
+	if len(listeners.ListenerStatuses) == 0 {
+		t.Fatalf("Envoy in %s/%s reports no listeners at all. Body: %s", namespace, pod, raw)
+	}
+
+	bound := map[string][]envoySocketAddress{}
+	for _, ls := range listeners.ListenerStatuses {
+		sockets := []envoySocketAddress{ls.LocalAddress.SocketAddress}
+		for _, extra := range ls.AdditionalLocalAddresses {
+			sockets = append(sockets, extra.SocketAddress)
+		}
+		bound[ls.Name] = sockets
+	}
+	return bound
+}
+
+// envoyConfiguredSockets reads a gateway's Envoy admin /config_dump and returns,
+// per listener name, the socket addresses as *configured*: the primary first,
+// then any additional_addresses.
+//
+// It is the companion to envoyBoundSockets, not a replacement. /listeners
+// answers "what did this listener actually bind", which is the only place a
+// failed bind shows up; /config_dump answers "with what settings", which is the
+// only place socket options like ipv4_compat appear at all. Assert each from the
+// endpoint that reports it.
+func envoyConfiguredSockets(t *testing.T, ctx context.Context, namespace, pod string, adminPort int) map[string][]envoyConfiguredSocket {
+	t.Helper()
+	raw, err := e2e.GetClients().K8s.CoreV1().RESTClient().Get().
+		Namespace(namespace).
+		Resource("pods").
+		Name(pod + ":" + strconv.Itoa(adminPort)).
+		SubResource("proxy").
+		Suffix("config_dump").
+		DoRaw(ctx)
+	if err != nil {
+		t.Fatalf("reading Envoy admin /config_dump from %s/%s: %v", namespace, pod, err)
+	}
+
+	var dump envoyConfigDump
+	if err := json.Unmarshal(raw, &dump); err != nil {
+		t.Fatalf("decoding /config_dump response from %s/%s: %v", namespace, pod, err)
+	}
+
+	flatten := func(l envoyListenerConfig) []envoyConfiguredSocket {
+		sockets := []envoyConfiguredSocket{l.Address.SocketAddress}
+		for _, extra := range l.AdditionalAddresses {
+			sockets = append(sockets, extra.Address.SocketAddress)
+		}
+		return sockets
+	}
+	configured := map[string][]envoyConfiguredSocket{}
+	for _, c := range dump.Configs {
+		if !strings.Contains(c.Type, "ListenersConfigDump") {
+			continue
+		}
+		for _, sl := range c.StaticListeners {
+			configured[sl.Listener.Name] = flatten(sl.Listener)
+		}
+		for _, dl := range c.DynamicListeners {
+			configured[dl.ActiveState.Listener.Name] = flatten(dl.ActiveState.Listener)
+		}
+	}
+	if len(configured) == 0 {
+		t.Fatalf("Envoy in %s/%s reports no listeners in /config_dump. Body: %s", namespace, pod, raw)
+	}
+	return configured
+}
+
+func mustReadyPodName(t *testing.T, ctx context.Context, namespace, label string) string {
+	t.Helper()
+	pods, err := e2e.GetClients().K8s.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: label,
 	})
 	if err != nil {
-		t.Fatalf("listing atenet-router pods: %v", err)
+		t.Fatalf("listing %s pods in %s: %v", label, namespace, err)
 	}
 	for i := range pods.Items {
 		if portforward.IsPodReady(&pods.Items[i]) {
 			return pods.Items[i].Name
 		}
 	}
-	t.Fatalf("no ready atenet-router pod in %s", e2e.RouterNamespace)
+	t.Fatalf("no ready %s pod in %s", label, namespace)
 	return ""
 }
 
