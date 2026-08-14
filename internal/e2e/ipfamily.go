@@ -36,6 +36,17 @@ const (
 	// APIGRPCPort is the control-plane gRPC port, the listener that has to bind
 	// both families.
 	APIGRPCPort = 443
+
+	// EgressNamespace and EgressService locate the atenet egress gateway, the
+	// other half of the data path the router fronts.
+	EgressNamespace = "ate-system"
+	EgressService   = "atenet-egress"
+	// EgressAppLabel selects the atenet-egress pods.
+	EgressAppLabel = "app=atenet-egress"
+	// EgressAdminPort is the Envoy admin listener in the egress pod. It is not
+	// published by the Service, so the pod proxy subresource is the only way at
+	// it from a test.
+	EgressAdminPort = 15000
 )
 
 // splitByFamily files IP strings into the first IPv4 and the first IPv6 address

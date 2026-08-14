@@ -68,6 +68,7 @@ func TestDataPathServicesAreDualStack(t *testing.T) {
 		headless bool
 	}{
 		{name: "atenet-router", namespace: e2e.RouterNamespace, service: e2e.RouterService},
+		{name: "atenet-egress", namespace: e2e.EgressNamespace, service: e2e.EgressService},
 		{name: "dns", namespace: e2e.DNSNamespace, service: e2e.DNSService},
 		{name: "api", namespace: e2e.APINamespace, service: e2e.APIService, headless: true},
 	}
