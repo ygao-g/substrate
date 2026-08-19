@@ -192,31 +192,52 @@ func PodIPv4() (net.IP, error) {
 	return nil, fmt.Errorf("pod eth0 has no IPv4 address")
 }
 
-// EnableIPv4Forwarding enables IPv4 forwarding in the current network namespace.
-func EnableIPv4Forwarding() error {
+// EnableForwarding enables IPv4 and IPv6 forwarding in the current network
+// namespace.
+func EnableForwarding() error {
 	// Forwarding is required because actor packets now enter the worker pod via
 	// the host-side veth and then leave through the pod's eth0. Without this, the
 	// kernel would not route traffic between those interfaces even though both
-	// live in the worker pod network namespace.
+	// live in the worker pod network namespace, and ip6_forward() would drop the
+	// IPv6 half outright, the actor's DNS queries included.
 	//
-	// Without privileged, the container runtime bind-mounts /proc/sys read-only.
-	// The worker holds CAP_SYS_ADMIN and uses no user namespace, so the ro flag
-	// is not locked: clear it, write the sysctl, restore ro.
-	const path = "/proc/sys/net/ipv4/ip_forward"
+	// conf.all.forwarding implies the per-interface default, so one write covers
+	// both the veth and eth0.
+	for _, path := range []string{
+		"/proc/sys/net/ipv4/ip_forward",
+		"/proc/sys/net/ipv6/conf/all/forwarding",
+	} {
+		if err := writeSysctlIfUnset(path); err != nil {
+			return fmt.Errorf("while enabling forwarding in worker pod netns: %w", err)
+		}
+	}
+	return nil
+}
+
+// writeSysctlIfUnset writes "1" to a sysctl path unless it already reads "1". A
+// missing path is not an error: the IPv6 sysctls are absent on a kernel with
+// IPv6 compiled out, and there is then nothing to enable.
+func writeSysctlIfUnset(path string) error {
 	if b, err := os.ReadFile(path); err == nil && len(b) > 0 && b[0] == '1' {
 		return nil
 	}
 	if err := os.WriteFile(path, []byte("1\n"), 0o644); err == nil {
 		return nil
 	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	// Without privileged, the container runtime bind-mounts /proc/sys read-only.
+	// The worker holds CAP_SYS_ADMIN and uses no user namespace, so the ro flag
+	// is not locked: clear it, write the sysctl, restore ro.
 	if err := unix.Mount("none", "/proc/sys", "", unix.MS_BIND|unix.MS_REMOUNT, ""); err != nil {
-		return fmt.Errorf("while remounting /proc/sys read-write to enable IPv4 forwarding: %w", err)
+		return fmt.Errorf("while remounting /proc/sys read-write to enable forwarding: %w", err)
 	}
 	defer func() {
 		_ = unix.Mount("none", "/proc/sys", "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, "")
 	}()
 	if err := os.WriteFile(path, []byte("1\n"), 0o644); err != nil {
-		return fmt.Errorf("while enabling IPv4 forwarding in worker pod netns: %w", err)
+		return fmt.Errorf("while writing %s: %w", path, err)
 	}
 	return nil
 }
@@ -565,7 +586,7 @@ func SetupActorNetwork(ctx context.Context, cfg NetworkConfig) (retErr error) {
 		return fmt.Errorf("while configuring actor veth in interior netns: %w", err)
 	}
 
-	if err := EnableIPv4Forwarding(); err != nil {
+	if err := EnableForwarding(); err != nil {
 		return err
 	}
 	if err := InstallActorNftablesRules(cfg.EgressRedirectPort); err != nil {
