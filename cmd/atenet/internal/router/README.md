@@ -28,6 +28,16 @@ Router has several responsibilities:
   gateway's ext_proc handler re-verifies the actor's client certificate against
   the actor-identity CA, reads the `ActorIdentity` X.509 extension out of it,
   and checks the certified UID against the ATE API.
+* Serves arbitrary-port ingress: a client reaches a port on the actor other
+  than its default (80) by sending an HTTP CONNECT to
+  `<actor-dns>:<port>` on `--port-connect`/`--port-connect-tls`, rather than
+  naming the port some other way. Envoy terminates the CONNECT and reinjects
+  the tunneled bytes into an internal listener that runs the same ext_proc
+  path as ordinary traffic, so each request inside a long-lived tunnel still
+  resumes the actor and re-routes independently if it moves workers. Only
+  HTTP(S) traffic over the tunnel is supported today -- see `xds.go`'s
+  `connect_terminate`/`main_internal` listeners and
+  `ingress.Handler.HandleRequestHeaders`.
 
 ## packages
 
@@ -69,9 +79,8 @@ Ingress and egress are deployed separately today — `atenet-router` fronts the
 ingress dataplane, `atenet-egress` the egress gateway — because the two scale
 independently, not because they need separate binaries.
 
-The `--atenet-router` choice only applies to the ingress dataplane. The egress
-gateway is its own Deployment with a statically configured Envoy, so
-`--atenet-router=agentgateway` leaves it untouched.
+`--atenet-router` selects the dataplane for both Deployments. Each gateway has
+its own static configuration because ingress and egress scale independently.
 
 ## status page
 
