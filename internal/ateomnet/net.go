@@ -102,17 +102,43 @@ func MustParseIPv6(s string) net.IP {
 }
 
 // LinkIPv6Enabled reports whether IPv6 addresses can be assigned to the named
-// link in the current netns. An IPv4-only cluster leaves disable_ipv6=1 in the
-// worker pod netns — the default on IPv4-only GKE — and netlink then rejects
-// every IPv6 address with EPERM; a kernel built without IPv6 has no sysctl at
-// all. Either way the actor interior stays IPv4-only rather than failing to
-// start.
+// link in the current netns. It answers a kernel capability question, not a
+// cluster one: IPv4-only GKE leaves disable_ipv6=1 and netlink then rejects
+// every IPv6 address with EPERM, but IPv4-only kind leaves it at 0 because the
+// node kernel has IPv6 compiled in. A kernel built without IPv6 has no sysctl
+// at all. Pair it with podHasGlobalIPv6 to decide whether the actor gets IPv6;
+// on its own it says yes on clusters that have no IPv6 anywhere.
 func LinkIPv6Enabled(name string) bool {
 	b, err := os.ReadFile("/proc/sys/net/ipv6/conf/" + name + "/disable_ipv6")
 	if err != nil {
 		return false
 	}
 	return len(b) > 0 && b[0] == '0'
+}
+
+// podHasGlobalIPv6 reports whether the worker pod's own eth0 carries a global
+// IPv6 address, which is what decides the families the actor can egress on.
+// It must run in the worker pod netns.
+//
+// Scoped to eth0 rather than the whole netns on purpose: ActorVethName is also
+// "eth0", so a netns-wide scan that filtered out the ateomnet link names by
+// name would filter out the pod's own interface too and report false on every
+// cluster.
+func podHasGlobalIPv6() bool {
+	eth0Link, err := netlink.LinkByName("eth0")
+	if err != nil {
+		return false
+	}
+	// netlink can report ErrDumpInterrupted alongside a valid partial answer.
+	// Trust a positive result either way: reporting false on a dual-stack pod
+	// silently strands the actor on IPv4, which is the costlier mistake.
+	addrs, _ := netlink.AddrList(eth0Link, netlink.FAMILY_V6)
+	for _, addr := range addrs {
+		if addr.IP.IsGlobalUnicast() && !addr.IP.IsLinkLocalUnicast() {
+			return true
+		}
+	}
+	return false
 }
 
 // MustParseMAC parses a MAC address string into a net.HardwareAddr, panicking on error.
@@ -126,7 +152,9 @@ func MustParseMAC(s string) net.HardwareAddr {
 
 // ConfigureActorVeth configures the actor veth inside the interior netns.
 // It assumes it is already running inside the target network namespace.
-func ConfigureActorVeth(ctx context.Context) error {
+// ipv6 comes from SetupActorNetwork, which decides it in the worker pod netns;
+// this namespace cannot answer the question for itself.
+func ConfigureActorVeth(ctx context.Context, ipv6 bool) error {
 	// Run inside the gVisor interior netns. SetupActorNetwork has already created
 	// the veth peer here, under its final name, so this only has to address it.
 	// gVisor reads link names, addresses, and routes from this namespace when the
@@ -151,8 +179,7 @@ func ConfigureActorVeth(ctx context.Context) error {
 	if err := netlink.AddrReplace(actorLink, ActorVethAddr); err != nil {
 		return fmt.Errorf("while assigning actor veth address: %w", err)
 	}
-	actorIPv6 := LinkIPv6Enabled(ActorVethName)
-	if actorIPv6 {
+	if ipv6 {
 		if err := netlink.AddrReplace(actorLink, ActorVethIPv6Addr); err != nil {
 			return fmt.Errorf("while assigning actor veth ipv6 address: %w", err)
 		}
@@ -168,7 +195,7 @@ func ConfigureActorVeth(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("while installing actor default route: %w", err)
 	}
-	if actorIPv6 {
+	if ipv6 {
 		if err := netlink.RouteReplace(&netlink.Route{
 			LinkIndex: actorLink.Attrs().Index,
 			Gw:        ActorVethIPv6GwIP,
@@ -672,18 +699,27 @@ func SetupActorNetwork(ctx context.Context, cfg NetworkConfig) (retErr error) {
 	if err := netlink.AddrReplace(hostLink, HostVethAddr); err != nil {
 		return fmt.Errorf("while assigning host veth address: %w", err)
 	}
-	if LinkIPv6Enabled(HostVethName) {
+	// Decided once, here in the worker pod netns, and carried into the interior
+	// netns below. Probing separately on each side would let them disagree: the
+	// interior netns is freshly created, so its sysctl is always the permissive
+	// kernel default whatever the pod's families are.
+	podIPv6, linkIPv6 := podHasGlobalIPv6(), LinkIPv6Enabled(HostVethName)
+	actorIPv6 := podIPv6 && linkIPv6
+	if actorIPv6 {
 		if err := netlink.AddrReplace(hostLink, HostVethIPv6Addr); err != nil {
 			return fmt.Errorf("while assigning host veth ipv6 address: %w", err)
 		}
 	} else {
-		slog.Info("IPv6 disabled in the worker pod netns; actor networking is IPv4-only", "link", HostVethName)
+		slog.InfoContext(ctx, "actor networking is IPv4-only",
+			"link", HostVethName, "podHasGlobalIPv6", podIPv6, "linkIPv6Enabled", linkIPv6)
 	}
 	if err := netlink.LinkSetUp(hostLink); err != nil {
 		return fmt.Errorf("while bringing up host veth: %w", err)
 	}
 
-	if err := NetNSDo(ctx, cfg.InteriorNetNS, ConfigureActorVeth); err != nil {
+	if err := NetNSDo(ctx, cfg.InteriorNetNS, func(ctx context.Context) error {
+		return ConfigureActorVeth(ctx, actorIPv6)
+	}); err != nil {
 		return fmt.Errorf("while configuring actor veth in interior netns: %w", err)
 	}
 
