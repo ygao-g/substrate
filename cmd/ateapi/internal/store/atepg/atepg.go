@@ -182,10 +182,11 @@ func (p *Persistence) AtespaceExists(ctx context.Context, name string) (bool, er
 	return exists, nil
 }
 
-func (p *Persistence) ListAtespaces(ctx context.Context, pageSize int32, pageTokenStr string) ([]*ateapipb.Atespace, string, error) {
+func (p *Persistence) ListAtespaces(ctx context.Context, opts store.ListOptions) (store.ListResponse[*ateapipb.Atespace], error) {
+	pageSize, pageTokenStr := opts.PageSize, opts.PageToken
 	token, err := decodePageToken(pageTokenStr, kindAtespace, "", 1)
 	if err != nil {
-		return nil, "", err
+		return store.ListResponse[*ateapipb.Atespace]{}, err
 	}
 	var last *string
 	if len(token.Last) > 0 {
@@ -198,7 +199,7 @@ func (p *Persistence) ListAtespaces(ctx context.Context, pageSize int32, pageTok
 		ORDER BY name
 		LIMIT $2`, last, int64(pageSize)+1)
 	if err != nil {
-		return nil, "", fmt.Errorf("listing atespaces: %w", err)
+		return store.ListResponse[*ateapipb.Atespace]{}, fmt.Errorf("listing atespaces: %w", err)
 	}
 	defer rows.Close()
 
@@ -208,17 +209,17 @@ func (p *Persistence) ListAtespaces(ctx context.Context, pageSize int32, pageTok
 		var name string
 		var protoBytes []byte
 		if err := rows.Scan(&name, &protoBytes); err != nil {
-			return nil, "", fmt.Errorf("scanning atespace row: %w", err)
+			return store.ListResponse[*ateapipb.Atespace]{}, fmt.Errorf("scanning atespace row: %w", err)
 		}
 		a := &ateapipb.Atespace{}
 		if err := proto.Unmarshal(protoBytes, a); err != nil {
-			return nil, "", fmt.Errorf("unmarshaling atespace: %w", err)
+			return store.ListResponse[*ateapipb.Atespace]{}, fmt.Errorf("unmarshaling atespace: %w", err)
 		}
 		result = append(result, a)
 		names = append(names, name)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("listing atespaces: %w", err)
+		return store.ListResponse[*ateapipb.Atespace]{}, fmt.Errorf("listing atespaces: %w", err)
 	}
 
 	var nextToken string
@@ -226,7 +227,7 @@ func (p *Persistence) ListAtespaces(ctx context.Context, pageSize int32, pageTok
 		result = result[:pageSize]
 		nextToken = encodePageToken(kindAtespace, "", []string{names[pageSize-1]})
 	}
-	return result, nextToken, nil
+	return store.ListResponse[*ateapipb.Atespace]{Items: result, NextPageToken: nextToken}, nil
 }
 
 func (p *Persistence) DeleteAtespace(ctx context.Context, name string) (*ateapipb.Atespace, error) {
@@ -312,7 +313,11 @@ func validateUpdateActorTemplateMutation(storedTemplate, mutatedTemplate *ateapi
 	return nil
 }
 
-func (p *Persistence) UpdateActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef, mutate func(*ateapipb.ActorTemplate) error) (*ateapipb.ActorTemplate, error) {
+func (p *Persistence) UpdateActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef, precondition store.Precondition, mutate func(*ateapipb.ActorTemplate) error) (*ateapipb.ActorTemplate, error) {
+	if err := precondition.Validate(); err != nil {
+		return nil, err
+	}
+
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("beginning actor template update: %w", err)
@@ -333,6 +338,9 @@ func (p *Persistence) UpdateActorTemplate(ctx context.Context, templateRef resou
 	dbTemplate := &ateapipb.ActorTemplate{}
 	if err := proto.Unmarshal(currentBytes, dbTemplate); err != nil {
 		return nil, fmt.Errorf("unmarshaling actor template for update: %w", err)
+	}
+	if err := precondition.Check(dbTemplate.GetMetadata()); err != nil {
+		return nil, err
 	}
 	templateBeforeMutation := proto.Clone(dbTemplate).(*ateapipb.ActorTemplate)
 	if err := mutate(dbTemplate); err != nil {
@@ -358,14 +366,15 @@ func (p *Persistence) UpdateActorTemplate(ctx context.Context, templateRef resou
 	return dbTemplate, nil
 }
 
-func (p *Persistence) ListActorTemplates(ctx context.Context, atespace string, pageSize int32, pageTokenStr string) ([]*ateapipb.ActorTemplate, string, error) {
+func (p *Persistence) ListActorTemplates(ctx context.Context, atespace string, opts store.ListOptions) (store.ListResponse[*ateapipb.ActorTemplate], error) {
+	pageSize, pageTokenStr := opts.PageSize, opts.PageToken
 	keyParts := 2
 	if atespace != "" {
 		keyParts = 1
 	}
 	token, err := decodePageToken(pageTokenStr, kindActorTemplate, atespace, keyParts)
 	if err != nil {
-		return nil, "", err
+		return store.ListResponse[*ateapipb.ActorTemplate]{}, err
 	}
 
 	var rows pgx.Rows
@@ -389,7 +398,7 @@ func (p *Persistence) ListActorTemplates(ctx context.Context, atespace string, p
 			ORDER BY atespace, name LIMIT $3`, lastAtespace, lastName, int64(pageSize)+1)
 	}
 	if err != nil {
-		return nil, "", fmt.Errorf("listing actor templates: %w", err)
+		return store.ListResponse[*ateapipb.ActorTemplate]{}, fmt.Errorf("listing actor templates: %w", err)
 	}
 	defer rows.Close()
 
@@ -400,17 +409,17 @@ func (p *Persistence) ListActorTemplates(ctx context.Context, atespace string, p
 		var k key
 		var protoBytes []byte
 		if err := rows.Scan(&k.atespace, &k.name, &protoBytes); err != nil {
-			return nil, "", fmt.Errorf("scanning actor template row: %w", err)
+			return store.ListResponse[*ateapipb.ActorTemplate]{}, fmt.Errorf("scanning actor template row: %w", err)
 		}
 		template := &ateapipb.ActorTemplate{}
 		if err := proto.Unmarshal(protoBytes, template); err != nil {
-			return nil, "", fmt.Errorf("unmarshaling actor template: %w", err)
+			return store.ListResponse[*ateapipb.ActorTemplate]{}, fmt.Errorf("unmarshaling actor template: %w", err)
 		}
 		keys = append(keys, k)
 		result = append(result, template)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("listing actor templates: %w", err)
+		return store.ListResponse[*ateapipb.ActorTemplate]{}, fmt.Errorf("listing actor templates: %w", err)
 	}
 	var nextToken string
 	if len(result) > int(pageSize) {
@@ -422,7 +431,7 @@ func (p *Persistence) ListActorTemplates(ctx context.Context, atespace string, p
 		}
 		nextToken = encodePageToken(kindActorTemplate, atespace, lastParts)
 	}
-	return result, nextToken, nil
+	return store.ListResponse[*ateapipb.ActorTemplate]{Items: result, NextPageToken: nextToken}, nil
 }
 
 func (p *Persistence) DeleteActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef) (*ateapipb.ActorTemplate, error) {
@@ -430,10 +439,6 @@ func (p *Persistence) DeleteActorTemplate(ctx context.Context, templateRef resou
 	err := p.pool.QueryRow(ctx, `
 		DELETE FROM actor_templates AS t
 		WHERE t.atespace = $1 AND t.name = $2
-		  AND NOT EXISTS (
-		      SELECT 1 FROM actor_template_versions AS v
-		      WHERE v.actor_template_atespace = t.atespace
-		        AND v.actor_template_name = t.name)
 		RETURNING t.proto`, templateRef.Atespace, templateRef.Name).Scan(&protoBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		exists, existsErr := p.ActorTemplateExists(ctx, templateRef)
@@ -453,186 +458,6 @@ func (p *Persistence) DeleteActorTemplate(ctx context.Context, templateRef resou
 		return nil, fmt.Errorf("unmarshaling deleted actor template: %w", err)
 	}
 	return out, nil
-}
-
-// --- Actor template versions ---
-
-func (p *Persistence) CreateActorTemplateVersion(ctx context.Context, version *ateapipb.ActorTemplateVersion) (*ateapipb.ActorTemplateVersion, error) {
-	atespace, name := version.GetMetadata().GetAtespace(), version.GetMetadata().GetName()
-	dbVersion := proto.Clone(version).(*ateapipb.ActorTemplateVersion)
-	dbVersion.Metadata = newCreateMetadata(atespace, name)
-	protoBytes, err := proto.Marshal(dbVersion)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling actor template version: %w", err)
-	}
-	parent := resources.ActorTemplateRefFromObjectRef(dbVersion.GetActorTemplate())
-	_, err = p.pool.Exec(ctx, `
-		INSERT INTO actor_template_versions
-		    (atespace, name, actor_template_atespace, actor_template_name, uid, proto)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		atespace, name, parent.Atespace, parent.Name, dbVersion.GetMetadata().GetUid(), protoBytes)
-	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, store.ErrAlreadyExists
-		}
-		if isForeignKeyViolation(err) {
-			return nil, store.ErrFailedPrecondition
-		}
-		return nil, fmt.Errorf("inserting actor template version %s/%s: %w", atespace, name, err)
-	}
-	return dbVersion, nil
-}
-
-func getActorTemplateVersionRow(ctx context.Context, q querier, versionRef resources.ActorTemplateVersionRef) (*ateapipb.ActorTemplateVersion, error) {
-	var protoBytes []byte
-	err := q.QueryRow(ctx, `SELECT proto FROM actor_template_versions WHERE atespace = $1 AND name = $2`, versionRef.Atespace, versionRef.Name).Scan(&protoBytes)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, store.ErrNotFound
-		}
-		return nil, fmt.Errorf("getting actor template version %s: %w", versionRef, err)
-	}
-	out := &ateapipb.ActorTemplateVersion{}
-	if err := proto.Unmarshal(protoBytes, out); err != nil {
-		return nil, fmt.Errorf("unmarshaling actor template version: %w", err)
-	}
-	return out, nil
-}
-
-func (p *Persistence) GetActorTemplateVersion(ctx context.Context, versionRef resources.ActorTemplateVersionRef) (*ateapipb.ActorTemplateVersion, error) {
-	return getActorTemplateVersionRow(ctx, p.pool, versionRef)
-}
-
-func actorTemplateVersionListScope(atespace string, parent resources.ActorTemplateRef) string {
-	return atespace + "\x00" + parent.Atespace + "\x00" + parent.Name
-}
-
-func (p *Persistence) ListActorTemplateVersions(ctx context.Context, atespace string, parent resources.ActorTemplateRef, pageSize int32, pageTokenStr string) ([]*ateapipb.ActorTemplateVersion, string, error) {
-	scope := actorTemplateVersionListScope(atespace, parent)
-	keyParts := 2
-	if atespace != "" {
-		keyParts = 1
-	}
-	token, err := decodePageToken(pageTokenStr, kindActorTemplateVersion, scope, keyParts)
-	if err != nil {
-		return nil, "", err
-	}
-	filterParent := parent != (resources.ActorTemplateRef{})
-
-	var rows pgx.Rows
-	if atespace != "" {
-		var last *string
-		if len(token.Last) == 1 {
-			last = &token.Last[0]
-		}
-		rows, err = p.pool.Query(ctx, `
-			SELECT atespace, name, proto FROM actor_template_versions
-			WHERE atespace = $1
-			  AND (NOT $2 OR (actor_template_atespace = $3 AND actor_template_name = $4))
-			  AND ($5::text IS NULL OR name > $5)
-			ORDER BY name LIMIT $6`, atespace, filterParent, parent.Atespace, parent.Name, last, int64(pageSize)+1)
-	} else {
-		var lastAtespace, lastName *string
-		if len(token.Last) == 2 {
-			lastAtespace, lastName = &token.Last[0], &token.Last[1]
-		}
-		rows, err = p.pool.Query(ctx, `
-			SELECT atespace, name, proto FROM actor_template_versions
-			WHERE (NOT $1 OR (actor_template_atespace = $2 AND actor_template_name = $3))
-			  AND ($4::text IS NULL OR (atespace, name) > ($4, $5))
-			ORDER BY atespace, name LIMIT $6`, filterParent, parent.Atespace, parent.Name, lastAtespace, lastName, int64(pageSize)+1)
-	}
-	if err != nil {
-		return nil, "", fmt.Errorf("listing actor template versions: %w", err)
-	}
-	defer rows.Close()
-
-	type key struct{ atespace, name string }
-	var keys []key
-	var result []*ateapipb.ActorTemplateVersion
-	for rows.Next() {
-		var k key
-		var protoBytes []byte
-		if err := rows.Scan(&k.atespace, &k.name, &protoBytes); err != nil {
-			return nil, "", fmt.Errorf("scanning actor template version row: %w", err)
-		}
-		version := &ateapipb.ActorTemplateVersion{}
-		if err := proto.Unmarshal(protoBytes, version); err != nil {
-			return nil, "", fmt.Errorf("unmarshaling actor template version: %w", err)
-		}
-		keys = append(keys, k)
-		result = append(result, version)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("listing actor template versions: %w", err)
-	}
-	var nextToken string
-	if len(result) > int(pageSize) {
-		result = result[:pageSize]
-		last := keys[pageSize-1]
-		lastParts := []string{last.atespace, last.name}
-		if atespace != "" {
-			lastParts = []string{last.name}
-		}
-		nextToken = encodePageToken(kindActorTemplateVersion, scope, lastParts)
-	}
-	return result, nextToken, nil
-}
-
-func (p *Persistence) DeleteActorTemplateVersion(ctx context.Context, versionRef resources.ActorTemplateVersionRef) (*ateapipb.ActorTemplateVersion, error) {
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("beginning actor template version delete: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
-
-	var protoBytes []byte
-	if err := tx.QueryRow(ctx, `
-		SELECT proto FROM actor_template_versions
-		WHERE atespace = $1 AND name = $2 FOR UPDATE`, versionRef.Atespace, versionRef.Name).Scan(&protoBytes); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, store.ErrNotFound
-		}
-		return nil, fmt.Errorf("locking actor template version %s for deletion: %w", versionRef, err)
-	}
-	deleted := &ateapipb.ActorTemplateVersion{}
-	if err := proto.Unmarshal(protoBytes, deleted); err != nil {
-		return nil, fmt.Errorf("unmarshaling actor template version for deletion: %w", err)
-	}
-
-	parentRef := resources.ActorTemplateRefFromObjectRef(deleted.GetActorTemplate())
-	var parentBytes []byte
-	err = tx.QueryRow(ctx, `
-		SELECT proto FROM actor_templates
-		WHERE atespace = $1 AND name = $2 FOR UPDATE`, parentRef.Atespace, parentRef.Name).Scan(&parentBytes)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("locking parent actor template %s: %w", parentRef, err)
-	}
-	if err == nil {
-		parent := &ateapipb.ActorTemplate{}
-		if err := proto.Unmarshal(parentBytes, parent); err != nil {
-			return nil, fmt.Errorf("unmarshaling parent actor template: %w", err)
-		}
-		if resources.ActorTemplateVersionRefFromObjectRef(parent.GetDefaultVersionOnCreate()) == versionRef {
-			return nil, store.ErrFailedPrecondition
-		}
-	}
-
-	if golden := deleted.GetGoldenSnapshot(); golden != nil {
-		if _, err := tx.Exec(ctx, `DELETE FROM actor_snapshots WHERE atespace = $1 AND name = $2`, golden.GetAtespace(), golden.GetName()); err != nil {
-			if isForeignKeyViolation(err) {
-				return nil, store.ErrFailedPrecondition
-			}
-			return nil, fmt.Errorf("deleting golden actor snapshot %s/%s: %w", golden.GetAtespace(), golden.GetName(), err)
-		}
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM actor_template_versions WHERE atespace = $1 AND name = $2`, versionRef.Atespace, versionRef.Name); err != nil {
-		return nil, fmt.Errorf("deleting actor template version %s: %w", versionRef, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("committing actor template version delete: %w", err)
-	}
-	return deleted, nil
 }
 
 // --- Actors ---
@@ -705,7 +530,10 @@ func validateUpdateActorMutation(storedActor, mutatedActor *ateapipb.Actor) erro
 	return nil
 }
 
-func (p *Persistence) UpdateActor(ctx context.Context, actorRef resources.ActorRef, mutate func(*ateapipb.Actor) error) (*ateapipb.Actor, error) {
+func (p *Persistence) UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(*ateapipb.Actor) error) (*ateapipb.Actor, error) {
+	if err := precondition.Validate(); err != nil {
+		return nil, err
+	}
 	atespace, name := actorRef.Atespace, actorRef.Name
 
 	tx, err := p.pool.Begin(ctx)
@@ -728,6 +556,9 @@ func (p *Persistence) UpdateActor(ctx context.Context, actorRef resources.ActorR
 	dbActor := &ateapipb.Actor{}
 	if err := proto.Unmarshal(protoBytes, dbActor); err != nil {
 		return nil, fmt.Errorf("unmarshaling actor for update: %w", err)
+	}
+	if err := precondition.Check(dbActor.GetMetadata()); err != nil {
+		return nil, err
 	}
 	actorBeforeMutation := proto.Clone(dbActor).(*ateapipb.Actor)
 	if err := mutate(dbActor); err != nil {
@@ -789,7 +620,7 @@ func (p *Persistence) DeleteActor(ctx context.Context, actorRef resources.ActorR
 	if err := proto.Unmarshal(protoBytes, out); err != nil {
 		return nil, fmt.Errorf("unmarshaling actor for deletion: %w", err)
 	}
-	if out.GetStatus() != ateapipb.Actor_STATUS_DELETING {
+	if out.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_DELETING {
 		return nil, store.ErrFailedPrecondition
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM actors WHERE atespace = $1 AND name = $2`, atespace, name); err != nil {
@@ -801,11 +632,19 @@ func (p *Persistence) DeleteActor(ctx context.Context, actorRef resources.ActorR
 	return out, nil
 }
 
-func (p *Persistence) ListActors(ctx context.Context, atespace string, pageSize int32, pageTokenStr string) ([]*ateapipb.Actor, string, error) {
+func (p *Persistence) ListActors(ctx context.Context, atespace string, opts store.ListOptions) (store.ListResponse[*ateapipb.Actor], error) {
+	var items []*ateapipb.Actor
+	var nextToken string
+	var err error
 	if atespace != "" {
-		return p.listActorsScoped(ctx, atespace, pageSize, pageTokenStr)
+		items, nextToken, err = p.listActorsScoped(ctx, atespace, opts.PageSize, opts.PageToken)
+	} else {
+		items, nextToken, err = p.listActorsGlobal(ctx, opts.PageSize, opts.PageToken)
 	}
-	return p.listActorsGlobal(ctx, pageSize, pageTokenStr)
+	if err != nil {
+		return store.ListResponse[*ateapipb.Actor]{}, err
+	}
+	return store.ListResponse[*ateapipb.Actor]{Items: items, NextPageToken: nextToken}, nil
 }
 
 func (p *Persistence) listActorsScoped(ctx context.Context, atespace string, pageSize int32, pageTokenStr string) ([]*ateapipb.Actor, string, error) {
@@ -949,15 +788,36 @@ func (p *Persistence) GetActorSnapshot(ctx context.Context, atespace, name strin
 	return getActorSnapshotRow(ctx, p.pool, atespace, name)
 }
 
-func (p *Persistence) GetActorSnapshotByTag(ctx context.Context, atespace, name string) (*ateapipb.ActorSnapshot, *ateapipb.ActorSnapshotTag, error) {
-	return p.getActorSnapshotByTag(ctx, p.pool, atespace, name)
+func (p *Persistence) GetActorSnapshotTag(ctx context.Context, atespace, name string) (*ateapipb.ActorSnapshotTag, error) {
+	var protoBytes []byte
+	if err := p.pool.QueryRow(ctx, `
+		SELECT proto FROM actor_snapshot_tags
+		WHERE atespace = $1 AND name = $2`, atespace, name).Scan(&protoBytes); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, fmt.Errorf("getting actor snapshot tag %s/%s: %w", atespace, name, err)
+	}
+	tag := &ateapipb.ActorSnapshotTag{}
+	if err := proto.Unmarshal(protoBytes, tag); err != nil {
+		return nil, fmt.Errorf("unmarshaling actor snapshot tag: %w", err)
+	}
+	return tag, nil
 }
 
-func (p *Persistence) ListActorSnapshots(ctx context.Context, atespace string, pageSize int32, pageTokenStr string) ([]*ateapipb.ActorSnapshot, string, error) {
+func (p *Persistence) ListActorSnapshots(ctx context.Context, atespace string, opts store.ListOptions) (store.ListResponse[*ateapipb.ActorSnapshot], error) {
+	var items []*ateapipb.ActorSnapshot
+	var nextToken string
+	var err error
 	if atespace != "" {
-		return p.listActorSnapshotsScoped(ctx, atespace, pageSize, pageTokenStr)
+		items, nextToken, err = p.listActorSnapshotsScoped(ctx, atespace, opts.PageSize, opts.PageToken)
+	} else {
+		items, nextToken, err = p.listActorSnapshotsGlobal(ctx, opts.PageSize, opts.PageToken)
 	}
-	return p.listActorSnapshotsGlobal(ctx, pageSize, pageTokenStr)
+	if err != nil {
+		return store.ListResponse[*ateapipb.ActorSnapshot]{}, err
+	}
+	return store.ListResponse[*ateapipb.ActorSnapshot]{Items: items, NextPageToken: nextToken}, nil
 }
 
 func (p *Persistence) listActorSnapshotsScoped(ctx context.Context, atespace string, pageSize int32, pageTokenStr string) ([]*ateapipb.ActorSnapshot, string, error) {
@@ -1052,7 +912,7 @@ func (p *Persistence) listActorSnapshotsGlobal(ctx context.Context, pageSize int
 	return result, nextToken, nil
 }
 
-func (p *Persistence) TagActorSnapshot(ctx context.Context, snapshotAtespace, snapshotName string, tag *ateapipb.ActorSnapshotTag) (*ateapipb.ActorSnapshotTag, error) {
+func (p *Persistence) CreateActorSnapshotTag(ctx context.Context, snapshotAtespace, snapshotName string, tag *ateapipb.ActorSnapshotTag) (*ateapipb.ActorSnapshotTag, error) {
 	tagAtespace := tag.GetMetadata().GetAtespace()
 	tagName := tag.GetMetadata().GetName()
 	dbTag := proto.Clone(tag).(*ateapipb.ActorSnapshotTag)
@@ -1128,7 +988,11 @@ func validateUpdateActorSnapshotTagMutation(storedTag, mutatedTag *ateapipb.Acto
 	return nil
 }
 
-func (p *Persistence) UpdateActorSnapshotTag(ctx context.Context, atespace, name string, mutate func(*ateapipb.ActorSnapshotTag) error) (*ateapipb.ActorSnapshotTag, error) {
+func (p *Persistence) UpdateActorSnapshotTag(ctx context.Context, atespace, name string, precondition store.Precondition, mutate func(*ateapipb.ActorSnapshotTag) error) (*ateapipb.ActorSnapshotTag, error) {
+	if err := precondition.Validate(); err != nil {
+		return nil, err
+	}
+
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("beginning actor snapshot tag update: %w", err)
@@ -1149,6 +1013,9 @@ func (p *Persistence) UpdateActorSnapshotTag(ctx context.Context, atespace, name
 	dbTag := &ateapipb.ActorSnapshotTag{}
 	if err := proto.Unmarshal(currentBytes, dbTag); err != nil {
 		return nil, fmt.Errorf("unmarshaling actor snapshot tag: %w", err)
+	}
+	if err := precondition.Check(dbTag.GetMetadata()); err != nil {
+		return nil, err
 	}
 	tagBeforeMutation := proto.Clone(dbTag).(*ateapipb.ActorSnapshotTag)
 	if err := mutate(dbTag); err != nil {
@@ -1180,31 +1047,6 @@ func (p *Persistence) UpdateActorSnapshotTag(ctx context.Context, atespace, name
 		return nil, fmt.Errorf("committing actor snapshot tag update: %w", err)
 	}
 	return dbTag, nil
-}
-
-func (p *Persistence) getActorSnapshotByTag(ctx context.Context, q querier, atespace, name string) (*ateapipb.ActorSnapshot, *ateapipb.ActorSnapshotTag, error) {
-	var snapshotBytes, tagBytes []byte
-	err := q.QueryRow(ctx, `
-		SELECT s.proto, t.proto
-		FROM actor_snapshot_tags AS t
-		JOIN actor_snapshots AS s
-		  ON s.atespace = t.snapshot_atespace AND s.name = t.snapshot_name
-		WHERE t.atespace = $1 AND t.name = $2`, atespace, name).Scan(&snapshotBytes, &tagBytes)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil, store.ErrNotFound
-		}
-		return nil, nil, fmt.Errorf("resolving actor snapshot tag %s/%s: %w", atespace, name, err)
-	}
-	snapshot := &ateapipb.ActorSnapshot{}
-	if err := proto.Unmarshal(snapshotBytes, snapshot); err != nil {
-		return nil, nil, fmt.Errorf("unmarshaling actor snapshot: %w", err)
-	}
-	tag := &ateapipb.ActorSnapshotTag{}
-	if err := proto.Unmarshal(tagBytes, tag); err != nil {
-		return nil, nil, fmt.Errorf("unmarshaling actor snapshot tag: %w", err)
-	}
-	return snapshot, tag, nil
 }
 
 func (p *Persistence) DeleteActorSnapshotTag(ctx context.Context, atespace, name string) (*ateapipb.ActorSnapshotTag, error) {
@@ -1300,7 +1142,8 @@ func (p *Persistence) writeAndNotify(ctx context.Context, eventType store.Worker
 
 func (p *Persistence) CreateWorker(ctx context.Context, worker *ateapipb.Worker) error {
 	dbWorker := proto.Clone(worker).(*ateapipb.Worker)
-	dbWorker.Version = 1
+	// Workers are global-scoped, so the atespace is always empty.
+	dbWorker.Metadata = newCreateMetadata("", worker.GetMetadata().GetName())
 
 	protoBytes, err := proto.Marshal(dbWorker)
 	if err != nil {
@@ -1309,9 +1152,9 @@ func (p *Persistence) CreateWorker(ctx context.Context, worker *ateapipb.Worker)
 
 	err = p.writeAndNotify(ctx, store.WorkerEventCreated, dbWorker, func(ctx context.Context, tx pgx.Tx) (bool, error) {
 		_, err := tx.Exec(ctx, `
-			INSERT INTO workers (worker_namespace, worker_pool, worker_pod, version, proto)
-			VALUES ($1, $2, $3, $4, $5)`,
-			dbWorker.GetWorkerNamespace(), dbWorker.GetWorkerPool(), dbWorker.GetWorkerPod(), dbWorker.GetVersion(), protoBytes)
+			INSERT INTO workers (name, uid, version, proto)
+			VALUES ($1, $2, $3, $4)`,
+			dbWorker.GetMetadata().GetName(), dbWorker.GetMetadata().GetUid(), dbWorker.GetMetadata().GetVersion(), protoBytes)
 		if err != nil {
 			return false, err
 		}
@@ -1326,15 +1169,14 @@ func (p *Persistence) CreateWorker(ctx context.Context, worker *ateapipb.Worker)
 	return nil
 }
 
-func getWorkerRow(ctx context.Context, q querier, namespace, poolName, pod string) (*ateapipb.Worker, error) {
+func getWorkerRow(ctx context.Context, q querier, name string) (*ateapipb.Worker, error) {
 	var protoBytes []byte
-	err := q.QueryRow(ctx, `SELECT proto FROM workers WHERE worker_namespace = $1 AND worker_pool = $2 AND worker_pod = $3`,
-		namespace, poolName, pod).Scan(&protoBytes)
+	err := q.QueryRow(ctx, `SELECT proto FROM workers WHERE name = $1`, name).Scan(&protoBytes)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
-		return nil, fmt.Errorf("getting worker %s/%s/%s: %w", namespace, poolName, pod, err)
+		return nil, fmt.Errorf("getting worker %s: %w", name, err)
 	}
 	out := &ateapipb.Worker{}
 	if err := proto.Unmarshal(protoBytes, out); err != nil {
@@ -1343,15 +1185,16 @@ func getWorkerRow(ctx context.Context, q querier, namespace, poolName, pod strin
 	return out, nil
 }
 
-func (p *Persistence) GetWorker(ctx context.Context, namespace, poolName, pod string) (*ateapipb.Worker, error) {
-	return getWorkerRow(ctx, p.pool, namespace, poolName, pod)
+func (p *Persistence) GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error) {
+	return getWorkerRow(ctx, p.pool, name)
 }
 
 func (p *Persistence) UpdateWorker(ctx context.Context, worker *ateapipb.Worker, expectedVersion int64) error {
-	namespace, poolName, pod := worker.GetWorkerNamespace(), worker.GetWorkerPool(), worker.GetWorkerPod()
+	name := worker.GetMetadata().GetName()
 
 	dbWorker := proto.Clone(worker).(*ateapipb.Worker)
-	dbWorker.Version = expectedVersion + 1
+	dbWorker.Metadata = newUpdateMetadata(worker.GetMetadata())
+	dbWorker.Metadata.Version = expectedVersion + 1
 
 	protoBytes, err := proto.Marshal(dbWorker)
 	if err != nil {
@@ -1363,95 +1206,93 @@ func (p *Persistence) UpdateWorker(ctx context.Context, worker *ateapipb.Worker,
 		err := tx.QueryRow(ctx, `
 			UPDATE workers
 			SET version = $1, proto = $2
-			WHERE worker_namespace = $3 AND worker_pool = $4 AND worker_pod = $5
-			  AND version = $6
+			WHERE name = $3 AND version = $4
 			RETURNING proto`,
-			dbWorker.GetVersion(), protoBytes, namespace, poolName, pod, expectedVersion,
+			dbWorker.GetMetadata().GetVersion(), protoBytes, name, expectedVersion,
 		).Scan(&returned)
 		if err == nil {
 			return true, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("updating worker %s/%s/%s: %w", namespace, poolName, pod, err)
+			return false, fmt.Errorf("updating worker %s: %w", name, err)
 		}
 
-		current, getErr := getWorkerRow(ctx, tx, namespace, poolName, pod)
+		current, getErr := getWorkerRow(ctx, tx, name)
 		if getErr != nil {
 			return false, getErr
 		}
-		if current.GetVersion() != expectedVersion {
+		if current.GetMetadata().GetVersion() != expectedVersion {
 			return false, store.ErrVersionConflict
 		}
-		return false, fmt.Errorf("update worker %s/%s/%s: no row matched but current state is otherwise consistent", namespace, poolName, pod)
+		return false, fmt.Errorf("update worker %s: no row matched but current state is otherwise consistent", name)
 	})
 }
 
-func (p *Persistence) DeleteWorker(ctx context.Context, namespace, poolName, pod string) error {
-	deletedEvent := &ateapipb.Worker{WorkerNamespace: namespace, WorkerPod: pod}
+func (p *Persistence) DeleteWorker(ctx context.Context, name string) error {
+	deletedEvent := &ateapipb.Worker{Metadata: &ateapipb.ResourceMetadata{Name: name}}
 	return p.writeAndNotify(ctx, store.WorkerEventDeleted, deletedEvent, func(ctx context.Context, tx pgx.Tx) (bool, error) {
 		var protoBytes []byte
 		err := tx.QueryRow(ctx, `
 			DELETE FROM workers
-			WHERE worker_namespace = $1 AND worker_pool = $2 AND worker_pod = $3
-			RETURNING proto`, namespace, poolName, pod).Scan(&protoBytes)
+			WHERE name = $1
+			RETURNING proto`, name).Scan(&protoBytes)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				// Idempotent: nothing existed, so nothing to notify either.
 				return false, nil
 			}
-			return false, fmt.Errorf("deleting worker %s/%s/%s: %w", namespace, poolName, pod, err)
+			return false, fmt.Errorf("deleting worker %s: %w", name, err)
 		}
 		return true, nil
 	})
 }
 
-func (p *Persistence) ListWorkers(ctx context.Context, pageSize int32, pageTokenStr string) ([]*ateapipb.Worker, string, error) {
-	token, err := decodePageToken(pageTokenStr, kindWorker, "", 3)
+func (p *Persistence) ListWorkers(ctx context.Context, opts store.ListOptions) (store.ListResponse[*ateapipb.Worker], error) {
+	pageSize, pageTokenStr := opts.PageSize, opts.PageToken
+	token, err := decodePageToken(pageTokenStr, kindWorker, "", 1)
 	if err != nil {
-		return nil, "", err
+		return store.ListResponse[*ateapipb.Worker]{}, err
 	}
-	var lastNS, lastPool, lastPod *string
-	if len(token.Last) == 3 {
-		lastNS, lastPool, lastPod = &token.Last[0], &token.Last[1], &token.Last[2]
+	var last *string
+	if len(token.Last) > 0 {
+		last = &token.Last[0]
 	}
 
 	rows, err := p.pool.Query(ctx, `
-		SELECT worker_namespace, worker_pool, worker_pod, proto FROM workers
-		WHERE $1::text IS NULL OR (worker_namespace, worker_pool, worker_pod) > ($1, $2, $3)
-		ORDER BY worker_namespace, worker_pool, worker_pod
-		LIMIT $4`, lastNS, lastPool, lastPod, int64(pageSize)+1)
+		SELECT name, proto FROM workers
+		WHERE $1::text IS NULL OR name > $1
+		ORDER BY name
+		LIMIT $2`, last, int64(pageSize)+1)
 	if err != nil {
-		return nil, "", fmt.Errorf("listing workers: %w", err)
+		return store.ListResponse[*ateapipb.Worker]{}, fmt.Errorf("listing workers: %w", err)
 	}
 	defer rows.Close()
 
-	type key struct{ namespace, pool, pod string }
-	var keys []key
+	var names []string
 	var result []*ateapipb.Worker
 	for rows.Next() {
-		var k key
+		var name string
 		var protoBytes []byte
-		if err := rows.Scan(&k.namespace, &k.pool, &k.pod, &protoBytes); err != nil {
-			return nil, "", fmt.Errorf("scanning worker row: %w", err)
+		if err := rows.Scan(&name, &protoBytes); err != nil {
+			return store.ListResponse[*ateapipb.Worker]{}, fmt.Errorf("scanning worker row: %w", err)
 		}
 		w := &ateapipb.Worker{}
 		if err := proto.Unmarshal(protoBytes, w); err != nil {
-			return nil, "", fmt.Errorf("unmarshaling worker: %w", err)
+			return store.ListResponse[*ateapipb.Worker]{}, fmt.Errorf("unmarshaling worker: %w", err)
 		}
 		result = append(result, w)
-		keys = append(keys, k)
+		names = append(names, name)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("listing workers: %w", err)
+		return store.ListResponse[*ateapipb.Worker]{}, fmt.Errorf("listing workers: %w", err)
 	}
 
 	var nextToken string
 	if len(result) > int(pageSize) {
 		result = result[:pageSize]
-		last := keys[pageSize-1]
-		nextToken = encodePageToken(kindWorker, "", []string{last.namespace, last.pool, last.pod})
+		nextToken = encodePageToken(kindWorker, "", []string{names[pageSize-1]})
 	}
-	return result, nextToken, nil
+	return store.ListResponse[*ateapipb.Worker]{Items: result, NextPageToken: nextToken}, nil
 }
 
 // WatchWorkers acquires a dedicated connection (hijacked out of the pool, so
@@ -1647,7 +1488,7 @@ func (p *Persistence) releaseLease(ctx context.Context, key, token string) error
 // --- Debug ---
 
 func (p *Persistence) DebugClearAll(ctx context.Context) error {
-	if _, err := p.pool.Exec(ctx, `TRUNCATE atespaces, actors, actor_templates, actor_template_versions, actor_snapshots, actor_snapshot_tags, workers, leases`); err != nil {
+	if _, err := p.pool.Exec(ctx, `TRUNCATE atespaces, actors, actor_templates, actor_snapshots, actor_snapshot_tags, workers, leases`); err != nil {
 		return fmt.Errorf("truncating tables: %w", err)
 	}
 	return nil

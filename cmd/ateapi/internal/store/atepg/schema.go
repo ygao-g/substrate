@@ -52,20 +52,6 @@ CREATE TABLE IF NOT EXISTS actor_templates (
     PRIMARY KEY (atespace, name)
 );
 
-CREATE TABLE IF NOT EXISTS actor_template_versions (
-    atespace                  text NOT NULL
-        REFERENCES atespaces(name) ON DELETE RESTRICT,
-    name                      text NOT NULL,
-    actor_template_atespace   text NOT NULL,
-    actor_template_name       text NOT NULL,
-    uid                       text NOT NULL UNIQUE,
-    proto                     bytea NOT NULL,
-    PRIMARY KEY (atespace, name)
-);
-
-CREATE INDEX IF NOT EXISTS actor_template_versions_parent_idx
-    ON actor_template_versions (actor_template_atespace, actor_template_name);
-
 CREATE TABLE IF NOT EXISTS actor_snapshots (
     atespace  text NOT NULL,
     name      text NOT NULL,
@@ -86,13 +72,13 @@ CREATE TABLE IF NOT EXISTS actor_snapshot_tags (
         REFERENCES actor_snapshots(atespace, name) ON DELETE RESTRICT
 );
 
+-- Workers are global-scoped and named by their Kubernetes pod UID, so name
+-- alone is the primary key.
 CREATE TABLE IF NOT EXISTS workers (
-    worker_namespace  text NOT NULL,
-    worker_pool       text NOT NULL,
-    worker_pod        text NOT NULL,
-    version           bigint NOT NULL,
-    proto             bytea NOT NULL,
-    PRIMARY KEY (worker_namespace, worker_pool, worker_pod)
+    name     text PRIMARY KEY,
+    uid      text NOT NULL UNIQUE,
+    version  bigint NOT NULL,
+    proto    bytea NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS leases (
