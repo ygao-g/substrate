@@ -19,6 +19,7 @@ package ateomnet
 import (
 	"context"
 	"errors"
+	"net"
 	"runtime"
 	"testing"
 
@@ -86,6 +87,26 @@ func requireNftables(t *testing.T) {
 	}
 }
 
+// actorNftTableExists reports whether the actor table is present in the family
+// InstallActorNftablesRules creates it in. The family is load-bearing:
+// ListTablesOfFamily puts it in the netlink dump header, so the kernel filters
+// the dump and a query for the wrong family comes back empty rather than
+// erroring.
+func actorNftTableExists(t *testing.T) bool {
+	t.Helper()
+	c := &nftables.Conn{}
+	tables, err := c.ListTablesOfFamily(nftables.TableFamilyINet)
+	if err != nil {
+		t.Fatalf("listing inet nftables tables: %v", err)
+	}
+	for _, table := range tables {
+		if table.Name == ActorNftTableName {
+			return true
+		}
+	}
+	return false
+}
+
 // linkByName returns the link, or nil when it does not exist.
 func linkByName(t *testing.T, name string) netlink.Link {
 	t.Helper()
@@ -113,6 +134,39 @@ func hasAddr(t *testing.T, link netlink.Link, cidr string) bool {
 		}
 	}
 	return false
+}
+
+// assertDefaultRoute requires link to carry -- or, when want is false, to not
+// carry -- a default route via gw in the given family.
+func assertDefaultRoute(t *testing.T, link netlink.Link, family int, gw net.IP, want bool) {
+	t.Helper()
+
+	dst := "0.0.0.0/0"
+	if family == netlink.FAMILY_V6 {
+		dst = "::/0"
+	}
+	routes, err := netlink.RouteList(link, family)
+	if err != nil {
+		t.Fatalf("listing %s routes of %q: %v", dst, link.Attrs().Name, err)
+	}
+	var got bool
+	for _, route := range routes {
+		// A default route reports its destination either as nil or as an
+		// explicit zero-length mask, depending on how the kernel rendered it.
+		ones := 0
+		if route.Dst != nil {
+			ones, _ = route.Dst.Mask.Size()
+		}
+		if ones == 0 && route.Gw.Equal(gw) {
+			got = true
+		}
+	}
+	switch {
+	case want && !got:
+		t.Errorf("%q has no %s route via %s, got %v", link.Attrs().Name, dst, gw, routes)
+	case !want && got:
+		t.Errorf("%q has a %s route via %s, want none, got %v", link.Attrs().Name, dst, gw, routes)
+	}
 }
 
 // TestSetupActorNetworkFinalState pins the namespace state gVisor and the
@@ -169,28 +223,7 @@ func TestSetupActorNetworkFinalState(t *testing.T) {
 				t.Error("interior loopback is not up")
 			}
 
-			routes, err := netlink.RouteList(actor, netlink.FAMILY_V4)
-			if err != nil {
-				t.Fatalf("listing interior routes: %v", err)
-			}
-			// A default route reports its destination either as nil or as an
-			// explicit 0.0.0.0/0, depending on how the kernel rendered it.
-			isDefault := func(route netlink.Route) bool {
-				if route.Dst == nil {
-					return true
-				}
-				ones, _ := route.Dst.Mask.Size()
-				return ones == 0
-			}
-			var haveDefault bool
-			for _, route := range routes {
-				if isDefault(route) && route.Gw.Equal(ActorVethGwIP) {
-					haveDefault = true
-				}
-			}
-			if !haveDefault {
-				t.Errorf("interior netns has no default route via %s, got %v", ActorVethGateway, routes)
-			}
+			assertDefaultRoute(t, actor, netlink.FAMILY_V4, ActorVethGwIP, true)
 			return nil
 		}); err != nil {
 			t.Fatalf("inspecting interior netns: %v", err)
@@ -215,8 +248,19 @@ func TestSetupActorNetworkIsRepeatable(t *testing.T) {
 			if linkByName(t, HostVethName) == nil {
 				t.Fatalf("host veth %q missing after activation %d", HostVethName, i)
 			}
+			if !actorNftTableExists(t) {
+				t.Fatalf("nftables table %q missing after activation %d", ActorNftTableName, i)
+			}
 			if err := CleanupActorNetwork(ctx, interior); err != nil {
 				t.Fatalf("CleanupActorNetwork (activation %d): %v", i, err)
+			}
+			// Install and teardown have to name the same family. When they do not,
+			// teardown's dump comes back empty, its "missing tables are already
+			// clean" path reports success, and the table survives -- so the next
+			// activation stacks another copy of every chain and rule onto it and
+			// the leak is invisible to every other assertion here.
+			if actorNftTableExists(t) {
+				t.Fatalf("nftables table %q survived cleanup after activation %d", ActorNftTableName, i)
 			}
 		}
 
@@ -228,6 +272,9 @@ func TestSetupActorNetworkIsRepeatable(t *testing.T) {
 		if stray := linkByName(t, HostVethName); stray != nil {
 			t.Errorf("host veth %q survived cleanup", HostVethName)
 		}
+		if actorNftTableExists(t) {
+			t.Errorf("nftables table %q survived a repeated cleanup", ActorNftTableName)
+		}
 		if err := NetNSDo(ctx, interior, func(context.Context) error {
 			if stray := linkByName(t, ActorVethName); stray != nil {
 				t.Errorf("actor veth %q survived cleanup", ActorVethName)
@@ -235,6 +282,39 @@ func TestSetupActorNetworkIsRepeatable(t *testing.T) {
 			return nil
 		}); err != nil {
 			t.Fatalf("inspecting interior netns: %v", err)
+		}
+	})
+}
+
+// TestRemoveActorNftablesRulesSweepsIPv4Family covers the upgrade case: a
+// worker whose previous ateom created the actor table in the ip family. Table
+// names are unique per family, so an inet-only cleanup could never see that
+// table, and it would have kept redirecting alongside the inet one installed
+// next to it.
+func TestRemoveActorNftablesRulesSweepsIPv4Family(t *testing.T) {
+	roottest.Require(t, "creating network namespaces and nftables rules")
+
+	withTestNetNS(t, func(netns.NsHandle) {
+		requireNftables(t)
+
+		c := &nftables.Conn{}
+		c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: ActorNftTableName})
+		if err := c.Flush(); err != nil {
+			t.Fatalf("creating the stand-in ip actor table: %v", err)
+		}
+
+		if err := RemoveActorNftablesRules(); err != nil {
+			t.Fatalf("RemoveActorNftablesRules: %v", err)
+		}
+
+		tables, err := c.ListTablesOfFamily(nftables.TableFamilyIPv4)
+		if err != nil {
+			t.Fatalf("listing ip nftables tables: %v", err)
+		}
+		for _, table := range tables {
+			if table.Name == ActorNftTableName {
+				t.Fatal("the ip actor table survived cleanup")
+			}
 		}
 	})
 }

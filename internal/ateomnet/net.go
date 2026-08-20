@@ -259,8 +259,9 @@ func InstallActorNftablesRules(egressPort uint16) error {
 	// rules in an ateom-owned table makes cleanup simple and avoids mutating
 	// Kubernetes or CNI-managed chains directly.
 	//
-	// TODO: Add IPv6 veth addressing, forwarding, and nftables rules once actor
-	// networking supports dual-stack pods. The current actor network is IPv4-only.
+	// The table is in the inet family so one table can carry both address
+	// families once the actor veth is dual-stack. That makes a bare payload
+	// match ambiguous, so every match opens with an NFPROTO comparison.
 	//
 	// The rules do three things:
 	//
@@ -278,7 +279,7 @@ func InstallActorNftablesRules(egressPort uint16) error {
 
 	c := &nftables.Conn{}
 	table := &nftables.Table{
-		Family: nftables.TableFamilyIPv4,
+		Family: nftables.TableFamilyINet,
 		Name:   ActorNftTableName,
 	}
 	c.AddTable(table)
@@ -335,20 +336,25 @@ func RemoveActorNftablesRules() error {
 	// Delete the whole ateom nftables table if it exists. The table is
 	// per-worker and currently per-active-actor because this worker path runs at
 	// most one actor at a time. Missing tables are treated as already clean.
+	//
+	// Both families are swept, not just the inet one this installs into: a table
+	// name is unique per family, so an ip table left by an earlier ateom would
+	// survive every later cleanup and keep redirecting alongside the new one.
 	c := &nftables.Conn{}
-	tables, err := c.ListTablesOfFamily(nftables.TableFamilyIPv4)
-	if err != nil {
-		return fmt.Errorf("while listing nftables tables: %w", err)
-	}
-	for _, table := range tables {
-		if table.Name != ActorNftTableName {
-			continue
+	for _, family := range []nftables.TableFamily{nftables.TableFamilyINet, nftables.TableFamilyIPv4} {
+		tables, err := c.ListTablesOfFamily(family)
+		if err != nil {
+			return fmt.Errorf("while listing nftables tables: %w", err)
 		}
-		c.DelTable(table)
-		if err := c.Flush(); err != nil {
-			return fmt.Errorf("while deleting actor nftables table: %w", err)
+		for _, table := range tables {
+			if table.Name != ActorNftTableName {
+				continue
+			}
+			c.DelTable(table)
+			if err := c.Flush(); err != nil {
+				return fmt.Errorf("while deleting actor nftables table: %w", err)
+			}
 		}
-		return nil
 	}
 	return nil
 }
@@ -359,6 +365,12 @@ func IPSourceEqual(ip string) []expr.Any {
 
 func IPPayloadEqual(offset uint32, ip string) []expr.Any {
 	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 1,
+			Data:     []byte{unix.NFPROTO_IPV4},
+		},
 		&expr.Payload{
 			DestRegister: 1,
 			Base:         expr.PayloadBaseNetworkHeader,
