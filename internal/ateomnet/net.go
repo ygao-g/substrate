@@ -120,6 +120,11 @@ func LinkIPv6Enabled(name string) bool {
 // IPv6 address, which is what decides the families the actor can egress on.
 // It must run in the worker pod netns.
 //
+// This answers whether the pod has an address to egress from, not whether that
+// address routes anywhere: IsGlobalUnicast is true for a ULA, and dual-stack
+// kind hands pods a ULA with no path off the host. Reachability is the
+// cluster's problem, not something this can decide from inside the netns.
+//
 // Scoped to eth0 rather than the whole netns on purpose: ActorVethName is also
 // "eth0", so a netns-wide scan that filtered out the ateomnet link names by
 // name would filter out the pod's own interface too and report false on every
