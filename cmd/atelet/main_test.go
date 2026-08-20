@@ -119,6 +119,127 @@ func TestSnapshotManifestRequiresPauseImage(t *testing.T) {
 	}
 }
 
+func TestWriteSystemInfoVolume(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "system-info", "vol1")
+	si := &ateletpb.SystemInfoVolume{
+		DataSources: []*ateletpb.SystemInfoDataSource{
+			{DataSource: &ateletpb.SystemInfoDataSource_ActorMetadata{
+				ActorMetadata: &ateletpb.ActorMetadataDataSource{
+					Items: []*ateletpb.ActorMetadataItem{
+						{Field: ateletpb.ActorMetadataField_ACTOR_METADATA_FIELD_NAME, Path: "actor-name"},
+						{Field: ateletpb.ActorMetadataField_ACTOR_METADATA_FIELD_ATESPACE, Path: "atespace"},
+						{Field: ateletpb.ActorMetadataField_ACTOR_METADATA_FIELD_UID, Path: "identity/actor-uid"},
+					},
+				},
+			}},
+		},
+	}
+
+	golden := resources.ActorRef{Atespace: "ate-e2e-probe", Name: "golden-actor"}
+	if err := writeSystemInfoVolume(ctx, root, golden, "uid-golden", si); err != nil {
+		t.Fatalf("writeSystemInfoVolume: %v", err)
+	}
+
+	// Overwrite with a different actor, as happens when a snapshot taken from
+	// one actor seeds another on resume: files must carry the new values.
+	alpha := resources.ActorRef{Atespace: "ate-e2e-probe", Name: "probe-alpha"}
+	if err := writeSystemInfoVolume(ctx, root, alpha, "uid-alpha", si); err != nil {
+		t.Fatalf("writeSystemInfoVolume (rewrite): %v", err)
+	}
+
+	// Values are written raw, no trailing newline.
+	for path, want := range map[string]string{
+		"actor-name":         "probe-alpha",
+		"atespace":           "ate-e2e-probe",
+		"identity/actor-uid": "uid-alpha",
+	} {
+		t.Run(path, func(t *testing.T) {
+			target := filepath.Join(root, path)
+			got, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatalf("reading %q: %v", target, err)
+			}
+			if string(got) != want {
+				t.Errorf("content = %q, want %q", got, want)
+			}
+			info, err := os.Stat(target)
+			if err != nil {
+				t.Fatalf("stat %q: %v", target, err)
+			}
+			if perm := info.Mode().Perm(); perm != 0o644 {
+				t.Errorf("perm = %o, want 644", perm)
+			}
+		})
+	}
+}
+
+// TestWriteSystemInfoVolume_StableRealPaths pins the path-stability contract
+// the restore paths depend on: the micro-VM virtiofsds run in find-paths
+// migration mode, which re-binds the guest's FUSE state to files by the paths
+// recorded at suspend, and gVisor's gofer likewise re-opens files by path on
+// restore. Projected files must therefore be plain files at stable real
+// paths — no symlink indirection — and regenerating the volume must not move
+// or delete a path that guest state may reference.
+func TestWriteSystemInfoVolume_StableRealPaths(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "system-info", "vol1")
+	si := &ateletpb.SystemInfoVolume{
+		DataSources: []*ateletpb.SystemInfoDataSource{
+			{DataSource: &ateletpb.SystemInfoDataSource_ActorMetadata{
+				ActorMetadata: &ateletpb.ActorMetadataDataSource{
+					Items: []*ateletpb.ActorMetadataItem{
+						{Field: ateletpb.ActorMetadataField_ACTOR_METADATA_FIELD_NAME, Path: "actor-name"},
+						{Field: ateletpb.ActorMetadataField_ACTOR_METADATA_FIELD_UID, Path: "identity/actor-uid"},
+					},
+				},
+			}},
+		},
+	}
+
+	golden := resources.ActorRef{Atespace: "ate-e2e-probe", Name: "golden-actor"}
+	if err := writeSystemInfoVolume(ctx, root, golden, "uid-golden", si); err != nil {
+		t.Fatalf("writeSystemInfoVolume: %v", err)
+	}
+
+	realBefore := map[string]string{}
+	for _, p := range []string{"actor-name", "identity/actor-uid"} {
+		visible := filepath.Join(root, p)
+		fi, err := os.Lstat(visible)
+		if err != nil {
+			t.Fatalf("lstat %q: %v", visible, err)
+		}
+		if !fi.Mode().IsRegular() {
+			t.Errorf("%q is %v, want a regular file: symlink indirection moves the real path on regeneration, which find-paths cannot re-bind", visible, fi.Mode().Type())
+		}
+		real, err := filepath.EvalSymlinks(visible)
+		if err != nil {
+			t.Fatalf("eval symlinks %q: %v", visible, err)
+		}
+		realBefore[p] = real
+	}
+
+	// Regenerate for a different actor, as a restore from a shared golden
+	// snapshot does.
+	alpha := resources.ActorRef{Atespace: "ate-e2e-probe", Name: "probe-alpha"}
+	if err := writeSystemInfoVolume(ctx, root, alpha, "uid-alpha", si); err != nil {
+		t.Fatalf("writeSystemInfoVolume (rewrite): %v", err)
+	}
+
+	for _, p := range []string{"actor-name", "identity/actor-uid"} {
+		real, err := filepath.EvalSymlinks(filepath.Join(root, p))
+		if err != nil {
+			t.Fatalf("eval symlinks after rewrite %q: %v", p, err)
+		}
+		if real != realBefore[p] {
+			t.Errorf("%q real path moved on regeneration: %q -> %q; guest state recorded at suspend cannot re-bind", p, realBefore[p], real)
+		}
+		if _, err := os.Stat(realBefore[p]); err != nil {
+			t.Errorf("pre-rewrite real path %q gone after regeneration: %v; find-paths re-open of a suspend-time path would fail", realBefore[p], err)
+		}
+	}
+}
+
 func TestWriteFileAtomic(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "actor-id")
@@ -693,7 +814,10 @@ func TestBuildAteomWorkloadSpecForwardsReadyz(t *testing.T) {
 			{Name: "without-probe"},
 		},
 	}
-	got := buildAteomWorkloadSpec(in)
+	got, err := buildAteomWorkloadSpec(in)
+	if err != nil {
+		t.Fatalf("buildAteomWorkloadSpec failed: %v", err)
+	}
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("buildAteomWorkloadSpec mismatch (-want +got):\n%s", diff)
 	}
@@ -702,9 +826,10 @@ func TestBuildAteomWorkloadSpecForwardsReadyz(t *testing.T) {
 func TestBuildAteomWorkloadSpecForwardsDurableDirMounts(t *testing.T) {
 	in := &ateletpb.WorkloadSpec{
 		Volumes: []*ateletpb.Volume{
-			{Name: "data", Type: ateletpb.VolumeType_VOLUME_TYPE_DURABLE_DIR},
-			{Name: "cache", Type: ateletpb.VolumeType_VOLUME_TYPE_DURABLE_DIR},
-			{Name: "scratch", Type: ateletpb.VolumeType_VOLUME_TYPE_EXTERNAL},
+			{Name: "data", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
+			{Name: "cache", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
+			{Name: "scratch", Source: &ateletpb.Volume_External{External: &ateletpb.ExternalVolumeSource{}}},
+			{Name: "system-info", Source: &ateletpb.Volume_SystemInfo{SystemInfo: &ateletpb.SystemInfoVolume{}}},
 		},
 		Containers: []*ateletpb.Container{
 			{
@@ -712,9 +837,8 @@ func TestBuildAteomWorkloadSpecForwardsDurableDirMounts(t *testing.T) {
 				VolumeMounts: []*ateletpb.VolumeMount{
 					{Name: "data", MountPath: "/home/counter"},
 					{Name: "cache", MountPath: "/var/cache"},
-					// Only durable-dir volumes cross to ateom; other volume
-					// types are mounted by atelet itself.
 					{Name: "scratch", MountPath: "/scratch"},
+					{Name: "system-info", MountPath: "/run/ate"},
 				},
 			},
 			{
@@ -736,6 +860,12 @@ func TestBuildAteomWorkloadSpecForwardsDurableDirMounts(t *testing.T) {
 					{VolumeName: "data", MountPath: "/home/counter"},
 					{VolumeName: "cache", MountPath: "/var/cache"},
 				},
+				CsiVolumeMounts: []*ateompb.VolumeMount{
+					{VolumeName: "scratch", MountPath: "/scratch"},
+				},
+				SystemInfoVolumeMounts: []*ateompb.SystemInfoVolumeMount{
+					{VolumeName: "system-info", MountPath: "/run/ate"},
+				},
 			},
 			{
 				Name: "sidecar",
@@ -746,9 +876,85 @@ func TestBuildAteomWorkloadSpecForwardsDurableDirMounts(t *testing.T) {
 			{Name: "no-volumes"},
 		},
 	}
-	got := buildAteomWorkloadSpec(in)
+	got, err := buildAteomWorkloadSpec(in)
+	if err != nil {
+		t.Fatalf("buildAteomWorkloadSpec failed: %v", err)
+	}
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("buildAteomWorkloadSpec mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBuildAteomWorkloadSpecValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      *ateletpb.WorkloadSpec
+		wantErr string
+	}{
+		{
+			name: "missing volume definition",
+			in: &ateletpb.WorkloadSpec{
+				Volumes: []*ateletpb.Volume{
+					{Name: "data", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
+				},
+				Containers: []*ateletpb.Container{
+					{
+						Name: "ctr",
+						VolumeMounts: []*ateletpb.VolumeMount{
+							{Name: "missing-vol", MountPath: "/data"},
+						},
+					},
+				},
+			},
+			wantErr: `container "ctr" mounts volume "missing-vol" which is not defined in workload volumes`,
+		},
+		{
+			name: "unsupported volume source",
+			in: &ateletpb.WorkloadSpec{
+				Volumes: []*ateletpb.Volume{
+					{Name: "data"},
+				},
+				Containers: []*ateletpb.Container{
+					{
+						Name: "ctr",
+						VolumeMounts: []*ateletpb.VolumeMount{
+							{Name: "data", MountPath: "/data"},
+						},
+					},
+				},
+			},
+			wantErr: `container "ctr" mounts volume "data" with unsupported source <nil>`,
+		},
+		{
+			name: "duplicate volume names",
+			in: &ateletpb.WorkloadSpec{
+				Volumes: []*ateletpb.Volume{
+					{Name: "data", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
+					{Name: "data", Source: &ateletpb.Volume_External{External: &ateletpb.ExternalVolumeSource{}}},
+				},
+				Containers: []*ateletpb.Container{
+					{
+						Name: "ctr",
+						VolumeMounts: []*ateletpb.VolumeMount{
+							{Name: "data", MountPath: "/data"},
+						},
+					},
+				},
+			},
+			wantErr: `duplicate volume name "data" in workload spec`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildAteomWorkloadSpec(tc.in)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if got, want := err.Error(), tc.wantErr; !strings.Contains(got, want) {
+				t.Errorf("error mismatch:\nwant: %s\ngot:  %s", want, got)
+			}
+		})
 	}
 }
 
@@ -1576,6 +1782,75 @@ func TestValidateUploadPausedCheckpointRequest(t *testing.T) {
 			tc.mutate(req)
 			if err := validateUploadPausedCheckpointRequest(req); (err != nil) != tc.wantErr {
 				t.Errorf("validateUploadPausedCheckpointRequest err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestShouldHaveSnapshots(t *testing.T) {
+	tests := []struct {
+		name string
+		req  *ateletpb.CheckpointRequest
+		want bool
+	}{
+		{
+			name: "full scope always expects snapshots",
+			req: &ateletpb.CheckpointRequest{
+				Scope: ateletpb.SnapshotScope_SNAPSHOT_SCOPE_FULL,
+			},
+			want: true,
+		},
+		{
+			name: "data scope with durable volumes expects snapshots",
+			req: &ateletpb.CheckpointRequest{
+				Scope: ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA,
+				Spec: &ateletpb.WorkloadSpec{
+					Volumes: []*ateletpb.Volume{
+						{Name: "durable", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "data scope with only CSI volumes does not expect snapshots",
+			req: &ateletpb.CheckpointRequest{
+				Scope: ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA,
+				Spec: &ateletpb.WorkloadSpec{
+					Volumes: []*ateletpb.Volume{
+						{Name: "csi", Source: &ateletpb.Volume_External{External: &ateletpb.ExternalVolumeSource{}}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "data scope with both durable and CSI volumes expects snapshots",
+			req: &ateletpb.CheckpointRequest{
+				Scope: ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA,
+				Spec: &ateletpb.WorkloadSpec{
+					Volumes: []*ateletpb.Volume{
+						{Name: "durable", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
+						{Name: "csi", Source: &ateletpb.Volume_External{External: &ateletpb.ExternalVolumeSource{}}},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "data scope with no volumes does not expect snapshots",
+			req: &ateletpb.CheckpointRequest{
+				Scope: ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA,
+				Spec:  &ateletpb.WorkloadSpec{},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldHaveSnapshots(tc.req); got != tc.want {
+				t.Errorf("shouldHaveSnapshots() = %v, want %v", got, tc.want)
 			}
 		})
 	}

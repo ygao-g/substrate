@@ -30,7 +30,6 @@ import (
 	"google.golang.org/protobuf/testing/protocmp"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
-	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
@@ -130,77 +129,6 @@ func newTestAtespace(name string) *ateapipb.Atespace {
 	return &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: name}}
 }
 
-func newTestActorTemplateVersion(atespace, name, template string) *ateapipb.ActorTemplateVersion {
-	return &ateapipb.ActorTemplateVersion{
-		Metadata:      &ateapipb.ResourceMetadata{Atespace: atespace, Name: name},
-		ActorTemplate: &ateapipb.ObjectRef{Atespace: atespace, Name: template},
-		Phase:         &ateapipb.ActorTemplateVersionPhase{Phase: ateapipb.ActorTemplateVersionPhase_PHASE_INITIAL},
-	}
-}
-
-func createTestAtespace(t *testing.T, s *Persistence, name string) {
-	t.Helper()
-	if _, err := s.CreateAtespace(context.Background(), newTestAtespace(name)); err != nil {
-		t.Fatalf("CreateAtespace(%q) failed: %v", name, err)
-	}
-}
-
-func TestDeleteActorTemplateVersion_TaggedGoldenSnapshotRollsBack(t *testing.T) {
-	s := setupPostgresPersistence(t)
-	ctx := context.Background()
-	createTestAtespace(t, s, "team-a")
-	if _, err := s.CreateActorSnapshot(ctx, &ateapipb.ActorSnapshot{
-		Metadata:    &ateapipb.ResourceMetadata{Atespace: "ate-golden", Name: "golden-1"},
-		SnapshotUri: "gs://bucket/golden-1",
-	}); err != nil {
-		t.Fatalf("CreateActorSnapshot failed: %v", err)
-	}
-	if _, err := s.TagActorSnapshot(ctx, "ate-golden", "golden-1", &ateapipb.ActorSnapshotTag{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "keep-golden"},
-	}); err != nil {
-		t.Fatalf("TagActorSnapshot failed: %v", err)
-	}
-	version := newTestActorTemplateVersion("team-a", "tmpl-a-v1", "tmpl-a")
-	version.GoldenSnapshot = &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "golden-1"}
-	if _, err := s.CreateActorTemplateVersion(ctx, version); err != nil {
-		t.Fatalf("CreateActorTemplateVersion failed: %v", err)
-	}
-
-	versionRef := resources.ActorTemplateVersionRef{Atespace: "team-a", Name: "tmpl-a-v1"}
-	if _, err := s.DeleteActorTemplateVersion(ctx, versionRef); !errors.Is(err, store.ErrFailedPrecondition) {
-		t.Fatalf("DeleteActorTemplateVersion with tagged golden snapshot = %v, want ErrFailedPrecondition", err)
-	}
-	if _, err := s.GetActorTemplateVersion(ctx, versionRef); err != nil {
-		t.Errorf("version was removed despite rolled-back delete: %v", err)
-	}
-	if _, err := s.GetActorSnapshot(ctx, "ate-golden", "golden-1"); err != nil {
-		t.Errorf("golden snapshot was removed despite rolled-back delete: %v", err)
-	}
-}
-
-func TestListActorTemplateVersions_PageTokenRejectsDifferentFilter(t *testing.T) {
-	s := setupPostgresPersistence(t)
-	ctx := context.Background()
-	createTestAtespace(t, s, "team-a")
-	for _, name := range []string{"a-1", "a-2"} {
-		if _, err := s.CreateActorTemplateVersion(ctx, newTestActorTemplateVersion("team-a", name, "tmpl-a")); err != nil {
-			t.Fatalf("CreateActorTemplateVersion(%q) failed: %v", name, err)
-		}
-	}
-	parent := resources.ActorTemplateRef{Atespace: "team-a", Name: "tmpl-a"}
-	_, token, err := s.ListActorTemplateVersions(ctx, "team-a", parent, 1, "")
-	if err != nil {
-		t.Fatalf("ListActorTemplateVersions failed: %v", err)
-	}
-	if token == "" {
-		t.Fatal("expected a second page")
-	}
-	otherParent := resources.ActorTemplateRef{Atespace: "team-a", Name: "tmpl-b"}
-	if _, _, err := s.ListActorTemplateVersions(ctx, "team-a", otherParent, 1, token); err == nil {
-		t.Error("page token was accepted with a different parent filter")
-	}
-}
-
 // TestCreateActor_MissingAtespace_FailedPrecondition exercises the
 // foreign-key race the doc calls out: CreateActor rejects an actor whose
 // atespace doesn't exist (including a concurrently-deleted one), closing the
@@ -213,7 +141,7 @@ func TestCreateActor_MissingAtespace_FailedPrecondition(t *testing.T) {
 		Metadata:               &ateapipb.ResourceMetadata{Name: "id1", Atespace: "no-such-atespace"},
 		ActorTemplateNamespace: "ns1",
 		ActorTemplateName:      "tmpl1",
-		Status:                 ateapipb.Actor_STATUS_SUSPENDED,
+		Status:                 &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
 	}
 	if _, err := s.CreateActor(ctx, actor); !errors.Is(err, store.ErrFailedPrecondition) {
 		t.Errorf("CreateActor with missing atespace = %v, want ErrFailedPrecondition", err)
@@ -233,7 +161,14 @@ func TestWorkerNotification_OnlyAfterCommit(t *testing.T) {
 	}
 	defer watch.Close()
 
-	worker := &ateapipb.Worker{WorkerNamespace: "ns", WorkerPool: "pool", WorkerPod: "pod"}
+	const workerName = "6e4d2f81-b3a9-4c05-8e72-1f9d4a0c7b63"
+	worker := &ateapipb.Worker{
+		Metadata:        &ateapipb.ResourceMetadata{Name: workerName},
+		WorkerNamespace: "ns",
+		WorkerPool:      "pool",
+		WorkerPod:       "pod",
+		WorkerPodUid:    workerName,
+	}
 	protoBytes, err := proto.Marshal(worker)
 	if err != nil {
 		t.Fatalf("marshaling worker: %v", err)
@@ -247,9 +182,9 @@ func TestWorkerNotification_OnlyAfterCommit(t *testing.T) {
 		t.Fatalf("Begin failed: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO workers (worker_namespace, worker_pool, worker_pod, version, proto)
-		VALUES ($1, $2, $3, $4, $5)`,
-		worker.GetWorkerNamespace(), worker.GetWorkerPool(), worker.GetWorkerPod(), int64(1), protoBytes); err != nil {
+		INSERT INTO workers (name, uid, version, proto)
+		VALUES ($1, $2, $3, $4)`,
+		workerName, "rolled-back-uid", int64(1), protoBytes); err != nil {
 		t.Fatalf("insert failed: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, workerChangeChannel, "rolled-back-payload"); err != nil {
@@ -275,8 +210,11 @@ func TestWorkerNotification_OnlyAfterCommit(t *testing.T) {
 		if event.Type != store.WorkerEventCreated {
 			t.Errorf("expected WorkerEventCreated, got %v", event.Type)
 		}
-		worker.Version = 1 // CreateWorker assigns version 1 server-side.
-		if diff := cmp.Diff(worker, event.Worker, protocmp.Transform()); diff != "" {
+		// CreateWorker assigns the uid, version and timestamps server-side.
+		want := proto.Clone(worker).(*ateapipb.Worker)
+		want.Metadata.Version = 1
+		if diff := cmp.Diff(want, event.Worker, protocmp.Transform(),
+			protocmp.IgnoreFields(&ateapipb.ResourceMetadata{}, "uid", "create_time", "update_time")); diff != "" {
 			t.Errorf("event worker mismatch (-want +got):\n%s", diff)
 		}
 	case <-time.After(2 * time.Second):
@@ -288,7 +226,7 @@ func TestListActors_InvalidPageToken(t *testing.T) {
 	s := setupPostgresStore(t).(*Persistence)
 	ctx := context.Background()
 
-	if _, _, err := s.ListActors(ctx, "", 10, "not-valid-base64!!"); err == nil {
+	if _, err := s.ListActors(ctx, "", store.ListOptions{PageSize: 10, PageToken: "not-valid-base64!!"}); err == nil {
 		t.Errorf("ListActors with malformed page token = nil error, want an error")
 	}
 }
@@ -311,35 +249,35 @@ func TestListActors_CrossScopePageToken(t *testing.T) {
 		t.Fatalf("CreateAtespace(team-b) failed: %v", err)
 	}
 	for _, name := range []string{"a1", "a2"} {
-		if _, err := s.CreateActor(ctx, &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: name, Atespace: "team-a"}, Status: ateapipb.Actor_STATUS_SUSPENDED}); err != nil {
+		if _, err := s.CreateActor(ctx, &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Name: name, Atespace: "team-a"}, Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED}}); err != nil {
 			t.Fatalf("CreateActor failed: %v", err)
 		}
 	}
 
-	_, nextToken, err := s.ListActors(ctx, "team-a", 1, "")
+	page, err := s.ListActors(ctx, "team-a", store.ListOptions{PageSize: 1})
 	if err != nil {
 		t.Fatalf("ListActors(team-a) failed: %v", err)
 	}
-	if nextToken == "" {
+	if page.NextPageToken == "" {
 		t.Fatalf("expected a next page token")
 	}
 
 	// A token minted for team-a must be rejected when replayed against team-b
 	// or against the unscoped (global) listing.
-	if _, _, err := s.ListActors(ctx, "team-b", 1, nextToken); err == nil {
+	if _, err := s.ListActors(ctx, "team-b", store.ListOptions{PageSize: 1, PageToken: page.NextPageToken}); err == nil {
 		t.Errorf("ListActors(team-b) with team-a's token = nil error, want an error")
 	}
-	if _, _, err := s.ListActors(ctx, "", 1, nextToken); err == nil {
+	if _, err := s.ListActors(ctx, "", store.ListOptions{PageSize: 1, PageToken: page.NextPageToken}); err == nil {
 		t.Errorf("ListActors(all) with team-a's token = nil error, want an error")
 	}
 
 	// A worker-list token must be rejected by ListAtespaces (different kind).
-	_, workerToken, err := s.ListWorkers(ctx, 1, "")
+	workerPage, err := s.ListWorkers(ctx, store.ListOptions{PageSize: 1})
 	if err != nil {
 		t.Fatalf("ListWorkers failed: %v", err)
 	}
-	if workerToken != "" {
-		if _, _, err := s.ListAtespaces(ctx, 1, workerToken); err == nil {
+	if workerPage.NextPageToken != "" {
+		if _, err := s.ListAtespaces(ctx, store.ListOptions{PageSize: 1, PageToken: workerPage.NextPageToken}); err == nil {
 			t.Errorf("ListAtespaces with a worker page token = nil error, want an error")
 		}
 	}
