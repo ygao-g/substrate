@@ -13,16 +13,21 @@
 # limitations under the License.
 
 name: e2e-dualstack
-# Dual-stack kind e2e, run on demand against main or against a pull request.
+# Dual-stack kind e2e, run against a pull request or on demand against main.
 #
-# On demand rather than on: pull_request, because there is not yet anything
-# here that a single-family lane does not already cover: atenet-router is
-# SingleStack, so the actor zone publishes an A and no AAAA and every client
-# dials IPv4. Merged inert it gates nothing and costs nothing, while giving
-# the changes that make IPv6 work a place to add their assertions and a way
-# to get a dual-stack result before they merge. Switch this to
-# pull_request once the router is dual-stack and the family tests stop
-# skipping.
+# There is not yet anything here that a single-family lane does not already
+# cover: atenet-router is SingleStack, so the actor zone publishes an A and no
+# AAAA and every client dials IPv4. It gates nothing and stays out of
+# `e2e-test`, while giving the changes that make IPv6 work a place to add
+# their assertions and a way to get a dual-stack result before they merge.
+#
+# TODO(246): gate this before merging. It runs on every PR today so the
+# dual-stack results are visible without a maintainer having to act first; the
+# intended steady state is a `ci/dual-stack` label, which needs the label
+# created upstream:
+#
+#     on: {pull_request: {types: [labeled, opened, synchronize, reopened]}}
+#     if: contains(github.event.pull_request.labels.*.name, 'ci/dual-stack')
 #
 # What dual-stack uniquely catches is truncation -- code reading one address
 # where the cluster has two, which neither single-family lane can see because
@@ -136,6 +141,19 @@ jobs:
       env:
         IP_FAMILY: dual
       run: hack/create-kind-cluster.sh
+    - name: Wait for the node to be ready
+      # create-kind-cluster.sh returns as soon as kind does, which is before
+      # kube-controller-manager has allocated node.spec.podCIDRs. The next step
+      # reads that field, so without this it fails on a cluster that is fine --
+      # twice out of five runs on 2026-08-20, reporting "no IPv4 in podCIDRs=".
+      run: |
+        for _ in $(seq 1 60); do
+          cidrs=$(kubectl --context="$KUBECTL_CONTEXT" get nodes \
+            -o jsonpath='{.items[*].spec.podCIDRs[*]}' 2>/dev/null || true)
+          [ -n "${cidrs}" ] && break
+          sleep 2
+        done
+        kubectl --context="$KUBECTL_CONTEXT" wait --for=condition=Ready nodes --all --timeout=180s
     - name: Assert the cluster is dual-stack
       # The failure this job exists to catch is the silent one: dual is the
       # only IP_FAMILY value whose cluster still comes up when it is ignored,
