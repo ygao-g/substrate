@@ -397,20 +397,26 @@ func RemoveActorNftablesRules() error {
 	// Delete the whole ateom nftables table if it exists. The table is
 	// per-worker and currently per-active-actor because this worker path runs at
 	// most one actor at a time. Missing tables are treated as already clean.
+	//
+	// Both families are swept, not just the inet one this now installs into: a
+	// table name is unique per family, so an ip table left by an earlier ateom
+	// would survive every later cleanup and keep redirecting alongside the new
+	// one.
 	c := &nftables.Conn{}
-	tables, err := c.ListTablesOfFamily(nftables.TableFamilyINet)
-	if err != nil {
-		return fmt.Errorf("while listing nftables tables: %w", err)
-	}
-	for _, table := range tables {
-		if table.Name != ActorNftTableName {
-			continue
+	for _, family := range []nftables.TableFamily{nftables.TableFamilyINet, nftables.TableFamilyIPv4} {
+		tables, err := c.ListTablesOfFamily(family)
+		if err != nil {
+			return fmt.Errorf("while listing nftables tables: %w", err)
 		}
-		c.DelTable(table)
-		if err := c.Flush(); err != nil {
-			return fmt.Errorf("while deleting actor nftables table: %w", err)
+		for _, table := range tables {
+			if table.Name != ActorNftTableName {
+				continue
+			}
+			c.DelTable(table)
+			if err := c.Flush(); err != nil {
+				return fmt.Errorf("while deleting actor nftables table: %w", err)
+			}
 		}
-		return nil
 	}
 	return nil
 }

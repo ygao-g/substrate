@@ -557,6 +557,39 @@ func TestSetupActorNetworkPodIPv6Only(t *testing.T) {
 // TestSetupActorNetworkIsRepeatable covers the activation cycle a reused worker
 // runs: set up, tear down, set up again. The second setup has to succeed against
 // whatever the first one left behind.
+// TestRemoveActorNftablesRulesSweepsIPv4Family covers the upgrade case: a
+// worker whose previous ateom created the actor table in the ip family. Table
+// names are unique per family, so the inet-only cleanup this replaced could
+// never see that table, and it would have kept redirecting alongside the inet
+// one installed next to it.
+func TestRemoveActorNftablesRulesSweepsIPv4Family(t *testing.T) {
+	roottest.Require(t, "creating network namespaces and nftables rules")
+
+	withTestNetNS(t, func(netns.NsHandle) {
+		requireNftables(t)
+
+		c := &nftables.Conn{}
+		c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: ActorNftTableName})
+		if err := c.Flush(); err != nil {
+			t.Fatalf("creating the stand-in ip actor table: %v", err)
+		}
+
+		if err := RemoveActorNftablesRules(); err != nil {
+			t.Fatalf("RemoveActorNftablesRules: %v", err)
+		}
+
+		tables, err := c.ListTablesOfFamily(nftables.TableFamilyIPv4)
+		if err != nil {
+			t.Fatalf("listing ip nftables tables: %v", err)
+		}
+		for _, table := range tables {
+			if table.Name == ActorNftTableName {
+				t.Fatal("the ip actor table survived cleanup")
+			}
+		}
+	})
+}
+
 func TestSetupActorNetworkIsRepeatable(t *testing.T) {
 	roottest.Require(t, "creating network namespaces, veth pairs, and nftables rules")
 	ctx := context.Background()
