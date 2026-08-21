@@ -457,3 +457,76 @@ func TestBuildGuestNetConfigInvariants(t *testing.T) {
 		}
 	})
 }
+
+// The restore path asks this whether the guest it just thawed matches the pod
+// it landed on, so a wrong answer either strands the actor on one family or
+// re-runs the whole guest setup on every resume.
+func TestGuestHasIPv6(t *testing.T) {
+	eth0 := func(addrs ...*agentpb.IPAddress) *agentpb.Interface {
+		return &agentpb.Interface{Name: ateomnet.ActorVethName, IPAddresses: addrs}
+	}
+	v6 := func(a string) *agentpb.IPAddress {
+		return &agentpb.IPAddress{Family: agentpb.IPFamily_v6, Address: a}
+	}
+	v4 := func(a string) *agentpb.IPAddress {
+		return &agentpb.IPAddress{Family: agentpb.IPFamily_v4, Address: a}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		ifaces []*agentpb.Interface
+		want   bool
+	}{{
+		name:   "no interfaces",
+		ifaces: nil,
+		want:   false,
+	}, {
+		name:   "IPv4 only",
+		ifaces: []*agentpb.Interface{eth0(v4(ateomnet.ActorVethIP))},
+		want:   false,
+	}, {
+		// Every link with IPv6 compiled in has one, including the guest's
+		// before this change: counting it makes the answer always true and
+		// the reconcile never runs.
+		name:   "link-local alone is not IPv6",
+		ifaces: []*agentpb.Interface{eth0(v4(ateomnet.ActorVethIP), v6("fe80::a8:1eff:fe00:2"))},
+		want:   false,
+	}, {
+		name:   "dual stack",
+		ifaces: []*agentpb.Interface{eth0(v4(ateomnet.ActorVethIP), v6(ateomnet.ActorVethIPv6IP))},
+		want:   true,
+	}, {
+		// Only the actor veth is ours to reconcile.
+		name: "IPv6 on another interface",
+		ifaces: []*agentpb.Interface{
+			eth0(v4(ateomnet.ActorVethIP)),
+			{Name: "lo", IPAddresses: []*agentpb.IPAddress{v6("::1")}},
+		},
+		want: false,
+	}, {
+		// Classification is by parsing, so a mislabelled address still counts:
+		// the guest's kernel has it either way.
+		name:   "Family mis-set to v4",
+		ifaces: []*agentpb.Interface{eth0(v4(ateomnet.ActorVethIPv6IP))},
+		want:   true,
+	}, {
+		// The inverse: a v4-mapped form would satisfy a 16-byte family check.
+		name:   "v4-mapped is not IPv6",
+		ifaces: []*agentpb.Interface{eth0(v6("::ffff:169.254.17.2"))},
+		want:   false,
+	}, {
+		name:   "loopback is not IPv6",
+		ifaces: []*agentpb.Interface{eth0(v6("::1"))},
+		want:   false,
+	}, {
+		name:   "unparseable address is skipped",
+		ifaces: []*agentpb.Interface{eth0(v6("not-an-address"))},
+		want:   false,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := guestHasIPv6(tc.ifaces); got != tc.want {
+				t.Errorf("guestHasIPv6() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
