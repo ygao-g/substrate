@@ -203,6 +203,18 @@ func (a *AgentClient) AddARPNeighbors(ctx context.Context, neighbors []*agentpb.
 	return nil
 }
 
+// ListInterfaces reads the guest's network interfaces back. The only reader on
+// the restore path, where the guest's addresses come from the snapshot rather
+// than from this pod, so they have to be compared against what this pod's
+// network actually is. Mirrors grpc.AgentService/ListInterfaces.
+func (a *AgentClient) ListInterfaces(ctx context.Context) ([]*agentpb.Interface, error) {
+	var resp agentpb.Interfaces
+	if err := a.client.Call(ctx, "grpc.AgentService", "ListInterfaces", &agentpb.ListInterfacesRequest{}, &resp); err != nil {
+		return nil, fmt.Errorf("agent ListInterfaces: %w", err)
+	}
+	return resp.GetInterfaces(), nil
+}
+
 // SignalProcess sends signal to a process in the guest. Targeting the container's
 // init process (ExecId == ContainerId) delivers the signal to the workload; an
 // empty execID delivers it to ALL processes in the container. Used during
