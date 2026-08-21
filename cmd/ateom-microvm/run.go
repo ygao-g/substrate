@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1137,6 +1138,56 @@ func (s *AteomService) configureGuestNetwork(ctx context.Context, ac *kata.Agent
 		return err
 	}
 	return ac.AddARPNeighbors(ctx, cfg.neighbors)
+}
+
+// reconcileGuestNetwork re-runs the guest network setup when a restored guest's
+// address families no longer match the pod it landed on.
+//
+// A restored guest keeps whatever the snapshot froze, which used to be safe
+// because the configuration was pod-invariant. IPv6 is not: it is granted only
+// where the worker pod has a global address of its own. Restoring a dual-stack
+// golden onto an IPv4-only pod would leave the actor a dead fd00:169:254::2 and
+// an IPv6 default route, so it would prefer the AAAA of any dual-homed
+// destination and black-hole; the other direction strands it on IPv4 forever.
+//
+// The common case is a match, and costs one round trip.
+func (s *AteomService) reconcileGuestNetwork(ctx context.Context, ac *kata.AgentClient, actorNet ateomnet.ActorNetwork) error {
+	ifaces, err := ac.ListInterfaces(ctx)
+	if err != nil {
+		return err
+	}
+	if guestHasIPv6(ifaces) == actorNet.IPv6 {
+		return nil
+	}
+	slog.InfoContext(ctx, "restored guest's address families differ from this pod's; reconfiguring",
+		slog.Bool("pod_ipv6", actorNet.IPv6))
+	return s.configureGuestNetwork(ctx, ac, uint64(s.actorVethMTU(ctx)), actorNet)
+}
+
+// guestHasIPv6 reports whether the guest's actor veth carries the IPv6 address
+// this pod would have given it.
+//
+// Classification is by parsing the address, not by the reported Family: a
+// v4-mapped 16-byte form would pass a family check, and fe80:: would too --
+// every link has one, so it says nothing about what the guest was configured
+// with.
+func guestHasIPv6(ifaces []*agentpb.Interface) bool {
+	for _, iface := range ifaces {
+		if iface.GetName() != ateomnet.ActorVethName {
+			continue
+		}
+		for _, addr := range iface.GetIPAddresses() {
+			ip, err := netip.ParseAddr(addr.GetAddress())
+			if err != nil {
+				continue
+			}
+			ip = ip.Unmap()
+			if ip.Is6() && !ip.IsLinkLocalUnicast() && !ip.IsLoopback() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // waitForFile polls for path to exist, up to d. Used to wait for the kata-agent
