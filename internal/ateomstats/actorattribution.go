@@ -39,7 +39,6 @@ var (
 	_ attributionSource = (*ateompb.RunWorkloadRequest)(nil)
 	_ attributionSource = (*ateompb.RestoreWorkloadRequest)(nil)
 	_ attributionSource = (*ateompb.CheckpointWorkloadRequest)(nil)
-	_ attributionSource = (*ateompb.TerminateWorkloadRequest)(nil)
 )
 
 // ActorAttributionFromRequest extracts the attribution an ateom should retain
