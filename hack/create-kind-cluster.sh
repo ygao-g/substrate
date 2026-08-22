@@ -21,6 +21,7 @@ KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kind}"
 KUBECTL_CONTEXT="kind-${KIND_CLUSTER_NAME}"
 reg_name="kind-registry"
 reg_port="${KIND_REGISTRY_PORT:-5001}"
+IPV6_DNS_UPSTREAM="${IPV6_DNS_UPSTREAM:-2001:4860:4860::8888 2001:4860:4860::8844}"
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -31,6 +32,9 @@ if [[ $# -gt 0 ]]; then
       echo "Configured through the environment:"
       echo "  KIND_CLUSTER_NAME  Name of the cluster to create (default: kind)."
       echo "  IP_FAMILY          Address families for pods and Services: ipv4, ipv6 or dual (default: ipv4)."
+      echo "  IPV6_DNS_UPSTREAM  Space-separated IPv6 resolvers CoreDNS forwards to when IP_FAMILY=ipv6"
+      echo "                     (default: Google Public DNS). These replace the host's resolver, so any"
+      echo "                     split-horizon names it served stop resolving from pods."
       exit 0
       ;;
   esac
@@ -200,6 +204,91 @@ done
 echo "Connecting local registry to cluster network..."
 if [ "$(docker inspect -f='{{json .NetworkSettings.Networks.kind}}' "${reg_name}")" = "null" ]; then
   docker network connect "kind" "${reg_name}"
+fi
+
+# 4.5. Point CoreDNS at an IPv6 resolver and teach it the registry's name
+#
+# CoreDNS runs dnsPolicy: Default and inherits the node's IPv4 resolver, which
+# no pod here can reach; and step 3's registry wiring is node-side, while atelet
+# pulls from its own netns, where "kind-registry" does not resolve.
+if [[ "${IP_FAMILY}" == "ipv6" ]]; then
+  echo "Repointing CoreDNS at an IPv6 resolver and teaching it '${reg_name}'..."
+  reg_v6="$(docker inspect "${reg_name}" \
+    --format '{{.NetworkSettings.Networks.kind.GlobalIPv6Address}}' 2>/dev/null || true)"
+  if [[ -z "${reg_v6}" ]]; then
+    echo "error: '${reg_name}' has no IPv6 address on the 'kind' network" >&2
+    exit 1
+  fi
+
+  corefile="$(kubectl --context="${KUBECTL_CONTEXT}" -n kube-system get cm coredns \
+    -o jsonpath='{.data.Corefile}')"
+  search="forward . /etc/resolv.conf"
+  # $search unquoted: bash 3.2 splices the quotes in literally.
+  patched="${corefile/$search/forward . ${IPV6_DNS_UPSTREAM}}"
+  if [[ "${patched}" == "${corefile}" ]]; then
+    echo "error: '${search}' not found in the CoreDNS Corefile" >&2
+    echo "       the Corefile layout changed upstream; update this block" >&2
+    exit 1
+  fi
+
+  # Its own server block, not a hosts entry in .:53: a query is served by the one
+  # block whose zone is its longest suffix, so only that name arrives here and the
+  # hosts needs no fallthrough to avoid NXDOMAINing everything else.
+  patched="${patched}
+${reg_name}:53 {
+    errors
+    hosts {
+        ${reg_v6} ${reg_name}
+    }
+}"
+
+  # A YAML patch file avoids escaping the Corefile's newlines into JSON.
+  { printf 'data:\n  Corefile: |\n'; printf '%s\n' "${patched}" | sed 's/^/    /'; } \
+    > "${ROOT}/bin/coredns-patch.yaml"
+  kubectl --context="${KUBECTL_CONTEXT}" -n kube-system patch cm coredns \
+    --type=merge --patch-file "${ROOT}/bin/coredns-patch.yaml"
+  kubectl --context="${KUBECTL_CONTEXT}" -n kube-system rollout restart deploy/coredns
+  kubectl --context="${KUBECTL_CONTEXT}" -n kube-system rollout status deploy/coredns \
+    --timeout=120s
+
+  # Prove it from a pod, not the node: the node is dual-stack and passes either
+  # way. The registry leg fetches rather than resolves, because the hosts entry is
+  # AAAA-only -- that fails nslookup's A query but satisfies getaddrinfo. Read the
+  # log once the pod has exited; an attach drops lines.
+  echo "Verifying DNS from a pod..."
+  probe_pod="coredns-probe-$$"
+  trap 'kubectl --context="${KUBECTL_CONTEXT}" delete "pod/${probe_pod}" --now \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true' EXIT
+  # default/default is created asynchronously, and admission rejects the pod until
+  # it exists.
+  for _ in $(seq 60); do
+    kubectl --context="${KUBECTL_CONTEXT}" get sa default >/dev/null 2>&1 && break
+    sleep 1
+  done
+  # exit 0: both legs always run, and the markers are the result, not the status.
+  kubectl --context="${KUBECTL_CONTEXT}" run "${probe_pod}" --restart=Never \
+    --image=busybox:1.36 --command -- sh -c \
+    "nslookup storage.googleapis.com >/dev/null && echo RESOLVE_OK
+     wget -T10 -O/dev/null http://${reg_name}:5000/v2/ && echo REGISTRY_OK
+     exit 0" >/dev/null
+  if ! kubectl --context="${KUBECTL_CONTEXT}" wait --for=jsonpath='{.status.phase}'=Succeeded \
+    "pod/${probe_pod}" --timeout=120s >/dev/null; then
+    echo "error: the probe pod never finished, so CoreDNS is unverified" >&2
+    kubectl --context="${KUBECTL_CONTEXT}" describe "pod/${probe_pod}" | sed 's/^/       /' >&2
+    exit 1
+  fi
+  probe="$(kubectl --context="${KUBECTL_CONTEXT}" logs "${probe_pod}")"
+  if [[ "${probe}" != *RESOLVE_OK* || "${probe}" != *REGISTRY_OK* ]]; then
+    if [[ "${probe}" != *RESOLVE_OK* ]]; then
+      echo "error: a pod cannot resolve an external name" >&2
+      echo "       IPV6_DNS_UPSTREAM is '${IPV6_DNS_UPSTREAM}'; set it to a reachable resolver" >&2
+    else
+      echo "error: DNS works but a pod cannot reach '${reg_name}' at [${reg_v6}]" >&2
+      echo "       check it is up and on the 'kind' network; if it moved, re-create (#1049)" >&2
+    fi
+    printf '%s\n' "${probe}" | sed 's/^/       /' >&2
+    exit 1
+  fi
 fi
 
 # 5. Document the local registry in kube-public ConfigMap
