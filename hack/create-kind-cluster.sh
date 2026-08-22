@@ -145,18 +145,38 @@ if [[ "${IP_FAMILY}" != "ipv4" &&
   exit 1
 fi
 
-# For ipv6 kind writes a kubeconfig pointing at [::1], the address it published
-# the apiserver on, which only works for a client on the Docker host itself: a
-# VM-hosted daemon (Lima on macOS) forwards the port to the *v4* loopback, so
-# every kubectl below fails at connect. localhost is a SAN on the apiserver
-# cert and lets the client pick a family that works from either side.
+# For ipv6 kind publishes the apiserver on [::1]. Under a VM-hosted daemon (Lima
+# on macOS) that publish lands inside the VM, and limactl re-forwards it to the
+# host's *v4* loopback only, so kind's kubeconfig is unusable and has to be
+# repointed at localhost.
+# https://github.com/lima-vm/lima/issues/1540
 if [[ "${IP_FAMILY}" == "ipv6" ]]; then
+  # kind create does not wait for the control plane, so one refusal is not proof
+  # the address is wrong.
+  apiserver_answers() {
+    local attempt
+    for attempt in 1 2 3; do
+      [[ "${attempt}" == 1 ]] || sleep 2
+      if kubectl --context="${KUBECTL_CONTEXT}" --request-timeout=5s "$@" \
+        get --raw /healthz >/dev/null 2>&1; then
+        return 0
+      fi
+    done
+    return 1
+  }
+
   server="$(kubectl config view \
     -o jsonpath="{.clusters[?(@.name==\"${KUBECTL_CONTEXT}\")].cluster.server}")"
-  if [[ "${server}" == "https://[::1]:"* ]]; then
+  if [[ "${server}" == "https://[::1]:"* ]] && ! apiserver_answers; then
+    alt_server="https://localhost:${server##*:}"
+    if ! apiserver_answers --server="${alt_server}"; then
+      echo "error: the apiserver answered /healthz at neither ${server} nor" >&2
+      echo "       ${alt_server}. Check where the daemon published it:" >&2
+      echo "         docker port ${KIND_CLUSTER_NAME}-control-plane 6443" >&2
+      exit 1
+    fi
     echo "Repointing the kubeconfig for '${KUBECTL_CONTEXT}' at localhost..."
-    kubectl config set-cluster "${KUBECTL_CONTEXT}" \
-      --server="https://localhost:${server##*:}" >/dev/null
+    kubectl config set-cluster "${KUBECTL_CONTEXT}" --server="${alt_server}" >/dev/null
   fi
 fi
 
