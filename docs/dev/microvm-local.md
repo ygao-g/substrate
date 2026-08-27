@@ -129,40 +129,45 @@ The writable home mount lets the kind/ko workflows write into your checkout,
 8 CPUs / 16 GiB is a comfortable floor for the control plane plus a microVM
 worker, and `vzNAT` gives the VM outbound networking under the vz VM type.
 
-### 3. Assemble the arm64 assets inside the Lima VM
+### 3. Open a shell in the VM and install the build deps
 
-`hack/microvm-assets/assemble.sh` must run on a Linux host of the target
-architecture (on arm64 it builds `virtiofsd` from source with cargo against
-Linux-only libraries), so run it in the Lima guest, not on macOS:
+Run the whole loop inside the guest, not from macOS. Everything below happens
+in this shell:
 
 ```sh
 limactl shell docker-nested
 
-# Inside the VM — install build deps once:
+# Once per VM:
 sudo apt-get update && sudo apt-get install -y git pkg-config libcap-ng-dev libseccomp-dev zstd
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # rust via rustup
 source "$HOME/.cargo/env"
-
-cd <your substrate checkout>    # visible via the writable home mount
-./hack/microvm-assets/assemble.sh
-exit
 ```
 
-The assets land in `bin/microvm-assets/arm64/` in your checkout, which is
-shared with the host through the home mount — the demo script will find them
-there and skip re-assembling.
+`hack/microvm-assets/assemble.sh` needs these because on arm64 it builds
+`virtiofsd` from source against Linux-only libraries. Go is the only other
+prerequisite — `hack/run-tool.sh` fetches kind, ko and the rest on demand.
 
-### 4. Point the Docker CLI at Lima and bring everything up (on macOS)
+### 4. Bring everything up (inside the VM)
 
 ```sh
-export DOCKER_HOST="unix://${HOME}/.lima/docker-nested/sock/docker.sock"
-echo 'export DOCKER_HOST="unix://${HOME}/.lima/docker-nested/sock/docker.sock"' >> ~/.zprofile
+cd <your substrate checkout>    # visible via the writable home mount
 
-cd <your substrate checkout>
-
+./hack/microvm-assets/assemble.sh
 ./hack/create-kind-cluster.sh
 ./hack/run-microvm-demo-kind.sh
 ```
+
+Assets land in `bin/microvm-assets/arm64/`, which the home mount shares back to
+macOS, so re-runs skip re-assembling.
+
+Staying in the guest is what keeps `kubectl` working. Driving the loop from
+macOS over `DOCKER_HOST` puts the kind nodes in the VM while limactl re-forwards
+the published apiserver port to the macOS *v4* loopback only — so on an
+IPv6-only cluster (`IP_FAMILY=ipv6`) the kubeconfig kind writes is unreachable
+from the host. In the guest the address is local and correct.
+([lima-vm/lima#1540](https://github.com/lima-vm/lima/issues/1540).) Pointing
+`DOCKER_HOST` at the VM socket is still fine for inspecting containers from
+macOS; just don't run the cluster scripts through it.
 
 Verify as in Option A, step 4.
 
@@ -186,3 +191,4 @@ requires a full guest boot and checkpoint.
 | `/dev/kvm: permission denied` during the kind KVM probe | Rootless Docker: the probe container's root is remapped to your user, which can't open the device (`660 root:kvm`) | Use rootful Docker, or `sudo chmod 666 /dev/kvm` before `./hack/create-kind-cluster.sh` |
 | `cargo not found` from `assemble.sh` | On arm64, `virtiofsd` is built from source | Install the build deps listed in Option B, Step 3 |
 | Lima: `[hostagent] Starting VZ ... FATA exiting` on M1/M2 | Apple's Virtualization framework supports nested virtualization only on M3 and later | Use an M3+ Mac, or a Linux/KVM host (Option A) |
+| Want to reach a cluster service from macOS | The loop and its kubeconfig live in the guest | Bind the forward to all interfaces — `kubectl port-forward --address 0.0.0.0 -n ate-system svc/atenet-router 8000:80` — and Lima re-exposes it on the macOS loopback at the same port |
