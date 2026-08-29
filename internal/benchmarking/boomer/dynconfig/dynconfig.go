@@ -54,6 +54,8 @@ type Config struct {
 	ResumeMode       string // ResumeModeExplicit | ResumeModeImplicit
 	DurDirReadMode   string // ReadModeData | ReadModeDigest
 	DurDirTemplate   string // ActorTemplate name
+	MemTarget        string // resident RAM the GluttonUser fills via WriteRAM, suffixed (e.g. "2Gi"); "" disables
+	MemChurn         string // RAM re-randomized in place each cycle via WriteRAM overwrite, suffixed (e.g. "64Mi"); "" disables
 }
 
 // Holder lets readers Load() the current Config and writers Store() a new
@@ -91,6 +93,8 @@ type payload struct {
 	ResumeMode       *string  `json:"resume_mode"`
 	DurDirReadMode   *string  `json:"durdir_read_mode"`
 	DurDirTemplate   *string  `json:"durdir_template"`
+	MemTarget        *string  `json:"mem_target"`
+	MemChurn         *string  `json:"mem_churn"`
 }
 
 // Parse decodes a JSON blob (typically from a CLI flag) and merges its
@@ -163,6 +167,9 @@ func (c Config) Validate() error {
 	if c.DurDirReadMode != "" && c.DurDirReadMode != ReadModeData && c.DurDirReadMode != ReadModeDigest {
 		return fmt.Errorf("invalid durdir_read_mode %q: must be %q or %q", c.DurDirReadMode, ReadModeData, ReadModeDigest)
 	}
+	// MemTarget and MemChurn are passed to glutton verbatim, which owns the
+	// parse; invalid values fail loudly there as GluttonFillRAM /
+	// GluttonChurnRAM errors.
 	return nil
 }
 
@@ -192,7 +199,83 @@ func (p payload) merge(current Config) Config {
 	if p.DurDirTemplate != nil {
 		out.DurDirTemplate = *p.DurDirTemplate
 	}
+	if p.MemTarget != nil {
+		out.MemTarget = *p.MemTarget
+	}
+	if p.MemChurn != nil {
+		out.MemChurn = *p.MemChurn
+	}
 	return out
+}
+
+// StartPoll fetches `url` every `interval` until `ctx` is done, and applies
+// each change to `holder` + `sampler`. It returns at once; the loop is in a
+// goroutine. An interval of zero or less starts no loop.
+//
+// SubscribeSpawn below is not sufficient by itself. Locust sends a spawn
+// message only when the number of users or the spawn rate changes, thus a
+// step of a load shape that changes the sample rate and holds the number of
+// users gives no message, and the worker keeps the value of the step before
+// it. The sample-rate sweep of benchmarking/observability.md is one such
+// shape: each of its steps holds 10 users.
+//
+// `onError` gets each failed fetch. A caller must not exit the process there,
+// as it does for a spawn: the worker holds the last good value, and one
+// failed poll of a long run is not a reason to lose the run.
+func StartPoll(
+	ctx context.Context,
+	url string,
+	holder *Holder,
+	sampler ProbabilityUpdater,
+	interval, fetchTimeout time.Duration,
+	onError func(error),
+) {
+	if interval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+				next, err := Fetch(fetchCtx, url, holder.Load())
+				cancel()
+				if err != nil {
+					// The end of the run stops a fetch that is in
+					// progress. That is not a failed fetch, thus it must
+					// not go to onError.
+					if ctx.Err() != nil {
+						return
+					}
+					onError(err)
+					continue
+				}
+				// Only a change goes to the log. A poll of each few seconds
+				// for the length of a soak makes a log that hides the run.
+				if next == holder.Load() {
+					continue
+				}
+				holder.Store(next)
+				sampler.UpdateProbability(next.TraceProbability)
+				slog.Info("dynconfig applied",
+					slog.String("trigger", "poll"),
+					slog.Float64("trace_probability", next.TraceProbability),
+					slog.Duration("min_wait", next.MinWait),
+					slog.Duration("max_wait", next.MaxWait),
+					slog.Int64("durdir_file_size_bytes", next.DurDirFileSize),
+					slog.String("resume_mode", next.ResumeMode),
+					slog.String("durdir_read_mode", next.DurDirReadMode),
+					slog.String("durdir_template", next.DurDirTemplate),
+					slog.String("mem_target", next.MemTarget),
+					slog.String("mem_churn", next.MemChurn),
+				)
+			}
+		}
+	}()
 }
 
 // SubscribeSpawn registers a boomer Events handler that fetches `url` on
@@ -222,6 +305,8 @@ func SubscribeSpawn(url string, holder *Holder, sampler ProbabilityUpdater, fetc
 			slog.String("resume_mode", next.ResumeMode),
 			slog.String("durdir_read_mode", next.DurDirReadMode),
 			slog.String("durdir_template", next.DurDirTemplate),
+			slog.String("mem_target", next.MemTarget),
+			slog.String("mem_churn", next.MemChurn),
 		)
 	})
 }

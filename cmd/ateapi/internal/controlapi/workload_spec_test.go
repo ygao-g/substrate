@@ -22,6 +22,8 @@ import (
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/protobuf/testing/protocmp"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -181,6 +183,62 @@ func TestWorkloadSpecFromActorTemplate(t *testing.T) {
 			},
 		},
 		{
+			name: "converts trustBundle data sources carrying the name for node-side resolution",
+			template: &atev1alpha1.ActorTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "tmpl1", Namespace: "agent-ns"},
+				Spec: atev1alpha1.ActorTemplateSpec{
+					Volumes: []atev1alpha1.Volume{
+						{
+							Name: "system-info",
+							VolumeSource: atev1alpha1.VolumeSource{
+								SystemInfo: &atev1alpha1.SystemInfoVolumeSource{
+									DataSources: []atev1alpha1.SystemInfoDataSource{
+										{TrustBundle: &atev1alpha1.TrustBundleDataSource{Name: "egress-trust", Path: "trust/ca.pem"}},
+									},
+								},
+							},
+						},
+					},
+					Containers: []atev1alpha1.Container{
+						{
+							Name:  "main",
+							Image: "main",
+							VolumeMounts: []atev1alpha1.VolumeMount{
+								{Name: "system-info", MountPath: "/run/substrate/certs"},
+							},
+						},
+					},
+				},
+			},
+			// The NAME crosses the wire; atelet resolves it against its
+			// allowlist and ClusterTrustBundle informer at write time.
+			want: &ateletpb.WorkloadSpec{
+				Volumes: []*ateletpb.Volume{
+					{
+						Name: "system-info",
+						Source: &ateletpb.Volume_SystemInfo{
+							SystemInfo: &ateletpb.SystemInfoVolume{
+								DataSources: []*ateletpb.SystemInfoDataSource{
+									{DataSource: &ateletpb.SystemInfoDataSource_TrustBundle{
+										TrustBundle: &ateletpb.TrustBundleDataSource{Name: "egress-trust", Path: "trust/ca.pem"},
+									}},
+								},
+							},
+						},
+					},
+				},
+				Containers: []*ateletpb.Container{
+					{
+						Name:  "main",
+						Image: "main",
+						VolumeMounts: []*ateletpb.VolumeMount{
+							{Name: "system-info", MountPath: "/run/substrate/certs"},
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "skips non-DurableDir volumes",
 			template: &atev1alpha1.ActorTemplate{
 				ObjectMeta: metav1.ObjectMeta{Name: "tmpl1", Namespace: "agent-ns"},
@@ -297,7 +355,7 @@ func TestWorkloadSpecFromActorTemplate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := workloadSpecFromActorTemplate(tt.template, nil)
+			got, err := workloadSpecFromActorTemplate(mustTemplateFromCRD(tt.template), nil)
 			if err != nil {
 				t.Fatalf("workloadSpecFromActorTemplate failed: %v", err)
 			}
@@ -309,7 +367,7 @@ func TestWorkloadSpecFromActorTemplate(t *testing.T) {
 }
 
 func TestWorkloadSpecFromActorTemplatePropagatesReadyz(t *testing.T) {
-	got, err := workloadSpecFromActorTemplate(&atev1alpha1.ActorTemplate{
+	got, err := workloadSpecFromActorTemplate(mustTemplateFromCRD(&atev1alpha1.ActorTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-readyz", Namespace: "agent-ns"},
 		Spec: atev1alpha1.ActorTemplateSpec{
 			Containers: []atev1alpha1.Container{
@@ -327,7 +385,7 @@ func TestWorkloadSpecFromActorTemplatePropagatesReadyz(t *testing.T) {
 				},
 			},
 		},
-	}, nil)
+	}), nil)
 	if err != nil {
 		t.Fatalf("workloadSpecFromActorTemplate failed: %v", err)
 	}
@@ -354,7 +412,7 @@ func TestWorkloadSpecFromActorTemplatePropagatesReadyz(t *testing.T) {
 }
 
 func TestAppendExternalVolumes(t *testing.T) {
-	template := &atev1alpha1.ActorTemplate{
+	template := mustTemplateFromCRD(&atev1alpha1.ActorTemplate{
 		Spec: atev1alpha1.ActorTemplateSpec{
 			Containers: []atev1alpha1.Container{
 				{
@@ -389,7 +447,7 @@ func TestAppendExternalVolumes(t *testing.T) {
 				},
 			},
 		},
-	}
+	})
 
 	actor := &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{
@@ -446,7 +504,7 @@ func TestAppendExternalVolumes(t *testing.T) {
 }
 
 func TestWorkloadSpecFromActorTemplatePropagatesSecurityContext(t *testing.T) {
-	got, err := workloadSpecFromActorTemplate(&atev1alpha1.ActorTemplate{
+	got, err := workloadSpecFromActorTemplate(mustTemplateFromCRD(&atev1alpha1.ActorTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-caps", Namespace: "agent-ns"},
 		Spec: atev1alpha1.ActorTemplateSpec{
 			Containers: []atev1alpha1.Container{
@@ -473,7 +531,7 @@ func TestWorkloadSpecFromActorTemplatePropagatesSecurityContext(t *testing.T) {
 				},
 			},
 		},
-	}, nil)
+	}), nil)
 	if err != nil {
 		t.Fatalf("workloadSpecFromActorTemplate failed: %v", err)
 	}
@@ -502,5 +560,117 @@ func TestWorkloadSpecFromActorTemplatePropagatesSecurityContext(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("WorkloadSpec mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestToAteletResources(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      *ateapipb.Resources
+		want    *ateletpb.ResourceLimits
+		wantErr bool
+	}{{
+		name: "nil resources",
+		in:   nil,
+		want: nil,
+	}, {
+		name: "empty limits",
+		in:   &ateapipb.Resources{},
+		want: nil,
+	}, {
+		name: "memory only",
+		in:   &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "memory", Quantity: "256Mi"}}},
+		want: &ateletpb.ResourceLimits{MemoryBytes: 268435456},
+	}, {
+		name: "cpu only",
+		in:   &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "cpu", Quantity: "200m"}}},
+		want: &ateletpb.ResourceLimits{CpuMillis: 200},
+	}, {
+		name: "both",
+		in: &ateapipb.Resources{Limits: []*ateapipb.Limits{
+			{Name: "cpu", Quantity: "1"},
+			{Name: "memory", Quantity: "1Gi"},
+		}},
+		want: &ateletpb.ResourceLimits{MemoryBytes: 1073741824, CpuMillis: 1000},
+	}, {
+		name:    "invalid quantity",
+		in:      &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "cpu", Quantity: "banana"}}},
+		wantErr: true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := toAteletResources(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("toAteletResources() error = nil, want parse error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("toAteletResources() failed: %v", err)
+			}
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("toAteletResources() = %v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("toAteletResources() = nil, want %v", tc.want)
+			}
+			if got.GetMemoryBytes() != tc.want.GetMemoryBytes() {
+				t.Errorf("memory_bytes = %d, want %d", got.GetMemoryBytes(), tc.want.GetMemoryBytes())
+			}
+			if got.GetCpuMillis() != tc.want.GetCpuMillis() {
+				t.Errorf("cpu_millis = %d, want %d", got.GetCpuMillis(), tc.want.GetCpuMillis())
+			}
+		})
+	}
+}
+
+// The limits a template declares must reach the workload spec atelet receives.
+// Without this, removing the Resources field from the ateletpb.Container
+// literal leaves every test in the repository green while limits never leave
+// ate-api-server.
+func TestWorkloadSpecFromActorTemplatePropagatesResources(t *testing.T) {
+	got, err := workloadSpecFromActorTemplate(mustTemplateFromCRD(&atev1alpha1.ActorTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-limits", Namespace: "agent-ns"},
+		Spec: atev1alpha1.ActorTemplateSpec{
+			SandboxClass: atev1alpha1.SandboxClassMicroVM,
+			Containers: []atev1alpha1.Container{
+				{
+					Name:  "limited",
+					Image: "main",
+					Resources: &atev1alpha1.ContainerResources{
+						Limits: atev1alpha1.ContainerResourceList{
+							corev1.ResourceMemory: resource.MustParse("256Mi"),
+							corev1.ResourceCPU:    resource.MustParse("200m"),
+						},
+					},
+				},
+				{Name: "unlimited", Image: "main"},
+			},
+		},
+	}), nil)
+	if err != nil {
+		t.Fatalf("workloadSpecFromActorTemplate failed: %v", err)
+	}
+	if len(got.GetContainers()) != 2 {
+		t.Fatalf("containers = %d, want 2", len(got.GetContainers()))
+	}
+
+	limited := got.GetContainers()[0].GetResources()
+	if limited == nil {
+		t.Fatal("limited container Resources = nil, want the declared limits")
+	}
+	if limited.GetMemoryBytes() != 268435456 {
+		t.Errorf("memory_bytes = %d, want 268435456", limited.GetMemoryBytes())
+	}
+	if limited.GetCpuMillis() != 200 {
+		t.Errorf("cpu_millis = %d, want 200", limited.GetCpuMillis())
+	}
+	if r := got.GetContainers()[1].GetResources(); r != nil {
+		t.Errorf("unlimited container Resources = %v, want nil", r)
 	}
 }

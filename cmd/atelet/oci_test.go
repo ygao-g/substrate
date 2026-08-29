@@ -20,56 +20,9 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/internal/ateerrors"
-	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
-
-// Each system-info volume mount becomes a read-only bind mount whose source
-// is the per-actor on-host SystemInfoVolumeRoot for that volume name. It is
-// delivered as a bind mount rather than environment variables because env
-// lives in the checkpointed process memory and would be frozen at the golden
-// snapshot's values after a restore; a bind mount is re-attached per-actor on
-// every resume.
-func TestBuildActorOCISpec_SystemInfoVolumeMounts(t *testing.T) {
-	const actorUID = "actor_uid"
-	volumeMounts := []*ateletpb.VolumeMount{
-		{Name: "sysinfo", MountPath: "/run/ate"},
-	}
-	volumes := []*ateletpb.Volume{
-		{Name: "sysinfo", Source: &ateletpb.Volume_SystemInfo{SystemInfo: &ateletpb.SystemInfoVolume{}}},
-	}
-	spec := buildActorOCISpec(
-		actorUID, "app",
-		[]string{"/app"},
-		[]string{"FOO=bar"},
-		map[string]string{"k": "v"},
-		"/run/netns/x",
-		volumes,
-		volumeMounts,
-		nil,
-	)
-	found := false
-	for _, m := range spec.Mounts {
-		if m.Destination != "/run/ate" {
-			continue
-		}
-		found = true
-		if want := ateompath.SystemInfoVolumeRoot(actorUID, "sysinfo"); m.Source != want {
-			t.Errorf("system-info mount source = %q, want %q", m.Source, want)
-		}
-		if m.Type != "bind" {
-			t.Errorf("system-info mount type = %q, want bind", m.Type)
-		}
-		if !slices.Contains(m.Options, "ro") {
-			t.Errorf("system-info mount must be read-only, options=%v", m.Options)
-		}
-	}
-	if !found {
-		t.Fatalf("system-info mount %q missing; mounts=%v", "/run/ate", spec.Mounts)
-	}
-}
 
 func TestResolveActorEnv(t *testing.T) {
 	defaultPath := "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -205,87 +158,6 @@ func TestResolveProcessArgs(t *testing.T) {
 	}
 }
 
-// Each durable-dir volume mount becomes a bind mount whose source is the
-// per-actor on-host DurableDirVolumeMountPoint for that volume name.
-func TestBuildActorOCISpec_DurableDirVolumeMounts(t *testing.T) {
-	const actorUID = "actor_uid"
-	durableDirs := []*ateletpb.VolumeMount{
-		{Name: "data", MountPath: "/var/data"},
-		{Name: "cache", MountPath: "/var/cache"},
-	}
-	volumes := []*ateletpb.Volume{
-		{Name: "data", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
-		{Name: "cache", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
-	}
-	spec := buildActorOCISpec(
-		actorUID, "app",
-		[]string{"/app"}, nil, nil,
-		"/run/netns/x",
-		volumes,
-		durableDirs,
-		nil,
-	)
-
-	for _, vm := range durableDirs {
-		wantSrc := ateompath.DurableDirVolumeMountPoint(actorUID, vm.Name)
-		found := false
-		for _, m := range spec.Mounts {
-			if m.Destination != vm.MountPath {
-				continue
-			}
-			found = true
-			if m.Source != wantSrc {
-				t.Errorf("durable-dir %q source = %q, want %q", vm.Name, m.Source, wantSrc)
-			}
-			if m.Type != "bind" {
-				t.Errorf("durable-dir %q type = %q, want bind", vm.Name, m.Type)
-			}
-		}
-		if !found {
-			t.Fatalf("durable-dir mount for %q missing; mounts=%v", vm.MountPath, spec.Mounts)
-		}
-	}
-}
-
-// An image volume binds the layer directory resolved for it, read-only.
-func TestBuildActorOCISpec_ImageVolumeMounts(t *testing.T) {
-	volumes := []*ateletpb.Volume{
-		{Name: "agent", Source: &ateletpb.Volume_Image{Image: &ateletpb.ImageVolumeSource{}}},
-		{Name: "data", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
-	}
-	mounts := []*ateletpb.VolumeMount{
-		{Name: "agent", MountPath: "/ate"},
-		{Name: "data", MountPath: "/var/data"},
-	}
-	spec := buildActorOCISpec(
-		"actor_uid", "app",
-		[]string{"/ate/payload-binary"}, nil, nil,
-		"/run/netns/x",
-		volumes,
-		mounts,
-		nil,
-	)
-
-	var got *specs.Mount
-	for i, m := range spec.Mounts {
-		if m.Destination == "/ate" {
-			got = &spec.Mounts[i]
-		}
-	}
-	if got == nil {
-		t.Fatalf("image volume mount for /ate missing; mounts=%v", spec.Mounts)
-	}
-	if want := ateompath.ImageVolumeMountPath("actor_uid", "app", "agent"); got.Source != want {
-		t.Errorf("image volume source = %q, want %q", got.Source, want)
-	}
-	if got.Type != "bind" {
-		t.Errorf("image volume type = %q, want bind", got.Type)
-	}
-	if want := []string{"bind", "ro"}; !slices.Equal(got.Options, want) {
-		t.Errorf("image volume options = %v, want %v", got.Options, want)
-	}
-}
-
 // wantDefaultCapabilities is the set a container gets when it asks for no
 // adjustment. It is spelled out rather than derived from defaultCapabilities so
 // that widening or narrowing the default is a deliberate test change.
@@ -360,64 +232,5 @@ func TestResolveCapabilities(t *testing.T) {
 				t.Errorf("resolveCapabilities() = %v, want %v", got, tt.want)
 			}
 		})
-	}
-}
-
-// The resolved set lands in bounding, effective and permitted. Inheritable and
-// ambient stay empty — see the comment in buildActorOCISpec.
-func TestBuildActorOCISpec_Capabilities(t *testing.T) {
-	want := []string{"CAP_CHOWN", "CAP_KILL"}
-	spec := buildActorOCISpec("actor_uid", "app", []string{"/app"}, nil, nil, "/run/netns/x", nil, nil, want)
-
-	caps := spec.Process.Capabilities
-	if caps == nil {
-		t.Fatal("spec.Process.Capabilities is nil")
-	}
-	for _, set := range []struct {
-		name string
-		got  []string
-	}{
-		{"Bounding", caps.Bounding},
-		{"Effective", caps.Effective},
-		{"Permitted", caps.Permitted},
-	} {
-		if !slices.Equal(set.got, want) {
-			t.Errorf("%s = %v, want %v", set.name, set.got, want)
-		}
-	}
-	for _, set := range []struct {
-		name string
-		got  []string
-	}{
-		{"Inheritable", caps.Inheritable},
-		{"Ambient", caps.Ambient},
-	} {
-		if len(set.got) != 0 {
-			t.Errorf("%s = %v, want empty", set.name, set.got)
-		}
-	}
-}
-
-// The pause container only reaps, so it is built with no capabilities at all.
-func TestBuildActorOCISpec_NoCapabilitiesForPause(t *testing.T) {
-	spec := buildActorOCISpec("actor_uid", "pause", []string{"/pause"}, nil, nil, "/run/netns/x", nil, nil, nil)
-
-	caps := spec.Process.Capabilities
-	if caps == nil {
-		t.Fatal("spec.Process.Capabilities is nil")
-	}
-	for _, set := range []struct {
-		name string
-		got  []string
-	}{
-		{"Bounding", caps.Bounding},
-		{"Effective", caps.Effective},
-		{"Inheritable", caps.Inheritable},
-		{"Permitted", caps.Permitted},
-		{"Ambient", caps.Ambient},
-	} {
-		if len(set.got) != 0 {
-			t.Errorf("%s = %v, want empty", set.name, set.got)
-		}
 	}
 }

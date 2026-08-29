@@ -20,14 +20,11 @@ import (
 	"testing"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
-	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/ateredis"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
 	"github.com/agent-substrate/substrate/internal/resources"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,16 +34,13 @@ import (
 func TestEnsureMarkedSuspending_SnapshotName(t *testing.T) {
 	ctx := context.Background()
 	persistence := newTestPersistence(t)
-	actor, err := persistence.CreateActor(ctx, &ateapipb.Actor{
+	actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
 	})
-	if err != nil {
-		t.Fatalf("CreateActor: %v", err)
-	}
-	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+	tmpl := mustTemplateFromCRD(&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
 		SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://bucket/root/"},
-	}}
+	}})
 	w := &ActorWorkflow{store: persistence}
 	marked, err := w.ensureMarkedSuspending(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, actor, tmpl)
 	if err != nil {
@@ -62,7 +56,7 @@ func TestEnsureMarkedSuspending_SnapshotName(t *testing.T) {
 	}
 	// The URI the later steps rebuild from that name nests under the actor's
 	// atespace so each tenant gets a distinct storage prefix.
-	uri, err := resources.NewSnapshotURI(tmpl.Spec.SnapshotsConfig.Location, "team-a", snapshotName)
+	uri, err := resources.NewSnapshotURI(tmpl.GetSnapshotsConfig().GetStorageLocation(), "team-a", snapshotName)
 	if err != nil {
 		t.Fatalf("NewSnapshotURI(%q): %v", snapshotName, err)
 	}
@@ -77,7 +71,7 @@ func TestEnsureMarkedSuspending_SnapshotName(t *testing.T) {
 func TestEnsureMarkedSuspending_ReentryKeepsPersistedSnapshotLocation(t *testing.T) {
 	ctx := context.Background()
 	persistence := newTestPersistence(t)
-	actor, err := persistence.CreateActor(ctx, &ateapipb.Actor{
+	actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 		Status: &ateapipb.ActorStatus{
 			State:                                ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
@@ -85,11 +79,8 @@ func TestEnsureMarkedSuspending_ReentryKeepsPersistedSnapshotLocation(t *testing
 			InProgressSnapshotSourceActorVersion: 7,
 		},
 	})
-	if err != nil {
-		t.Fatalf("CreateActor: %v", err)
-	}
 	w := &ActorWorkflow{store: persistence}
-	marked, err := w.ensureMarkedSuspending(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, actor, &atev1alpha1.ActorTemplate{})
+	marked, err := w.ensureMarkedSuspending(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, actor, mustTemplateFromCRD(&atev1alpha1.ActorTemplate{}))
 	if err != nil {
 		t.Fatalf("ensureMarkedSuspending: %v", err)
 	}
@@ -175,17 +166,14 @@ func TestEnsureMarkedSuspending_StateMatrix(t *testing.T) {
 		w := &ActorWorkflow{store: persistence}
 
 		actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
-		actor, err := persistence.CreateActor(ctx, &ateapipb.Actor{
+		actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: actorRef.Name},
 			Status:   &ateapipb.ActorStatus{State: seedState},
 		})
-		if err != nil {
-			t.Fatalf("state %v: CreateActor: %v", seedState, err)
-		}
 
-		tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+		tmpl := mustTemplateFromCRD(&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
 			SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://snapshots"},
-		}}
+		}})
 		marked, err := w.ensureMarkedSuspending(ctx, actorRef, actor, tmpl)
 		assertPrerequisiteResult(t, seedState, err, allowed[seedState])
 		if err == nil && marked.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDING {
@@ -218,17 +206,11 @@ func TestSuspendActor_CrashesWhenSuspendingActorMissingWorkerPod(t *testing.T) {
 	}
 }
 
-// newTestPersistence returns a store backed by a throwaway miniredis.
+// newTestPersistence returns an isolated PostgreSQL-backed store.
 func newTestPersistence(t *testing.T) store.Interface {
-	t.Helper()
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("failed to start miniredis: %v", err)
-	}
-	t.Cleanup(mr.Close)
-	rdb := redis.NewClusterClient(&redis.ClusterOptions{Addrs: []string{mr.Addr()}})
-	t.Cleanup(func() { rdb.Close() }) //nolint:errcheck // test cleanup
-	return ateredis.NewPersistence(rdb)
+	persistence, _ := storetest.SetupTestStore(t)
+	storetest.MustCreateAtespace(t, context.Background(), persistence, "team-a")
+	return persistence
 }
 
 // newDanglingDialer returns a dialer whose informer cache has no pods, so
@@ -261,7 +243,6 @@ func TestEnsureAteletSuspended_DanglingWorkerDoesNotRecordPhantomSnapshot(t *tes
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			persistence := newTestPersistence(t)
-
 			actor := &ateapipb.Actor{
 				Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 				Status: &ateapipb.ActorStatus{
@@ -275,13 +256,10 @@ func TestEnsureAteletSuspended_DanglingWorkerDoesNotRecordPhantomSnapshot(t *tes
 					LatestSnapshot:         tt.prevSnapshot,
 				},
 			}
-			created, err := persistence.CreateActor(ctx, actor)
-			if err != nil {
-				t.Fatalf("CreateActor: %v", err)
-			}
+			created := storetest.MustCreateActor(t, ctx, persistence, actor)
 
 			w := &ActorWorkflow{store: persistence, dialer: newDanglingDialer()}
-			if _, err := w.ensureAteletSuspended(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, created, &atev1alpha1.ActorTemplate{}); err == nil {
+			if _, err := w.ensureAteletSuspended(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, created, mustTemplateFromCRD(&atev1alpha1.ActorTemplate{})); err == nil {
 				t.Fatal("ensureAteletSuspended: want error for dangling worker, got nil")
 			}
 
@@ -329,13 +307,10 @@ func TestEnsureSuspendedFinalized_NoAssignment(t *testing.T) {
 			},
 		},
 	}
-	created, err := persistence.CreateActor(ctx, actor)
-	if err != nil {
-		t.Fatalf("CreateActor: %v", err)
-	}
+	created := storetest.MustCreateActor(t, ctx, persistence, actor)
 
 	w := &ActorWorkflow{store: persistence}
-	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://snapshots"}}}
+	tmpl := mustTemplateFromCRD(&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://snapshots"}}})
 	stored, err := w.ensureSuspendedFinalized(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, tmpl)
 	if err != nil {
 		t.Fatalf("ensureSuspendedFinalized: %v", err)
@@ -353,7 +328,7 @@ func TestEnsureSuspendedFinalized_NoAssignment(t *testing.T) {
 	if stored.GetStatus().GetLocalSnapshotInfo() != nil {
 		t.Errorf("LocalSnapshotInfo = %v, want cleared", stored.GetStatus().GetLocalSnapshotInfo())
 	}
-	snapshot, err := persistence.GetActorSnapshot(ctx, "team-a", snapshotName)
+	snapshot, err := persistence.GetActorSnapshot(ctx, resources.ActorSnapshotRef{Atespace: "team-a", Name: snapshotName})
 	if err != nil {
 		t.Fatalf("GetActorSnapshot: %v", err)
 	}
@@ -369,6 +344,46 @@ func TestEnsureSuspendedFinalized_NoAssignment(t *testing.T) {
 	}
 	if got := snapshot.GetStatus().GetSourceActorVersion(); got != 1 {
 		t.Errorf("snapshot SourceActorVersion = %d, want 1", got)
+	}
+}
+
+// TestEnsureSuspendedFinalized_StampsSubstrateTemplateRef verifies a
+// ref-mode actor's commit snapshot records the substrate template reference
+// alongside the template uid, with the legacy CRD fields left empty.
+func TestEnsureSuspendedFinalized_StampsSubstrateTemplateRef(t *testing.T) {
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	template := seedSubstrateTemplate(t, ctx, persistence, "sub-tmpl")
+
+	const snapshotName = "2026-01-01t00-00-00z-ref"
+	storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: "team-a", Name: "sub-tmpl"},
+		Status: &ateapipb.ActorStatus{
+			State:                                ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
+			InProgressSnapshotName:               snapshotName,
+			InProgressSnapshotSourceActorVersion: 1,
+		},
+	})
+
+	w := &ActorWorkflow{store: persistence}
+	if _, err := w.ensureSuspendedFinalized(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, template); err != nil {
+		t.Fatalf("ensureSuspendedFinalized: %v", err)
+	}
+
+	snapshot, err := persistence.GetActorSnapshot(ctx, resources.ActorSnapshotRef{Atespace: "team-a", Name: snapshotName})
+	if err != nil {
+		t.Fatalf("GetActorSnapshot: %v", err)
+	}
+	st := snapshot.GetStatus()
+	if st.GetActorTemplate().GetAtespace() != "team-a" || st.GetActorTemplate().GetName() != "sub-tmpl" {
+		t.Errorf("snapshot ActorTemplate ref = %v, want team-a/sub-tmpl", st.GetActorTemplate())
+	}
+	if st.GetActorTemplateUid() != template.GetMetadata().GetUid() {
+		t.Errorf("snapshot ActorTemplateUid = %q, want %q", st.GetActorTemplateUid(), template.GetMetadata().GetUid())
+	}
+	if st.GetActorTemplateNamespace() != "" || st.GetActorTemplateName() != "" {
+		t.Errorf("legacy template fields = %q/%q, want empty for a ref-mode actor", st.GetActorTemplateNamespace(), st.GetActorTemplateName())
 	}
 }
 
@@ -401,7 +416,6 @@ func TestEnsureSuspendedFinalized_ReleasesOnlyOwnWorker(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			persistence := newTestPersistence(t)
-
 			actor := &ateapipb.Actor{
 				Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "shared"},
 				Status: &ateapipb.ActorStatus{
@@ -416,10 +430,7 @@ func TestEnsureSuspendedFinalized_ReleasesOnlyOwnWorker(t *testing.T) {
 					InProgressSnapshotName: "snapshot-1",
 				},
 			}
-			created, err := persistence.CreateActor(ctx, actor)
-			if err != nil {
-				t.Fatalf("CreateActor: %v", err)
-			}
+			created := storetest.MustCreateActor(t, ctx, persistence, actor)
 
 			uid := created.GetMetadata().GetUid()
 			if tt.assignmentAtespace != "team-a" || tt.mismatchedUID {
@@ -438,12 +449,12 @@ func TestEnsureSuspendedFinalized_ReleasesOnlyOwnWorker(t *testing.T) {
 					},
 				},
 			}
-			if err := persistence.CreateWorker(ctx, worker); err != nil {
+			if _, err := persistence.CreateWorker(ctx, worker); err != nil {
 				t.Fatalf("CreateWorker: %v", err)
 			}
 
 			w := &ActorWorkflow{store: persistence}
-			tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://bucket/root"}}}
+			tmpl := mustTemplateFromCRD(&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://bucket/root"}}})
 			if _, err := w.ensureSuspendedFinalized(ctx, resources.ActorRef{Atespace: "team-a", Name: "shared"}, tmpl); err != nil {
 				t.Fatalf("ensureSuspendedFinalized: %v", err)
 			}
@@ -466,9 +477,8 @@ func TestEnsureSuspendedFinalized_ReleasesOnlyOwnWorker(t *testing.T) {
 func TestEnsureSuspendedFinalized_SnapshotSourceActorVersion(t *testing.T) {
 	ctx := context.Background()
 	persistence := newTestPersistence(t)
-
 	const snapshotName = "2026-01-01t00-00-00z-abc"
-	_, err := persistence.CreateActor(ctx, &ateapipb.Actor{
+	storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 		Status: &ateapipb.ActorStatus{
 			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
@@ -483,12 +493,9 @@ func TestEnsureSuspendedFinalized_SnapshotSourceActorVersion(t *testing.T) {
 			InProgressSnapshotSourceActorVersion: 42,
 		},
 	})
-	if err != nil {
-		t.Fatalf("CreateActor: %v", err)
-	}
 
 	w := &ActorWorkflow{store: persistence}
-	tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://snapshots"}}}
+	tmpl := mustTemplateFromCRD(&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://snapshots"}}})
 	final, err := w.ensureSuspendedFinalized(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, tmpl)
 	if err != nil {
 		t.Fatalf("ensureSuspendedFinalized: %v", err)
@@ -500,7 +507,7 @@ func TestEnsureSuspendedFinalized_SnapshotSourceActorVersion(t *testing.T) {
 		t.Errorf("in-progress snapshot fields not cleared: %q / %d", final.GetStatus().GetInProgressSnapshotName(), final.GetStatus().GetInProgressSnapshotSourceActorVersion())
 	}
 
-	snap, err := persistence.GetActorSnapshot(ctx, "team-a", final.GetStatus().GetLatestSnapshot().GetName())
+	snap, err := persistence.GetActorSnapshot(ctx, resources.ActorSnapshotRef{Atespace: "team-a", Name: final.GetStatus().GetLatestSnapshot().GetName()})
 	if err != nil {
 		t.Fatalf("GetActorSnapshot: %v", err)
 	}
@@ -513,21 +520,23 @@ func TestEnsureSuspendedFinalized_SnapshotSourceActorVersion(t *testing.T) {
 // golden snapshot is the base an OnGolden data resume combines into, so the
 // template's onCommit must not thin it down to a data-only capture.
 func TestCommitSnapshotScope(t *testing.T) {
-	tmpl := func(onCommit atev1alpha1.SnapshotScope) *atev1alpha1.ActorTemplate {
-		return &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+	tmpl := func(onCommit atev1alpha1.SnapshotScope) *ateapipb.ActorTemplate {
+		return mustTemplateFromCRD(&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
 			SnapshotsConfig: atev1alpha1.SnapshotsConfig{OnCommit: onCommit},
-		}}
+		}})
 	}
+	fullScope := ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
+	dataScope := ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
 	tests := []struct {
 		name     string
 		atespace string
 		onCommit atev1alpha1.SnapshotScope
-		want     atev1alpha1.SnapshotScope
+		want     ateapipb.SnapshotContentScope
 	}{
-		{"golden actor ignores Data onCommit", resources.GoldenActorAtespace, atev1alpha1.SnapshotScopeData, atev1alpha1.SnapshotScopeFull},
-		{"golden actor keeps Full onCommit", resources.GoldenActorAtespace, atev1alpha1.SnapshotScopeFull, atev1alpha1.SnapshotScopeFull},
-		{"regular actor uses Data onCommit", "team-a", atev1alpha1.SnapshotScopeData, atev1alpha1.SnapshotScopeData},
-		{"regular actor uses Full onCommit", "team-a", atev1alpha1.SnapshotScopeFull, atev1alpha1.SnapshotScopeFull},
+		{"golden actor ignores Data onCommit", resources.GoldenActorAtespace, atev1alpha1.SnapshotScopeData, fullScope},
+		{"golden actor keeps Full onCommit", resources.GoldenActorAtespace, atev1alpha1.SnapshotScopeFull, fullScope},
+		{"regular actor uses Data onCommit", "team-a", atev1alpha1.SnapshotScopeData, dataScope},
+		{"regular actor uses Full onCommit", "team-a", atev1alpha1.SnapshotScopeFull, fullScope},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -568,15 +577,15 @@ func TestIsPausedOriginSuspend(t *testing.T) {
 // suspend is rejected before the actor leaves PAUSED when the pause captured
 // Data but the template commits Full: an upload cannot fabricate memory.
 func TestEnsureMarkedSuspending_PausedScopeRejection(t *testing.T) {
-	tmpl := func(onPause, onCommit atev1alpha1.SnapshotScope) *atev1alpha1.ActorTemplate {
-		return &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
+	tmpl := func(onPause, onCommit atev1alpha1.SnapshotScope) *ateapipb.ActorTemplate {
+		return mustTemplateFromCRD(&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{
 			SnapshotsConfig: atev1alpha1.SnapshotsConfig{OnPause: onPause, OnCommit: onCommit, Location: "gs://snapshots"},
-		}}
+		}})
 	}
 	tests := []struct {
 		name     string
 		captured ateapipb.SnapshotContentScope
-		tmpl     *atev1alpha1.ActorTemplate
+		tmpl     *ateapipb.ActorTemplate
 		wantErr  bool
 	}{
 		{"data capture cannot commit full", ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA, tmpl(atev1alpha1.SnapshotScopeData, atev1alpha1.SnapshotScopeFull), true},
@@ -594,18 +603,15 @@ func TestEnsureMarkedSuspending_PausedScopeRejection(t *testing.T) {
 			w := &ActorWorkflow{store: persistence}
 
 			actorRef := resources.ActorRef{Atespace: "team-a", Name: "actor-1"}
-			actor, err := persistence.CreateActor(ctx, &ateapipb.Actor{
+			actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 				Metadata: &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: actorRef.Name},
 				Status: &ateapipb.ActorStatus{
 					State:             ateapipb.ActorState_ACTOR_STATE_PAUSED,
 					LocalSnapshotInfo: &ateapipb.LocalSnapshotInfo{SnapshotName: "snap", NodeVmsWithLocalSnapshots: []string{"node1"}, ContentScope: tc.captured},
 				},
 			})
-			if err != nil {
-				t.Fatalf("CreateActor: %v", err)
-			}
 
-			_, err = w.ensureMarkedSuspending(ctx, actorRef, actor, tc.tmpl)
+			_, err := w.ensureMarkedSuspending(ctx, actorRef, actor, tc.tmpl)
 			if gotErr := err != nil; gotErr != tc.wantErr {
 				t.Fatalf("ensureMarkedSuspending = %v, wantErr %t", err, tc.wantErr)
 			}
@@ -628,18 +634,15 @@ func TestEnsurePausedSnapshotUploaded_Preconditions(t *testing.T) {
 		persistence := newTestPersistence(t)
 		w := &ActorWorkflow{store: persistence, dialer: newDanglingDialer()}
 
-		created, err := persistence.CreateActor(ctx, &ateapipb.Actor{
+		created := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 			Status: &ateapipb.ActorStatus{
 				State:             ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
 				LocalSnapshotInfo: &ateapipb.LocalSnapshotInfo{SnapshotName: "snap"},
 			},
 		})
-		if err != nil {
-			t.Fatalf("CreateActor: %v", err)
-		}
 
-		if _, err := w.ensurePausedSnapshotUploaded(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, created, &atev1alpha1.ActorTemplate{}); err == nil {
+		if _, err := w.ensurePausedSnapshotUploaded(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, created, mustTemplateFromCRD(&atev1alpha1.ActorTemplate{})); err == nil {
 			t.Fatal("ensurePausedSnapshotUploaded = nil, want error for missing node record")
 		}
 
@@ -657,7 +660,7 @@ func TestEnsurePausedSnapshotUploaded_Preconditions(t *testing.T) {
 		persistence := newTestPersistence(t)
 		w := &ActorWorkflow{store: persistence, dialer: newDanglingDialer()}
 
-		created, err := persistence.CreateActor(ctx, &ateapipb.Actor{
+		created := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 			Status: &ateapipb.ActorStatus{
 				State:                  ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
@@ -665,12 +668,9 @@ func TestEnsurePausedSnapshotUploaded_Preconditions(t *testing.T) {
 				LocalSnapshotInfo:      &ateapipb.LocalSnapshotInfo{SnapshotName: "snap", NodeVmsWithLocalSnapshots: []string{"node1"}},
 			},
 		})
-		if err != nil {
-			t.Fatalf("CreateActor: %v", err)
-		}
 
-		tmpl := &atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://snapshots"}}}
-		_, err = w.ensurePausedSnapshotUploaded(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, created, tmpl)
+		tmpl := mustTemplateFromCRD(&atev1alpha1.ActorTemplate{Spec: atev1alpha1.ActorTemplateSpec{SnapshotsConfig: atev1alpha1.SnapshotsConfig{Location: "gs://snapshots"}}})
+		_, err := w.ensurePausedSnapshotUploaded(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, created, tmpl)
 		if !errors.Is(err, ErrNoAteletOnNode) {
 			t.Fatalf("ensurePausedSnapshotUploaded = %v, want ErrNoAteletOnNode", err)
 		}

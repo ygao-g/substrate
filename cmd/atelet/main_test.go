@@ -50,6 +50,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/emptypb"
+	certsv1beta1 "k8s.io/api/certificates/v1beta1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const testPauseImage = "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
@@ -137,14 +139,14 @@ func TestWriteSystemInfoVolume(t *testing.T) {
 	}
 
 	golden := resources.ActorRef{Atespace: "ate-e2e-probe", Name: "golden-actor"}
-	if err := writeSystemInfoVolume(ctx, root, golden, "uid-golden", si); err != nil {
+	if err := writeSystemInfoVolume(ctx, root, golden, "uid-golden", nil, si); err != nil {
 		t.Fatalf("writeSystemInfoVolume: %v", err)
 	}
 
 	// Overwrite with a different actor, as happens when a snapshot taken from
 	// one actor seeds another on resume: files must carry the new values.
 	alpha := resources.ActorRef{Atespace: "ate-e2e-probe", Name: "probe-alpha"}
-	if err := writeSystemInfoVolume(ctx, root, alpha, "uid-alpha", si); err != nil {
+	if err := writeSystemInfoVolume(ctx, root, alpha, "uid-alpha", nil, si); err != nil {
 		t.Fatalf("writeSystemInfoVolume (rewrite): %v", err)
 	}
 
@@ -198,7 +200,7 @@ func TestWriteSystemInfoVolume_StableRealPaths(t *testing.T) {
 	}
 
 	golden := resources.ActorRef{Atespace: "ate-e2e-probe", Name: "golden-actor"}
-	if err := writeSystemInfoVolume(ctx, root, golden, "uid-golden", si); err != nil {
+	if err := writeSystemInfoVolume(ctx, root, golden, "uid-golden", nil, si); err != nil {
 		t.Fatalf("writeSystemInfoVolume: %v", err)
 	}
 
@@ -222,7 +224,7 @@ func TestWriteSystemInfoVolume_StableRealPaths(t *testing.T) {
 	// Regenerate for a different actor, as a restore from a shared golden
 	// snapshot does.
 	alpha := resources.ActorRef{Atespace: "ate-e2e-probe", Name: "probe-alpha"}
-	if err := writeSystemInfoVolume(ctx, root, alpha, "uid-alpha", si); err != nil {
+	if err := writeSystemInfoVolume(ctx, root, alpha, "uid-alpha", nil, si); err != nil {
 		t.Fatalf("writeSystemInfoVolume (rewrite): %v", err)
 	}
 
@@ -238,6 +240,42 @@ func TestWriteSystemInfoVolume_StableRealPaths(t *testing.T) {
 			t.Errorf("pre-rewrite real path %q gone after regeneration: %v; find-paths re-open of a suspend-time path would fail", realBefore[p], err)
 		}
 	}
+}
+
+func TestWriteSystemInfoVolume_TrustBundle(t *testing.T) {
+	ctx := context.Background()
+	certPEM := testCertPEM(t)
+	si := &ateletpb.SystemInfoVolume{
+		DataSources: []*ateletpb.SystemInfoDataSource{
+			{DataSource: &ateletpb.SystemInfoDataSource_TrustBundle{
+				TrustBundle: &ateletpb.TrustBundleDataSource{Name: EgressTrustBundleName, Path: "trust/ca.pem"},
+			}},
+		},
+	}
+	lister := ctbLister(t, &certsv1beta1.ClusterTrustBundle{
+		ObjectMeta: metav1.ObjectMeta{Name: egressTrustBundleObjectName},
+		Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: string(certPEM)},
+	})
+
+	root := filepath.Join(t.TempDir(), "system-info", "vol1")
+	ref := resources.ActorRef{Atespace: "team-a", Name: "actor-1"}
+	if err := writeSystemInfoVolume(ctx, root, ref, "uid-1", lister, si); err != nil {
+		t.Fatalf("writeSystemInfoVolume: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "trust/ca.pem"))
+	if err != nil {
+		t.Fatalf("reading projected bundle: %v", err)
+	}
+	if string(got) != string(certPEM) {
+		t.Errorf("content = %q, want the sanitized bundle", got)
+	}
+
+	t.Run("resolution failure fails the write rather than produce an empty trust file", func(t *testing.T) {
+		err := writeSystemInfoVolume(ctx, filepath.Join(t.TempDir(), "vol2"), ref, "uid-1", ctbLister(t), si)
+		if err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Errorf("writeSystemInfoVolume = %v, want not-found resolution error", err)
+		}
+	})
 }
 
 func TestWriteFileAtomic(t *testing.T) {
@@ -410,8 +448,8 @@ func TestValidateRunRequest(t *testing.T) {
 		{"invalid atespace", func(r *ateletpb.RunRequest) { r.Atespace = "../escape" }, true},
 		{"invalid actor name", func(r *ateletpb.RunRequest) { r.ActorName = "../escape" }, true},
 		{"invalid actor uid", func(r *ateletpb.RunRequest) { r.ActorUid = "../escape" }, true},
-		{"invalid actor template namespace", func(r *ateletpb.RunRequest) { r.ActorTemplateNamespace = "Not_Valid" }, true},
-		{"invalid actor template name", func(r *ateletpb.RunRequest) { r.ActorTemplateName = "Not_Valid" }, true},
+		{"any actor template identity accepted", func(r *ateletpb.RunRequest) { r.ActorTemplateNamespace, r.ActorTemplateName = "Not_Valid", "Not_Valid" }, false},
+		{"empty actor template identity accepted", func(r *ateletpb.RunRequest) { r.ActorTemplateNamespace, r.ActorTemplateName = "", "" }, false},
 		{"invalid container name", func(r *ateletpb.RunRequest) {
 			r.Spec.Containers = []*ateletpb.Container{{Name: "../escape"}}
 		}, true},
@@ -450,8 +488,10 @@ func TestValidateCheckpointRequest(t *testing.T) {
 		{"invalid atespace", makeReq(func(r *ateletpb.CheckpointRequest) { r.Atespace = "../escape" }), true},
 		{"invalid actor name", makeReq(func(r *ateletpb.CheckpointRequest) { r.ActorName = "../escape" }), true},
 		{"invalid actor uid", makeReq(func(r *ateletpb.CheckpointRequest) { r.ActorUid = "../escape" }), true},
-		{"invalid actor template namespace", makeReq(func(r *ateletpb.CheckpointRequest) { r.ActorTemplateNamespace = "Not_Valid" }), true},
-		{"invalid actor template name", makeReq(func(r *ateletpb.CheckpointRequest) { r.ActorTemplateName = "Not_Valid" }), true},
+		{"any actor template identity accepted", makeReq(func(r *ateletpb.CheckpointRequest) {
+			r.ActorTemplateNamespace, r.ActorTemplateName = "Not_Valid", "Not_Valid"
+		}), false},
+		{"empty actor template identity accepted", makeReq(func(r *ateletpb.CheckpointRequest) { r.ActorTemplateNamespace, r.ActorTemplateName = "", "" }), false},
 		{"invalid container name", makeReq(func(r *ateletpb.CheckpointRequest) {
 			r.Spec.Containers = []*ateletpb.Container{{Name: "../escape"}}
 		}), true},
@@ -508,8 +548,10 @@ func TestValidateRestoreRequest(t *testing.T) {
 		{"invalid atespace", makeReq(func(r *ateletpb.RestoreRequest) { r.Atespace = "../escape" }), true},
 		{"invalid actor name", makeReq(func(r *ateletpb.RestoreRequest) { r.ActorName = "../escape" }), true},
 		{"invalid actor uid", makeReq(func(r *ateletpb.RestoreRequest) { r.ActorUid = "../escape" }), true},
-		{"invalid actor template namespace", makeReq(func(r *ateletpb.RestoreRequest) { r.ActorTemplateNamespace = "Not_Valid" }), true},
-		{"invalid actor template name", makeReq(func(r *ateletpb.RestoreRequest) { r.ActorTemplateName = "Not_Valid" }), true},
+		{"any actor template identity accepted", makeReq(func(r *ateletpb.RestoreRequest) {
+			r.ActorTemplateNamespace, r.ActorTemplateName = "Not_Valid", "Not_Valid"
+		}), false},
+		{"empty actor template identity accepted", makeReq(func(r *ateletpb.RestoreRequest) { r.ActorTemplateNamespace, r.ActorTemplateName = "", "" }), false},
 		{"invalid container name", makeReq(func(r *ateletpb.RestoreRequest) {
 			r.Spec.Containers = []*ateletpb.Container{{Name: "../escape"}}
 		}), true},
@@ -785,28 +827,11 @@ func TestRPCBoundariesReject(t *testing.T) {
 		wantInvalidArgument(t, "Restore", err)
 	})
 	t.Run("Terminate", func(t *testing.T) {
-		const okTargetAteomUID = "123e4567-e89b-12d3-a456-426614174001"
 		t.Run("invalid ateom UID", func(t *testing.T) {
 			_, err := s.Terminate(ctx, &ateletpb.TerminateRequest{
 				Atespace: okAtespace, ActorName: okID,
 				ActorUid: okActorUID, ActorTemplateNamespace: "default", ActorTemplateName: "template",
 				TargetAteomUid: badUID, Spec: okSpec,
-			})
-			wantInvalidArgument(t, "Terminate", err)
-		})
-		t.Run("missing template namespace", func(t *testing.T) {
-			_, err := s.Terminate(ctx, &ateletpb.TerminateRequest{
-				Atespace: okAtespace, ActorName: okID,
-				ActorUid: okActorUID, ActorTemplateName: "template",
-				TargetAteomUid: okTargetAteomUID, Spec: okSpec,
-			})
-			wantInvalidArgument(t, "Terminate", err)
-		})
-		t.Run("missing template name", func(t *testing.T) {
-			_, err := s.Terminate(ctx, &ateletpb.TerminateRequest{
-				Atespace: okAtespace, ActorName: okID,
-				ActorUid: okActorUID, ActorTemplateNamespace: "default",
-				TargetAteomUid: okTargetAteomUID, Spec: okSpec,
 			})
 			wantInvalidArgument(t, "Terminate", err)
 		})
@@ -1839,7 +1864,10 @@ func TestValidateUploadPausedCheckpointRequest(t *testing.T) {
 		{"golden atespace rejected", func(r *ateletpb.UploadPausedCheckpointRequest) { r.Atespace = resources.GoldenActorAtespace }, true},
 		{"invalid actor name", func(r *ateletpb.UploadPausedCheckpointRequest) { r.ActorName = "UPPER" }, true},
 		{"invalid actor uid", func(r *ateletpb.UploadPausedCheckpointRequest) { r.ActorUid = "" }, true},
-		{"invalid template namespace", func(r *ateletpb.UploadPausedCheckpointRequest) { r.ActorTemplateNamespace = "no/slashes" }, true},
+		{"any actor template identity accepted", func(r *ateletpb.UploadPausedCheckpointRequest) { r.ActorTemplateNamespace = "no/slashes" }, false},
+		{"empty actor template identity accepted", func(r *ateletpb.UploadPausedCheckpointRequest) {
+			r.ActorTemplateNamespace, r.ActorTemplateName = "", ""
+		}, false},
 		{"invalid snapshot name", func(r *ateletpb.UploadPausedCheckpointRequest) { r.LocalSnapshotName = "../escape" }, true},
 		{"invalid snapshot uri", func(r *ateletpb.UploadPausedCheckpointRequest) { r.DestinationSnapshotUri = "not-a-uri" }, true},
 		{"unspecified scope", func(r *ateletpb.UploadPausedCheckpointRequest) {

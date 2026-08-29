@@ -45,6 +45,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/credbundle"
 	"github.com/agent-substrate/substrate/internal/imagecache"
+	"github.com/agent-substrate/substrate/internal/ocispec"
 	"github.com/agent-substrate/substrate/internal/otlprelay"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
@@ -76,9 +77,12 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
-	"k8s.io/apimachinery/pkg/api/validate/content"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	certlisters "k8s.io/client-go/listers/certificates/v1beta1"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/lru"
 )
@@ -180,9 +184,9 @@ func main() {
 		}()
 	}
 
-	ateomDialer := &AteomDialer{
-		conns: lru.New(256),
-	}
+	startDevicePlugins(ctx)
+
+	ateomDialer := newAteomDialer(256)
 
 	var gcpRegistryAuthn authn.Authenticator
 	if *gcpAuthForImagePulls {
@@ -241,7 +245,7 @@ func main() {
 
 	var wrappedAnonGCS ategcs.ObjectStorage
 	if anonGCSClient != nil {
-		wrappedAnonGCS = ategcs.NewGCSClient(anonGCSClient)
+		wrappedAnonGCS = ategcs.NewGCSClient(anonGCSClient, option.WithoutAuthentication())
 	}
 
 	var wrappedGCS ategcs.ObjectStorage
@@ -276,10 +280,22 @@ func main() {
 	ateFactory := externalversions.NewSharedInformerFactory(ateClient, 0)
 	csiDriverConfigLister := ateFactory.Api().V1alpha1().CSIDriverConfigs().Lister()
 
+	// Start an informer on the ClusterTrustBundle we care about (currently
+	// only the egress trust bundle). The v1beta1 API is feature-gated: on a
+	// cluster that does not serve it, startup blocks at WaitForCacheSync
+	// below, with the reflector's errors naming the missing API.
+	coreFactory := informers.NewSharedInformerFactoryWithOptions(k8sClient, 0,
+		informers.WithTweakListOptions(func(o *metav1.ListOptions) {
+			o.FieldSelector = fields.OneTermEqualSelector("metadata.name", supportedTrustBundles[EgressTrustBundleName]).String()
+		}))
+	clusterTrustBundleLister := coreFactory.Certificates().V1beta1().ClusterTrustBundles().Lister()
+
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 	ateFactory.Start(stopCh)
+	coreFactory.Start(stopCh)
 	ateFactory.WaitForCacheSync(stopCh)
+	coreFactory.WaitForCacheSync(stopCh)
 
 	wmService := NewService(
 		ctx,
@@ -290,6 +306,7 @@ func main() {
 		instruments,
 		volPlugins,
 		csiDriverConfigLister,
+		clusterTrustBundleLister,
 	)
 	dialOpts, err := ateapiauth.DialOptions(ateapiauth.ClientConfig{
 		K8sClient:        k8sClient,
@@ -403,14 +420,15 @@ func drainOnShutdown(ctx context.Context, srv *grpc.Server, readiness *serverboo
 type AteomHerder struct {
 	ateletpb.UnimplementedAteomHerderServer
 
-	ateomDialer           *AteomDialer
-	imageCache            *imagecache.Store
-	anonGCSClient         ategcs.ObjectStorage
-	gcsClient             ategcs.ObjectStorage
-	instruments           *Instruments
-	mu                    sync.RWMutex
-	volumePlugins         map[string]volume.VolumePluginWorkerPlane
-	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister
+	ateomDialer              *AteomDialer
+	imageCache               *imagecache.Store
+	anonGCSClient            ategcs.ObjectStorage
+	gcsClient                ategcs.ObjectStorage
+	instruments              *Instruments
+	mu                       sync.RWMutex
+	volumePlugins            map[string]volume.VolumePluginWorkerPlane
+	csiDriverConfigLister    listersv1alpha1.CSIDriverConfigLister
+	clusterTrustBundleLister certlisters.ClusterTrustBundleLister
 }
 
 var _ ateletpb.AteomHerderServer = (*AteomHerder)(nil)
@@ -425,15 +443,17 @@ func NewService(
 	instruments *Instruments,
 	volumePlugins map[string]volume.VolumePluginWorkerPlane,
 	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister,
+	clusterTrustBundleLister certlisters.ClusterTrustBundleLister,
 ) *AteomHerder {
 	wms := &AteomHerder{
-		ateomDialer:           ateomDialer,
-		imageCache:            imageCache,
-		anonGCSClient:         anonGCSClient,
-		gcsClient:             gcsClient,
-		instruments:           instruments,
-		volumePlugins:         volumePlugins,
-		csiDriverConfigLister: csiDriverConfigLister,
+		ateomDialer:              ateomDialer,
+		imageCache:               imageCache,
+		anonGCSClient:            anonGCSClient,
+		gcsClient:                gcsClient,
+		instruments:              instruments,
+		volumePlugins:            volumePlugins,
+		csiDriverConfigLister:    csiDriverConfigLister,
+		clusterTrustBundleLister: clusterTrustBundleLister,
 	}
 	return wms
 }
@@ -642,7 +662,11 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 	// all: the actor's current state was just captured by CheckpointWorkload,
 	// and the control plane tracks only a single local snapshot, which this
 	// checkpoint either overwrites (pause) or clears (suspend).
-	pruneLocalCheckpoints(ctx, actorUID)
+	//
+	// Best-effort: if this fail, the actor's terminate prunes again.
+	if err := pruneLocalCheckpoints(ctx, actorUID); err != nil {
+		slog.WarnContext(ctx, "failed to prune superseded local checkpoints", slog.Any("actor", actorRef), slog.Any("err", err))
+	}
 
 	// Pruning stays outside the persist window: it collects superseded
 	// snapshots on both paths, so timing it as part of an external upload would
@@ -824,7 +848,9 @@ func (s *AteomHerder) UploadPausedCheckpoint(ctx context.Context, req *ateletpb.
 
 	// The uploaded snapshot supersedes every local pause snapshot of this
 	// actor; free the node's disk (best-effort, like Checkpoint).
-	pruneLocalCheckpoints(ctx, req.GetActorUid())
+	if err := pruneLocalCheckpoints(ctx, req.GetActorUid()); err != nil {
+		slog.WarnContext(ctx, "failed to prune uploaded local checkpoints", slog.String("actorUID", req.GetActorUid()), slog.Any("err", err))
+	}
 
 	return &ateletpb.UploadPausedCheckpointResponse{}, nil
 }
@@ -1246,6 +1272,15 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 		return nil, fmt.Errorf("failed to unmount external volumes during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 	}
 
+	// The actor is gone, so no pause snapshot of it can ever be restored again.
+	// TODO(#664): this only removes local snapshots in one node. We should clean
+	// up the copies on any other NodeVmsWithLocalSnapshots. This is fine *as of
+	// the day this was written* because today NodeVmsWithLocalSnapshots has at
+	// most one item.
+	if err := pruneLocalCheckpoints(ctx, actorUID); err != nil {
+		return nil, fmt.Errorf("failed to prune local checkpoints during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+	}
+
 	// Reset actor directories on the node
 	if err := resetActorDirs(actorUID); err != nil {
 		return nil, fmt.Errorf("failed to reset actor directories during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
@@ -1505,7 +1540,7 @@ func (s *AteomHerder) prepareOCIBundles(
 
 		case *ateletpb.Volume_SystemInfo:
 			volRootHostPath := ateompath.SystemInfoVolumeRoot(actorUID, vol.GetName())
-			if err := writeSystemInfoVolume(ctx, volRootHostPath, actorRef, actorUID, volSrc.SystemInfo); err != nil {
+			if err := writeSystemInfoVolume(ctx, volRootHostPath, actorRef, actorUID, s.clusterTrustBundleLister, volSrc.SystemInfo); err != nil {
 				return fmt.Errorf("while populating system-info volume %q: %w", vol.GetName(), err)
 			}
 		}
@@ -1515,34 +1550,20 @@ func (s *AteomHerder) prepareOCIBundles(
 
 	// Pause container.
 	g.Go(func() error {
-		annotations := map[string]string{
-			"io.kubernetes.cri.container-type": "sandbox",
-			"io.kubernetes.cri.container-name": "pause",
-		}
-		// Declare durable-dir volumes to gVisor. We use the volume name as the
-		// mount hint name to support multiple durable-dir volumes.
-		for _, vol := range spec.GetVolumes() {
-			if vol.GetDurableDir() != nil {
-				annotations[fmt.Sprintf("dev.gvisor.spec.mount.%s.type", vol.GetName())] = "bind"
-				annotations[fmt.Sprintf("dev.gvisor.spec.mount.%s.share", vol.GetName())] = "container"
-				annotations[fmt.Sprintf("dev.gvisor.spec.mount.%s.source", vol.GetName())] = ateompath.DurableDirVolumeMountPoint(actorUID, vol.GetName())
-			}
-		}
-
 		if err := prepareOCIDirectory(
 			gCtx,
 			s.imageCache,
 			actorUID,
-			"pause",
+			ocispec.PauseContainer,
 			pauseImage,
 			[]string{"/pause"},
 			nil,
 			nil,
-			annotations,
 			ateompath.AteomNetNSPath(targetAteomUid),
 			nil, // pause is sandbox infra; it mounts no volumes.
 			nil,
 			nil, // pause only reaps; it needs no capabilities.
+			nil, // pause carries no user-declared limits.
 		); err != nil {
 			return wrapFileSystemErr("while creating pause OCI bundle", err)
 		}
@@ -1566,15 +1587,11 @@ func (s *AteomHerder) prepareOCIBundles(
 				ctr.GetCommand(),
 				ctr.GetArgs(),
 				envs,
-				map[string]string{
-					"io.kubernetes.cri.container-type": "container",
-					"io.kubernetes.cri.sandbox-id":     "pause",
-					"io.kubernetes.cri.container-name": ctr.GetName(),
-				},
 				ateompath.AteomNetNSPath(targetAteomUid),
 				spec.GetVolumes(),
 				ctr.GetVolumeMounts(),
 				resolveCapabilities(ctr.GetSecurityContext().GetCapabilities()),
+				ctr.GetResources(),
 			); err != nil {
 				return wrapFileSystemErr(fmt.Sprintf("while creating %q OCI bundle", ctr.GetName()), err)
 			}
@@ -1604,13 +1621,25 @@ func (s *AteomHerder) prepareOCIBundles(
 // these files refreshed while the actor runs, not just at Run/Restore — and
 // must keep the per-file rename discipline so visible paths never move.
 // actorMetadata never changes after start, so writing here is enough for it.
-func writeSystemInfoVolume(ctx context.Context, rootPath string, actorRef resources.ActorRef, actorUID string, si *ateletpb.SystemInfoVolume) error {
+//
+// TODO(#932): trustBundle projections currently refresh only here, on
+// Run/Restore; live refresh for running actors is PR 2 of that issue.
+func writeSystemInfoVolume(ctx context.Context, rootPath string, actorRef resources.ActorRef, actorUID string, ctbLister certlisters.ClusterTrustBundleLister, si *ateletpb.SystemInfoVolume) error {
 	if err := os.MkdirAll(rootPath, 0o755); err != nil {
 		return fmt.Errorf("while creating %q: %w", rootPath, err)
 	}
 
 	for _, dataSourceAny := range si.GetDataSources() {
 		switch dataSource := dataSourceAny.GetDataSource().(type) {
+		case *ateletpb.SystemInfoDataSource_TrustBundle:
+			tb := dataSource.TrustBundle
+			pemBundle, err := resolveTrustBundle(ctbLister, tb.GetName())
+			if err != nil {
+				return fmt.Errorf("system-info projection %q: %w", tb.GetPath(), err)
+			}
+			if err := writeSystemInfoFile(rootPath, tb.GetPath(), pemBundle); err != nil {
+				return err
+			}
 		case *ateletpb.SystemInfoDataSource_ActorMetadata:
 			for _, item := range dataSource.ActorMetadata.GetItems() {
 				var value string
@@ -1760,6 +1789,31 @@ type AteomDialer struct {
 	conns *lru.Cache
 }
 
+// newAteomDialer builds a dialer whose cache closes the connections it
+// evicts. A conn pushed out of the LRU without Close is not reclaimed: grpc
+// keeps most of its goroutines and buffers alive for the life of the process
+// (the channel idle timeout parks only one of them). Closing on eviction can
+// fail an RPC still in flight on a conn that aged to the LRU tail, but that
+// failure is visible and retryable, unlike the leak.
+//
+// TODO: Consider pool semantics instead of a cache: a conn evicted for
+// capacity would drain — close only once its last in-flight RPC finishes
+// (e.g. refcounted checkout/release) — rather than being closed out from
+// under a caller. Worth revisiting if the retryable eviction failures show
+// up in practice.
+func newAteomDialer(size int) *AteomDialer {
+	return &AteomDialer{
+		conns: lru.NewWithEvictionFunc(size, func(_ lru.Key, value interface{}) {
+			value.(*grpc.ClientConn).Close()
+		}),
+	}
+}
+
+// ateomSocketPath resolves a pod UID to the ateom socket atelet dials. A
+// variable because the real path is rooted at the node's BasePath, which a
+// test cannot serve on.
+var ateomSocketPath = ateompath.AteomSocketPath
+
 func (d *AteomDialer) DialAteomPod(ctx context.Context, podUID string) (*grpc.ClientConn, error) {
 	key := podUID
 
@@ -1769,7 +1823,7 @@ func (d *AteomDialer) DialAteomPod(ctx context.Context, podUID string) (*grpc.Cl
 	}
 
 	conn, err := grpc.NewClient(
-		"unix://"+ateompath.AteomSocketPath(podUID),
+		"unix://"+ateomSocketPath(podUID),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
@@ -1795,12 +1849,6 @@ func validateRunRequest(req *ateletpb.RunRequest) error {
 	errs = append(errs, resources.ValidateResourceName(req.GetAtespace(), field.NewPath("atespace"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorName(), field.NewPath("actor_name"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorUid(), field.NewPath("actor_uid"))...)
-	for _, msg := range content.IsDNS1123Label(req.GetActorTemplateNamespace()) {
-		errs = append(errs, field.Invalid(field.NewPath("actor_template_namespace"), req.GetActorTemplateNamespace(), msg))
-	}
-	for _, msg := range content.IsDNS1123Subdomain(req.GetActorTemplateName()) {
-		errs = append(errs, field.Invalid(field.NewPath("actor_template_name"), req.GetActorTemplateName(), msg))
-	}
 	if len(errs) > 0 {
 		return errs.ToAggregate()
 	}
@@ -1820,12 +1868,6 @@ func validateCheckpointRequest(req *ateletpb.CheckpointRequest) error {
 	errs = append(errs, resources.ValidateResourceName(req.GetAtespace(), field.NewPath("atespace"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorName(), field.NewPath("actor_name"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorUid(), field.NewPath("actor_uid"))...)
-	for _, msg := range content.IsDNS1123Label(req.GetActorTemplateNamespace()) {
-		errs = append(errs, field.Invalid(field.NewPath("actor_template_namespace"), req.GetActorTemplateNamespace(), msg))
-	}
-	for _, msg := range content.IsDNS1123Subdomain(req.GetActorTemplateName()) {
-		errs = append(errs, field.Invalid(field.NewPath("actor_template_name"), req.GetActorTemplateName(), msg))
-	}
 	if len(errs) > 0 {
 		return errs.ToAggregate()
 	}
@@ -1872,12 +1914,6 @@ func validateRestoreRequest(req *ateletpb.RestoreRequest) error {
 	errs = append(errs, resources.ValidateResourceName(req.GetAtespace(), field.NewPath("atespace"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorName(), field.NewPath("actor_name"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorUid(), field.NewPath("actor_uid"))...)
-	for _, msg := range content.IsDNS1123Label(req.GetActorTemplateNamespace()) {
-		errs = append(errs, field.Invalid(field.NewPath("actor_template_namespace"), req.GetActorTemplateNamespace(), msg))
-	}
-	for _, msg := range content.IsDNS1123Subdomain(req.GetActorTemplateName()) {
-		errs = append(errs, field.Invalid(field.NewPath("actor_template_name"), req.GetActorTemplateName(), msg))
-	}
 	if len(errs) > 0 {
 		return errs.ToAggregate()
 	}
@@ -1928,12 +1964,6 @@ func validateTerminateRequest(req *ateletpb.TerminateRequest) error {
 	errs = append(errs, resources.ValidateResourceName(req.GetAtespace(), field.NewPath("atespace"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorName(), field.NewPath("actor_name"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorUid(), field.NewPath("actor_uid"))...)
-	for _, msg := range content.IsDNS1123Label(req.GetActorTemplateNamespace()) {
-		errs = append(errs, field.Invalid(field.NewPath("actor_template_namespace"), req.GetActorTemplateNamespace(), msg))
-	}
-	for _, msg := range content.IsDNS1123Subdomain(req.GetActorTemplateName()) {
-		errs = append(errs, field.Invalid(field.NewPath("actor_template_name"), req.GetActorTemplateName(), msg))
-	}
 	if len(errs) > 0 {
 		return errs.ToAggregate()
 	}
@@ -1965,12 +1995,6 @@ func validateUploadPausedCheckpointRequest(req *ateletpb.UploadPausedCheckpointR
 	errs = append(errs, resources.ValidateResourceName(req.GetAtespace(), field.NewPath("atespace"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorName(), field.NewPath("actor_name"))...)
 	errs = append(errs, resources.ValidateResourceName(req.GetActorUid(), field.NewPath("actor_uid"))...)
-	for _, msg := range content.IsDNS1123Label(req.GetActorTemplateNamespace()) {
-		errs = append(errs, field.Invalid(field.NewPath("actor_template_namespace"), req.GetActorTemplateNamespace(), msg))
-	}
-	for _, msg := range content.IsDNS1123Subdomain(req.GetActorTemplateName()) {
-		errs = append(errs, field.Invalid(field.NewPath("actor_template_name"), req.GetActorTemplateName(), msg))
-	}
 	errs = append(errs, resources.ValidateResourceName(req.GetLocalSnapshotName(), field.NewPath("local_snapshot_name"))...)
 	// Golden actors are never paused (the golden flow commits a running
 	// actor), so never promote a paused checkpoint to a golden snapshot.

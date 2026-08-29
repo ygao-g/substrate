@@ -156,7 +156,7 @@ func createTemplate(ctx context.Context, t *testing.T, clients *e2e.Clients, ns 
 		ObjectMeta: metav1.ObjectMeta{Name: probeName, Namespace: ns.Name, Labels: poolLabels},
 		Spec: v1alpha1.WorkerPoolSpec{
 			Replicas:          2,
-			AteomImage:        srcPool.Spec.AteomImage,
+			WorkerImage:       srcPool.Spec.WorkerImage,
 			SandboxClass:      srcPool.Spec.SandboxClass,
 			SandboxConfigName: srcPool.Spec.SandboxConfigName,
 		},
@@ -251,7 +251,7 @@ func TestImageVolume(t *testing.T) {
 		_, _ = clients.SubstrateAPI.DeleteActor(cleanupCtx, &ateapipb.DeleteActorRequest{Actor: actorRef.ToObjectRef()})
 	})
 
-	if _, err := clients.SubstrateAPI.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: actorRef.ToObjectRef()}); err != nil {
+	if _, err := e2e.ResumeActorAwaitCapacity(t, ctx, clients, &ateapipb.ResumeActorRequest{Actor: actorRef.ToObjectRef()}); err != nil {
 		t.Fatalf("ResumeActor: %v", err)
 	}
 

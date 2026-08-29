@@ -16,8 +16,6 @@ package e2e
 
 import (
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -51,27 +49,56 @@ type Fixture struct {
 	DeployWith string
 }
 
-// CounterFixture returns the counter demo for the sandbox class under test.
-// E2E_TEMPLATE_NAMESPACE / E2E_TEMPLATE_NAME override it, for a cluster that
-// installs the fixture somewhere else.
-func CounterFixture() Fixture {
-	f := Fixture{
-		Namespace:  "ate-demo-counter",
-		Name:       "counter",
-		DeployWith: "hack/install-ate-kind.sh --deploy-demo-counter",
+// SubstrateFixture identifies an installed substrate ActorTemplate (the proto
+// resource created through the ate API, not the CRD) plus the CRD WorkerPool
+// backing it. Suites copy the resolved runtime — container images, sandbox
+// config, sandbox size — out of the template, and the ateom image and sandbox
+// class out of the pool.
+type SubstrateFixture struct {
+	// Atespace and Name locate the ActorTemplate for GetActorTemplate.
+	Atespace string
+	Name     string
+	// PoolNamespace and PoolName locate the WorkerPool CRD.
+	PoolNamespace string
+	PoolName      string
+	// DeployWith is the install flag or script that creates the fixture, so a
+	// missing one reports how to fix it rather than just failing.
+	DeployWith string
+}
+
+// SubstrateCounterFixture returns the substrate-resource counter demo for the
+// sandbox class under test. E2E_SUBSTRATE_TEMPLATE_ATESPACE /
+// E2E_SUBSTRATE_TEMPLATE_NAME / E2E_SUBSTRATE_POOL_NAMESPACE /
+// E2E_SUBSTRATE_POOL_NAME override it, for a cluster that installs the
+// fixture somewhere else.
+func SubstrateCounterFixture() SubstrateFixture {
+	f := SubstrateFixture{
+		Atespace:      "ate-demo-counter-substrate",
+		Name:          "counter",
+		PoolNamespace: "ate-demo-counter-substrate",
+		PoolName:      "counter-substrate",
+		DeployWith:    "hack/install-ate-kind.sh --deploy-demo-counter-substrate",
 	}
 	if IsMicroVM() {
-		f = Fixture{
-			Namespace:  "ate-demo-counter-microvm",
-			Name:       "counter-microvm",
-			DeployWith: "hack/run-microvm-demo-kind.sh",
+		f = SubstrateFixture{
+			Atespace:      "ate-demo-counter-substrate-microvm",
+			Name:          "counter-microvm",
+			PoolNamespace: "ate-demo-counter-substrate-microvm",
+			PoolName:      "counter-substrate-microvm",
+			DeployWith:    "hack/install-ate-kind.sh --deploy-demo-counter-substrate-microvm",
 		}
 	}
-	if v := os.Getenv("E2E_TEMPLATE_NAMESPACE"); v != "" {
-		f.Namespace = v
+	if v := os.Getenv("E2E_SUBSTRATE_TEMPLATE_ATESPACE"); v != "" {
+		f.Atespace = v
 	}
-	if v := os.Getenv("E2E_TEMPLATE_NAME"); v != "" {
+	if v := os.Getenv("E2E_SUBSTRATE_TEMPLATE_NAME"); v != "" {
 		f.Name = v
+	}
+	if v := os.Getenv("E2E_SUBSTRATE_POOL_NAMESPACE"); v != "" {
+		f.PoolNamespace = v
+	}
+	if v := os.Getenv("E2E_SUBSTRATE_POOL_NAME"); v != "" {
+		f.PoolName = v
 	}
 	return f
 }
@@ -136,45 +163,12 @@ func TemplateReadyTimeout(t *testing.T) time.Duration {
 // out from under another.
 //
 // One template serves both sandbox classes so the two variants of a fixture
-// cannot drift apart. Templates carry two kinds of ${...} placeholder:
-//
-//   - inline, substituted wherever they appear (an empty value just disappears);
-//   - block, which must be the entire content of their line. They expand to a
-//     YAML fragment that brings its own indentation, and an empty value takes
-//     the whole line with it — the same trick hack/install-demo-counter.sh
-//     plays with `sed /.../d`. Requiring the placeholder to be the whole line
-//     is what lets a comment mention one without being deleted.
+// cannot drift apart. See renderManifest for the placeholder kinds a template
+// can carry.
 func RenderFixtureManifest(t *testing.T, relPath, bucket, name string) string {
 	t.Helper()
-	root, err := FindRepoRoot()
-	if err != nil {
-		t.Fatalf("FindRepoRoot: %v", err)
-	}
-	raw, err := os.ReadFile(filepath.Join(root, relPath))
-	if err != nil {
-		t.Fatalf("reading fixture manifest %s: %v", relPath, err)
-	}
-
 	inline, blocks := fixtureSubstitutions(bucket, name)
-	var out []string
-	for line := range strings.SplitSeq(string(raw), "\n") {
-		if value, isBlock := blocks[strings.TrimSpace(line)]; isBlock {
-			if value != "" {
-				out = append(out, value)
-			}
-			continue
-		}
-		for placeholder, value := range inline {
-			line = strings.ReplaceAll(line, placeholder, value)
-		}
-		out = append(out, line)
-	}
-
-	rendered := strings.TrimSuffix(filepath.Join(t.TempDir(), filepath.Base(relPath)), ".tmpl")
-	if err := os.WriteFile(rendered, []byte(strings.Join(out, "\n")), 0o644); err != nil {
-		t.Fatalf("writing rendered fixture manifest %s: %v", rendered, err)
-	}
-	return rendered
+	return renderManifest(t, relPath, inline, blocks)
 }
 
 // fixtureSubstitutions is the placeholder set the internal/e2e/fixtures
@@ -192,6 +186,8 @@ func fixtureSubstitutions(bucket, name string) (inline, blocks map[string]string
 		"${WORKERPOOL_RUNTIME}":     "",
 		"${TEMPLATE_SANDBOX_CLASS}": "",
 		"${TEMPLATE_RESOURCES}":     "",
+		// Off unless the caller opts in; see WithTrustBundle.
+		"${TEMPLATE_TRUST_BUNDLE}": "",
 	}
 	if !IsMicroVM() {
 		return inline, blocks

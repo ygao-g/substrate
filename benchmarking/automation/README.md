@@ -44,7 +44,7 @@ the router capacity benchmark — see
 
 Each entry in `tests.yaml` may set `sandboxClass: gvisor | microvm` (default
 `gvisor`). This controls both `spec.sandboxClass` on the benchmark WorkerPool
-and its `ateomImage` (`ateom-gvisor` vs `ateom-microvm`).
+and its `workerImage` (`ateom-gvisor` vs `ateom-microvm`).
 
 For `microvm` tests the target cluster must have KVM-capable nodes and the
 object store bucket named in its `.ate-dev-env.sh` must be writable by the
@@ -86,15 +86,16 @@ default is `0 3 * * *`, 3am UTC).
 
 ## Test cluster prerequisites
 
-Create the test cluster with the substrate-required beta APIs and Workload
-Identity enabled. The control plane must be on Kubernetes 1.36+ so
-`certificates.k8s.io/v1beta1` is available:
+Create the test cluster with the substrate-required beta APIs, Workload
+Identity, and Managed OpenTelemetry enabled. The control plane must be on
+Kubernetes 1.36+ so `certificates.k8s.io/v1beta1` is available:
 
 ```bash
 gcloud container clusters create <CLUSTER_NAME> \
   --location=<CLUSTER_LOCATION> \
   --num-nodes=5 \
   --workload-pool=<PROJECT_ID>.svc.id.goog \
+  --managed-otel-scope=COLLECTION_AND_INSTRUMENTATION_COMPONENTS \
   --enable-kubernetes-unstable-apis=certificates.k8s.io/v1beta1/podcertificaterequests,certificates.k8s.io/v1beta1/clustertrustbundles
 ```
 

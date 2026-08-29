@@ -11,7 +11,7 @@ The `WorkerPool` defines the pool of physical "warm" compute capacity. It manage
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `replicas` | `int32` | **Required.** Number of physical standby pods to maintain in the cluster. |
-| `ateomImage` | `string` | **Required.** The container image for the `ateom` herder process (e.g. `ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor`). |
+| `workerImage` | `string` | Optional. The container image for the `ateom` herder process (e.g. `ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor`). When unset, the controller injects a versioned default image for the pool's `sandboxClass`. |
 | `sandboxClass` | `string` | Optional. The sandbox runtime family for the pool: `gvisor` (default) or `microvm`. Drives the worker pod shape (e.g. KVM device mounts, node placement) and which `SandboxConfig`s are eligible. |
 | `sandboxConfigName` | `string` | Optional. Name of a cluster-scoped [`SandboxConfig`](#3-sandboxconfig-the-sandbox-itself) providing the sandbox binaries and pause image. If empty, the cluster default `SandboxConfig` for the pool's `sandboxClass` is used. |
 | `template` | `WorkerPoolPodTemplate` | **Optional.** Metadata, scheduling, and resource settings for worker workloads. |
@@ -56,7 +56,7 @@ metadata:
     workload: secret-agent
 spec:
   replicas: 10
-  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
   template:
     labels:
       project: agent-platform
@@ -83,7 +83,7 @@ metadata:
 spec:
   replicas: 5
   # GPU pools need a glibc ateom-gvisor build — see Requirements below.
-  ateomImage: <your-registry>/ateom-gvisor-glibc@sha256:...
+  workerImage: <your-registry>/ateom-gvisor-glibc@sha256:...
   template:
     # (1) schedule onto GPU nodes
     nodeSelector:
@@ -124,7 +124,7 @@ it rather than replaced.
 
 **Requirements**
 
-- **A glibc `ateom-gvisor` image**, set as `spec.ateomImage`. The distroless default
+- **A glibc `ateom-gvisor` image**, set as `spec.workerImage`. The distroless default
   cannot exec `nvidia-ctk`. Build one with
   `KO_DEFAULTBASEIMAGE=debian:stable-slim ko build ./cmd/ateom-gvisor`.
 - **`nvidia-ctk` on the node**, at the path mounted into the worker — by default
@@ -167,7 +167,7 @@ The `ActorTemplate` defines the code, environment, and state-management policies
 | `sandboxClass` | `string` | Optional. The sandbox runtime family this template's actors require: `gvisor` (default) or `microvm`. Only `WorkerPool`s whose `sandboxClass` matches are eligible. |
 | `workerSelector` | `*LabelSelector` | Optional. Gates which `WorkerPool`s actors from this template may use, by matching against each pool's labels. If unset, all pools are eligible (subject to the actor's own `worker_selector`). |
 | `snapshotsConfig` | `SnapshotsConfig` | **Required.** The base object-storage location snapshots are written under, plus the pause/commit/resume scopes. See [Snapshot Storage Layout](#snapshot-storage-layout). |
-| `volumes` | `[]Volume` | Optional. Volumes the containers may mount, each a `durableDir`, an `externalVolumeTemplate`, or a `systemInfo` volume (see [SystemInfo Volumes](#systeminfo-volumes)). Every declared volume must be mounted by at least one container. A `microvm` template may declare several `durableDir` volumes; a `gvisor` template is limited to one, and `externalVolumeTemplate` is `gvisor`-only. |
+| `volumes` | `[]Volume` | Optional. Volumes the containers may mount, each a `durableDir`, an `externalVolumeTemplate` (see [CSI Volumes Guide](csi-volumes.md)), or a `systemInfo` volume (see [SystemInfo Volumes](#systeminfo-volumes)). Every declared volume must be mounted by at least one container. A `microvm` template may declare several `durableDir` volumes; a `gvisor` template is limited to one. |
 | `resources` | `*ResourceRequirements` | Optional. Declares each actor's compute size via `limits` — see [Sandbox Right-Sizing](#sandbox-right-sizing-specresources). Immutable, like the rest of the spec. |
 
 The sandbox itself — the binaries (e.g. the gVisor `runsc` binary) and the `pauseImage` holding the sandbox's namespaces — is **not configured on the `ActorTemplate`**. It is resolved from the referenced `WorkerPool`'s [`SandboxConfig`](#3-sandboxconfig-the-sandbox-itself) — by name (`workerPool.spec.sandboxConfigName`) or, by default, the cluster default `SandboxConfig` for the pool's `sandboxClass`.
@@ -178,8 +178,8 @@ Because a snapshot is not restorable across sandbox runtimes, `sandboxClass` is 
 
 Unlike a Pod, an actor is sized by its **`limits`** (CPU and Memory): the size is a property of the template, baked into snapshots, so it lives on the immutable `ActorTemplate` spec. Declared limits do three things:
 
-1. **Size the sandbox.** The limits are supplied to the sandbox over the actor RPCs (control plane → atelet → ateom) and applied to the container OCI spec:
-   - **gVisor (`ateom-gvisor`)** — `limits.cpu` sets the cgroup v2 CPU quota (`cpu.max`) and the Sentry vCPU count (`--cpu-num-from-quota`); `limits.memory` sets the cgroup v2 memory limit (`memory.max`) and bounds the virtual total memory the sandbox reports (so JVM/Go do not over-allocate from host RAM).
+1. **Size the sandbox.** The limits are supplied to the sandbox over the actor RPCs (control plane → atelet → ateom):
+   - **gVisor (`ateom-gvisor`)** — applied to the container OCI spec: `limits.cpu` sets the cgroup v2 CPU quota (`cpu.max`) and the Sentry vCPU count (`--cpu-num-from-quota`); `limits.memory` sets the cgroup v2 memory limit (`memory.max`) and bounds the virtual total memory the sandbox reports (so JVM/Go do not over-allocate from host RAM).
    - **Micro-VM (`ateom-microvm`)** — `limits.cpu` sets Cloud Hypervisor `BootVcpus` / `MaxVcpus` (rounded up to whole vCPUs); `limits.memory` sets guest RAM, reserving a small configurable margin (default 256 MiB, `--vmm-mem-reserve-mib`) for the VMM and virtiofsd so the pod cgroup does not OOM.
 2. **Gate scheduling.** An actor is only placed on a `WorkerPool` whose [worker capacity](#worker-capacity-spectemplateresources) is `>=` these limits.
 3. **Fall back to runtime defaults.** A zero or absent limit leaves that dimension at the runtime default — unlimited for gVisor, the kata config for the micro-VM.
@@ -226,6 +226,30 @@ spec:
 
 The values are delivered as files on a read-only per-actor bind mount, not environment variables, precisely so they carry the correct values after a resume from a shared snapshot — an env var (or a file baked into the image) would be frozen at the snapshot-source actor's values, since it lives in the checkpointed process memory, and would therefore be identical for every actor restored from that snapshot. The metadata fields themselves are fixed for the actor's lifetime, so workloads may cache them; future data sources that rotate (identity tokens and certificates) must be re-read at time of use.
 
+#### trustBundle
+The trustBundle data source projects the trust anchors of a named trust bundle to a single PEM file — inspired by the [Kubernetes clusterTrustBundle projected volume source](https://kubernetes.io/docs/concepts/storage/projected-volumes/#clustertrustbundle), but source-neutral: the name selects a bundle substrate knows how to fetch, and where it is fetched from is a deployment concern, not part of the API.
+
+Supported names are allowlisted. Today the only supported bundle is `egress-mitm.ate.dev` — the egress gateway CA bundle — resolved from the [ClusterTrustBundle](https://kubernetes.io/docs/reference/access-authn-authz/certificate-signing-requests/#cluster-trust-bundles) (`certificates.k8s.io/v1beta1`) that atecontroller's reconciler derives from the `egress-mitm-ca-pool` Secret in the `ate-system` namespace. A configurable backend registry may widen the allowlist later.
+
+```yaml
+spec:
+  volumes:
+  - name: trust
+    systemInfo:
+      dataSources:
+      - trustBundle:
+          name: egress-mitm.ate.dev
+          path: ca.pem
+  containers:
+  - name: main
+    # ...
+    volumeMounts:
+    - name: trust
+      mountPath: /run/substrate/certs   # the actor reads /run/substrate/certs/ca.pem
+```
+
+atelet resolves the bundle on the node when the actor starts, reading the backing object through a cluster-wide watch (the same informer dynamic refresh will later hang off) and sanitizing it the way kubelet does for projections: only `CERTIFICATE` PEM blocks are kept, deduplicated, with block headers stripped and the anchors deliberately shuffled — order carries no meaning, so consumers must not depend on it. The actor itself never talks to any bundle backend. Starting the actor fails, with an error naming the bundle, if the name is not on the allowlist, the bundle's backend is unavailable in this deployment, or the resolved bundle is missing, empty, or contains no certificates. Bundle contents are re-resolved on every Run/Restore.
+
 ### Container Fields
 
 Each entry in `containers` describes one process to run in the actor's sandbox.
@@ -240,6 +264,7 @@ Each entry in `containers` describes one process to run in the actor's sandbox.
 | `readyz` | `ContainerReadyz` | Optional. HTTP readiness probe — see [Container Readiness Probe](#container-readiness-probe-readyz). |
 | `volumeMounts` | `[]VolumeMount` | Optional. Mounts a `spec.volumes` entry (e.g. `durableDir`) into this container. |
 | `securityContext` | `SecurityContext` | Optional. Security settings for the container process — see [Container Capabilities](#container-capabilities-securitycontextcapabilities). |
+| `resources` | `ContainerResources` | Optional. Compute limits for this container, enforced inside the actor's sandbox. Only `limits` is supported, and only `cpu` and `memory`. See [Per-container limits](#per-container-limits). |
 
 `command` and `args` resolve against the container image's `ENTRYPOINT`/`CMD` the same way [Kubernetes Pod `command`/`args`](https://kubernetes.io/docs/tasks/inject-data-application/define-command-argument-container/) resolve against `ENTRYPOINT`/`CMD`. If the resolved argv is empty — the image sets neither `ENTRYPOINT` nor `CMD`, and the container sets neither `command` nor `args` — `Run`/`Restore` fails.
 
@@ -267,6 +292,29 @@ Each container runs with a default set of Linux capabilities — `AUDIT_WRITE`, 
 - **Ambient capabilities are not supported** ([gvisor#3166](https://github.com/google/gvisor/issues/3166)).
 
 The sandbox — gVisor or micro-VM — remains the isolation boundary; capabilities constrain the workload *inside* it.
+
+### Per-container limits
+
+A container may cap its own CPU and memory so it cannot starve or kill its siblings in the same actor:
+
+```yaml
+sandboxClass: microvm
+containers:
+  - name: trainer
+    resources:
+      limits: {memory: 1500Mi}
+  - name: sidecar
+    resources:
+      limits: {memory: 256Mi, cpu: "0.2"}
+```
+
+A container that exceeds its memory limit is OOM-killed on its own; the actor's other containers are unaffected. A `cpu` limit below `10m` is raised to `10m`, because the kernel rejects a CFS quota under 1ms.
+
+Per-container limits are micro-VM only today. gVisor applies cgroup limits at the sandbox level: one sentry backs every container in the actor, so a per-container cgroup is created and then stays empty ([google/gvisor#190](https://github.com/google/gvisor/issues/190)). A template that sets `resources` with `sandboxClass: gvisor` is rejected.
+
+These limits subdivide the sandbox that [`spec.resources`](#sandbox-right-sizing-specresources) already sized; a container that declares none is bounded by the guest as a whole, not by a copy of the actor's total. A micro-VM guest is sized from `spec.resources.limits.memory` minus the VMM reserve, or from the pool's [`SandboxConfig`](#3-sandboxconfig-the-sandbox-itself) when the template declares no actor-level limit. The CPU ceiling is the guest's vCPU count, which falls back to the pool's `default_vcpus` (1 unless the `SandboxConfig` raises it), so a template that declares no `spec.resources.limits.cpu` caps each container, and their sum, at `1000m`. A limit above either ceiling can never bind, so the actor fails to start with an error naming both the limit and the ceiling.
+
+Each limit is validated on its own at apply, but the sum across the actor's containers is only checked when the actor first runs, against the real guest size. A template whose limits do not fit is accepted by the API server and fails on its first actor.
 
 ### Container Readiness Probe (`readyz`)
 
@@ -379,17 +427,17 @@ spec:
   assets:
     amd64:
       gvisor:
-        url: "gs://gvisor/releases/release/20260803/x86_64/gvisor.tar.bz2"
-        sha256: "9e7a5fcc2cbd28c9cd4af910a9327abcf07a8efcce242c285b860d79010c2db5"
+        url: "gs://gvisor/releases/nightly/2026-08-28/x86_64/gvisor.tar.bz2"
+        sha256: "97f83fa5f352f2c6337d792b1c23c4e73a9c47529c08f6531029f8e0722cfe2c"
     arm64:
       gvisor:
-        url: "gs://gvisor/releases/release/20260803/aarch64/gvisor.tar.bz2"
-        sha256: "294d54dea2a18bcd2614a4b5072d6f32f0e8938f9e6e71c9e86b843c4a7b707b"
+        url: "gs://gvisor/releases/nightly/2026-08-28/aarch64/gvisor.tar.bz2"
+        sha256: "561e281b7f8af95205b1df140c453a795a7fbc0db348c63b305e6521350734ef"
 ```
 
 ### Micro-VM SandboxConfig
 
-A `microvm` `SandboxConfig` supplies the [Kata Containers](https://katacontainers.io/) + [Cloud Hypervisor](https://www.cloudhypervisor.org/) toolchain instead of `runsc`. Each architecture must define the full asset set — `kata-shim`, `cloud-hypervisor`, `virtiofsd`, `kata-kernel`, `kata-image`, and `kata-config` — which a `ValidatingAdmissionPolicy` enforces at apply time. Worker pods for a micro-VM pool require `/dev/kvm` and nested-virtualization-capable nodes labeled `ate.dev/sandboxClass=microvm` (the controller adds the device mount and node placement automatically).
+A `microvm` `SandboxConfig` supplies the [Kata Containers](https://katacontainers.io/) + [Cloud Hypervisor](https://www.cloudhypervisor.org/) toolchain instead of `runsc`. Each architecture must define the full asset set — `kata-shim`, `cloud-hypervisor`, `virtiofsd`, `kata-kernel`, `kata-image`, and `kata-config` — which a `ValidatingAdmissionPolicy` enforces at apply time. Worker pods for a micro-VM pool require `/dev/kvm` and nested-virtualization-capable nodes. The controller requests those devices on the pod automatically, and atelet advertises them only where they exist, so placement follows the hardware rather than a node label. Clusters that reserve nested-virt nodes with an `ate.dev/sandboxClass=microvm` taint are still tolerated: advertising a device attracts these pods to capable nodes but repels nothing else from them.
 
 See [`hack/microvm-assets/`](../hack/microvm-assets/) for scripts that assemble and stage these assets, plus a worked counter demo (`demos/counter/counter-microvm.yaml.tmpl`) that suspends and resumes an in-RAM counter across worker pods.
 
@@ -429,12 +477,11 @@ Registers a new logical actor in the system.
 *   **Response:** the initialized `Actor`.
 
 #### `UpdateActor`
-Changes mutable fields on an existing actor.
+Replaces the mutable fields of an existing actor with the ones in the request.
 *   **Request:** `UpdateActorRequest`
-    *   `actor`: `Actor` — `metadata.atespace` and `metadata.name` identify the resource; `metadata.uid` and `metadata.version` are **required** preconditions.
-    *   `update_mask`: **required**, and must list only mutable paths (currently just `worker_selector`). `*` is not accepted, and fields outside the mask are left untouched.
+    *   `actor`: `Actor` — the complete replacement actor. `metadata.atespace` and `metadata.name` identify the resource; `metadata.uid` and `metadata.version` are **required** preconditions. `metadata` and `status` are server-owned and whatever the request carries in them is ignored. `actor_template_namespace`, `actor_template_name`, `actor_template` and `source_snapshot_tag` are immutable.
 *   **Response:** the updated `Actor`.
-*   **Errors:** `INVALID_ARGUMENT` if `uid` or `version` is unset, or if the mask is missing/empty/names an immutable path; `ABORTED` if either guard no longer matches the stored resource.
+*   **Errors:** `INVALID_ARGUMENT` if `uid` or `version` is unset, or if the request changes an immutable field — including by leaving one unset; `ABORTED` if either guard no longer matches the stored resource.
 
 Because the guards are required and only a read supplies them, an update is always a read-modify-write. To Update an `Actor`, you must first `GetActor`/`CreateActor`, instead of building a new one — see [§7.2 of the API style guide](api-style-guide.md#72-using-version-and-uid-to-guard-writes) for why reconstructing the message can silently drop data.
 
