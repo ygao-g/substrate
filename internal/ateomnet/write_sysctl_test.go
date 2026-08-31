@@ -25,8 +25,8 @@ import (
 // TestWriteSysctlIfUnset verifies writeSysctlIfUnset's fast paths against a
 // temp file standing in for a /proc/sys node: it must not rewrite a value
 // that already reads "1", and it must write "1\n" when the value is missing
-// or unset. The privileged bind-remount path is covered by the netns
-// integration tests (withTestNetNS), which require root.
+// or unset. A temp file is always writable, so the bind-remount branch is out
+// of reach here; TestEnableForwardingRemountsReadOnlyProcSys covers it.
 func TestWriteSysctlIfUnset(t *testing.T) {
 	dir := t.TempDir()
 
