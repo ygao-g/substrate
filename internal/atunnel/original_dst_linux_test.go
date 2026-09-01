@@ -41,10 +41,10 @@ import (
 var testNetNSSequence uint64
 
 // TestTCPOriginalDestinationPreservesErrno covers the failure path on an
-// ordinary connection that no REDIRECT rule touched. Each IPv4 lookup misses
-// and reports ENOENT; that error must reach the caller. A dual-stack listener
-// receives the IPv4 connection with a v4-mapped local address, so it must also
-// select the IPv4 option.
+// ordinary connection that no REDIRECT rule touched. The lookup misses and
+// reports ENOENT; that error must reach the caller, naming the family whose
+// lookup actually ran. A dual-stack listener receives the IPv4 connection with
+// a v4-mapped local address, so it must also select the IPv4 option.
 //
 // It runs in a fresh namespace because conntrack tracks loopback in any
 // namespace that has nftables rules — including the one Docker runs in — and a
@@ -56,13 +56,19 @@ func TestTCPOriginalDestinationPreservesErrno(t *testing.T) {
 		name          string
 		listenNetwork string
 		listenAddress string
+		dialNetwork   string
+		dialHost      string
+		wantFamily    string
 	}{
-		{name: "IPv4", listenNetwork: "tcp4", listenAddress: "127.0.0.1:0"},
+		{name: "IPv4", listenNetwork: "tcp4", listenAddress: "127.0.0.1:0", dialNetwork: "tcp4", dialHost: "127.0.0.1", wantFamily: "IPv4"},
 		// An unspecified "tcp" listener is a dual-stack AF_INET6 socket on
 		// Linux. A tcp4 client reaches it through a v4-mapped local address,
 		// so TCPOriginalDestination must select the IPv4 socket option via
 		// local.IP.To4(), rather than the listener's socket domain.
-		{name: "dual-stack v4-mapped", listenNetwork: "tcp", listenAddress: ":0"},
+		{name: "dual-stack v4-mapped", listenNetwork: "tcp", listenAddress: ":0", dialNetwork: "tcp4", dialHost: "127.0.0.1", wantFamily: "IPv4"},
+		// The IPv6 mirror of the first case: the IPv6 option misses too, and
+		// the error must name the IPv6 lookup rather than the IPv4 one.
+		{name: "IPv6", listenNetwork: "tcp6", listenAddress: "[::1]:0", dialNetwork: "tcp6", dialHost: "::1", wantFamily: "IPv6"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ns := newTestNetNS(t)
@@ -84,7 +90,7 @@ func TestTCPOriginalDestinationPreservesErrno(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				client, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", port), time.Second)
+				client, err := net.DialTimeout(test.dialNetwork, net.JoinHostPort(test.dialHost, port), time.Second)
 				if err != nil {
 					return err
 				}
@@ -97,10 +103,10 @@ func TestTCPOriginalDestinationPreservesErrno(t *testing.T) {
 
 				_, lookupErr := TCPOriginalDestination(server)
 				if !errors.Is(lookupErr, unix.ENOENT) {
-					return fmt.Errorf("want the IPv4 lookup's ENOENT, got %v", lookupErr)
+					return fmt.Errorf("want the %s lookup's ENOENT, got %w", test.wantFamily, lookupErr)
 				}
-				if !strings.Contains(lookupErr.Error(), "original IPv4 TCP destination") {
-					return fmt.Errorf("want the error to name the IPv4 lookup, got %v", lookupErr)
+				if !strings.Contains(lookupErr.Error(), "original "+test.wantFamily+" TCP destination") {
+					return fmt.Errorf("want the error to name the %s lookup, got %w", test.wantFamily, lookupErr)
 				}
 				return nil
 			}); err != nil {
