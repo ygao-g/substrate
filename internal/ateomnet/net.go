@@ -259,8 +259,14 @@ func InstallActorNftablesRules(egressPort uint16) error {
 	// rules in an ateom-owned table makes cleanup simple and avoids mutating
 	// Kubernetes or CNI-managed chains directly.
 	//
-	// TODO: Add IPv6 veth addressing, forwarding, and nftables rules once actor
-	// networking supports dual-stack pods. The current actor network is IPv4-only.
+	// The table is in the inet family so one table can carry both address
+	// families once the actor veth is dual-stack; nat there needs Linux 5.2.
+	// That is not free on a dual-stack pod: an inet nat chain registers the
+	// nat hooks for both families, so IPv6 in this netns becomes conntracked
+	// where the ip table left it untracked.
+	//
+	// TODO(#246): Add the IPv6 veth addressing and forwarding this table is
+	// waiting on. The actor network itself is still IPv4-only.
 	//
 	// The rules do three things:
 	//
@@ -278,7 +284,7 @@ func InstallActorNftablesRules(egressPort uint16) error {
 
 	c := &nftables.Conn{}
 	table := &nftables.Table{
-		Family: nftables.TableFamilyIPv4,
+		Family: nftables.TableFamilyINet,
 		Name:   ActorNftTableName,
 	}
 	c.AddTable(table)
@@ -316,6 +322,9 @@ func InstallActorNftablesRules(egressPort uint16) error {
 		Priority: nftables.ChainPriorityFilter,
 		Policy:   &acceptPolicy,
 	})
+	// Unqualified, so this accepts forwarded traffic of both families. accept
+	// ends evaluation of this table's chain only, so it cannot override a drop
+	// from a CNI base chain at the same hook.
 	c.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: forward,
@@ -325,7 +334,7 @@ func InstallActorNftablesRules(egressPort uint16) error {
 	})
 
 	if err := c.Flush(); err != nil {
-		return fmt.Errorf("while installing actor nftables rules: %w", err)
+		return fmt.Errorf("while installing actor nftables rules (nat in the inet family needs Linux 5.2 or later): %w", err)
 	}
 	return nil
 }
@@ -335,20 +344,34 @@ func RemoveActorNftablesRules() error {
 	// Delete the whole ateom nftables table if it exists. The table is
 	// per-worker and currently per-active-actor because this worker path runs at
 	// most one actor at a time. Missing tables are treated as already clean.
+	//
+	// Both families are swept, not just the inet one this installs into: a table
+	// name is unique per family, so an ip table left by an earlier ateom would
+	// survive every later cleanup and keep redirecting alongside the new one.
+	// The pod netns outlives an in-place container restart, so an ateom that
+	// predates the inet table can share a netns with one that follows it
+	// wherever WorkerPool.spec.ateomImage is a mutable tag -- the dev loop.
+	// TODO(ypgao): Drop the ip sweep in the release after this one ships, by
+	// which point every worker pod has restarted onto an ateom that installs
+	// into inet.
 	c := &nftables.Conn{}
-	tables, err := c.ListTablesOfFamily(nftables.TableFamilyIPv4)
-	if err != nil {
-		return fmt.Errorf("while listing nftables tables: %w", err)
-	}
-	for _, table := range tables {
-		if table.Name != ActorNftTableName {
-			continue
+	for _, family := range []struct {
+		name string
+		id   nftables.TableFamily
+	}{{"inet", nftables.TableFamilyINet}, {"ip", nftables.TableFamilyIPv4}} {
+		tables, err := c.ListTablesOfFamily(family.id)
+		if err != nil {
+			return fmt.Errorf("while listing %s nftables tables: %w", family.name, err)
 		}
-		c.DelTable(table)
-		if err := c.Flush(); err != nil {
-			return fmt.Errorf("while deleting actor nftables table: %w", err)
+		for _, table := range tables {
+			if table.Name != ActorNftTableName {
+				continue
+			}
+			c.DelTable(table)
+			if err := c.Flush(); err != nil {
+				return fmt.Errorf("while deleting the %s actor nftables table: %w", family.name, err)
+			}
 		}
-		return nil
 	}
 	return nil
 }
@@ -357,8 +380,17 @@ func ipv4SourceEqual(ip string) []expr.Any {
 	return ipv4PayloadEqual(12, ip)
 }
 
+// ipv4PayloadEqual matches a 4-byte IPv4 network-header field. The leading
+// nfproto comparison is what makes it safe in the inet table: without it the
+// payload load would read the same offset out of an IPv6 header.
 func ipv4PayloadEqual(offset uint32, ip string) []expr.Any {
 	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+		&expr.Cmp{
+			Op:       expr.CmpOpEq,
+			Register: 1,
+			Data:     []byte{unix.NFPROTO_IPV4},
+		},
 		&expr.Payload{
 			DestRegister: 1,
 			Base:         expr.PayloadBaseNetworkHeader,
