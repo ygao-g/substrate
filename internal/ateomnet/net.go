@@ -304,7 +304,7 @@ func InstallActorNftablesRules(egressPort uint16) error {
 	c.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: postrouting,
-		Exprs: append(IPSourceEqual(ActorVethIP), &expr.Masq{}),
+		Exprs: append(ipv4SourceEqual(ActorVethIP), &expr.Masq{}),
 	})
 
 	acceptPolicy := nftables.ChainPolicyAccept
@@ -353,11 +353,11 @@ func RemoveActorNftablesRules() error {
 	return nil
 }
 
-func IPSourceEqual(ip string) []expr.Any {
-	return IPPayloadEqual(12, ip)
+func ipv4SourceEqual(ip string) []expr.Any {
+	return ipv4PayloadEqual(12, ip)
 }
 
-func IPPayloadEqual(offset uint32, ip string) []expr.Any {
+func ipv4PayloadEqual(offset uint32, ip string) []expr.Any {
 	return []expr.Any{
 		&expr.Payload{
 			DestRegister: 1,
@@ -391,7 +391,7 @@ func ActorEgressRedirectRule(table *nftables.Table, chain *nftables.Chain, port 
 	if port == 0 {
 		return nil
 	}
-	exprs := append(IPSourceEqual(ActorVethIP), TCPProtocol()...)
+	exprs := append(ipv4SourceEqual(ActorVethIP), TCPProtocol()...)
 	exprs = append(exprs,
 		&expr.Immediate{
 			Register: 1,
