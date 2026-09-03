@@ -151,13 +151,60 @@ func TestActorEgress(t *testing.T) {
 	})
 }
 
+// egressHTTPSOriginDNSName is the name the TLS origin's minted leaf carries.
+// The Actor dials the origin's ClusterIP and pins this name out of band, the
+// way the fetch handler's serverName field exists for, so no resolvable record
+// has to back it. RFC 2606 reserves .invalid, which keeps a leaked dial from
+// ever reaching a real host.
+const egressHTTPSOriginDNSName = "egress-https-origin.invalid"
+
 // TestActorEgressHTTPS covers the same path as TestActorEgress with a TLS
 // origin, where the gateway cannot see inside the request. atenet-egress
 // authorizes the CONNECT against the Actor's actor-identity certificate and
 // then relays raw TCP: it never decrypts, so the TLS session runs end to end
 // between the Actor and the origin.
+//
+// The origin serves a leaf from a CA minted for this run, and only the fetch
+// is handed that CA — so a 200 does not just mean "some TLS peer answered",
+// it identifies the peer as the deployed origin. What a public origin covered
+// incidentally and this one cannot is the gateway relaying a handshake
+// against publicly-trusted roots; that leg lives with the egressmitm suite,
+// which still dials one.
 func TestActorEgressHTTPS(t *testing.T) {
+	if os.Getenv("E2E_EGRESS_MITM") != "" {
+		// TODO(ypgao): the sdsmint gateway verifies every origin against
+		// /etc/ssl/certs/ca-certificates.crt, so an origin minted by this test
+		// is unreachable through it until the gateway takes extra trust
+		// anchors. Drop this skip when it does.
+		t.Skip("the sdsmint (MITM) egress gateway cannot validate a test-minted origin CA until it takes extra trust anchors")
+	}
+
 	ctx := context.Background()
+
+	// The namespace is made here, not by DeployServerPod: the origin mounts
+	// its serving credentials, so the Secret has to exist before the pod.
+	namespace := e2e.CreateNamespace(t).Name
+	caPEM := e2e.MintTLSOriginSecret(t, ctx, namespace, "egresshttps-tls", egressHTTPSOriginDNSName)
+
+	// Stand the origin up first: a fixture failure here should not leave a
+	// resumed Actor idling in the cluster waiting for a destination.
+	target := e2e.DeployServerPod(t, ctx, e2e.ServerPod{
+		Name:       "egresshttps",
+		ImportPath: "github.com/agent-substrate/substrate/internal/e2e/fixtures/testserver",
+		Args:       []string{"https", "--cert=/etc/https-origin/tls.crt", "--key=/etc/https-origin/tls.key"},
+		Port:       443,
+		TargetPort: 8443,
+		Namespace:  namespace,
+		HTTPSProbe: true,
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "https-origin", MountPath: "/etc/https-origin", ReadOnly: true},
+		},
+		Volumes: []corev1.Volume{{
+			Name:         "https-origin",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "egresshttps-tls"}},
+		}},
+	})
+
 	actorName, _ := createAndResumeActor(t, ctx, "egress-https", egressFixture())
 	router := mustRouterClient(t, ctx)
 	defer router.Close()
@@ -167,11 +214,12 @@ func TestActorEgressHTTPS(t *testing.T) {
 	since := metav1.NewTime(time.Now().Add(-1 * time.Minute))
 
 	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
-	status, body := fetchThroughEgressActor(t, ctx, router, actorRef, "https://example.com/")
+	url := fmt.Sprintf("https://%s/healthz", target.Address())
+	status, body := fetchThroughEgressActorTLS(t, ctx, router, actorRef, url, caPEM, egressHTTPSOriginDNSName)
 	if status != http.StatusOK {
-		t.Fatalf("Actor HTTPS egress fetch returned HTTP %d, want 200; body: %s", status, body)
+		t.Fatalf("Actor HTTPS egress fetch of %s returned HTTP %d, want 200; body: %s", url, status, body)
 	}
-	t.Logf("Actor HTTPS egress fetch succeeded; body: %s", body)
+	t.Logf("Actor HTTPS egress fetch of %s succeeded", url)
 
 	assertEgressGatewayConnect(t, ctx, since, actorName, "443")
 }
@@ -235,6 +283,19 @@ func fetchThroughEgressActor(t *testing.T, ctx context.Context, router *e2e.Rout
 	payload, err := json.Marshal(map[string]string{"url": url})
 	if err != nil {
 		t.Fatalf("marshaling the fetch request for %s: %v", url, err)
+	}
+	return postThroughEgressActor(t, ctx, router, actorRef, "/", payload)
+}
+
+// fetchThroughEgressActorTLS is fetchThroughEgressActor with the trust the
+// fetch should verify the origin against: caPEM replaces the Actor's system
+// roots for this one fetch, and serverName is the name checked against the
+// origin's leaf, since the URL carries only a ClusterIP.
+func fetchThroughEgressActorTLS(t *testing.T, ctx context.Context, router *e2e.RouterClient, actorRef resources.ActorRef, url, caPEM, serverName string) (int, []byte) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]string{"url": url, "caPEM": caPEM, "serverName": serverName})
+	if err != nil {
+		t.Fatalf("marshaling the TLS fetch request for %s: %v", url, err)
 	}
 	return postThroughEgressActor(t, ctx, router, actorRef, "/", payload)
 }

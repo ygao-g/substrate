@@ -74,6 +74,12 @@ type ServerPod struct {
 	// HealthPath is the HTTP readiness path, defaulting to /healthz. Ignored
 	// when GRPCProbe is set.
 	HealthPath string
+	// HTTPSProbe makes kubelet's readiness GET speak TLS. A TLS-only listener
+	// closes a plaintext probe's connection without answering, so a server
+	// whose one port serves TLS never goes ready without this. kubelet does
+	// not verify the certificate, so a leaf from a test-minted CA probes fine.
+	// Ignored when GRPCProbe is set.
+	HTTPSProbe bool
 	// Volumes and VolumeMounts carry whatever credentials the server needs.
 	// Typed, rather than more YAML in the template, so the Secret names here
 	// sit beside the code that creates them instead of drifting from it.
@@ -182,5 +188,9 @@ func serverReadinessProbe(spec ServerPod, targetPort string) string {
 	if path == "" {
 		path = "/healthz"
 	}
-	return fmt.Sprintf("      httpGet:\n        path: %s\n        port: %s", path, targetPort)
+	probe := fmt.Sprintf("      httpGet:\n        path: %s\n        port: %s", path, targetPort)
+	if spec.HTTPSProbe {
+		probe += "\n        scheme: HTTPS"
+	}
+	return probe
 }

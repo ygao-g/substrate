@@ -156,6 +156,43 @@ func TestRenderServerPod_HTTPProbe(t *testing.T) {
 	}
 }
 
+// TestRenderServerPod_HTTPSProbe covers the probe a TLS-only origin needs.
+// The scheme has to appear exactly when asked for: without it kubelet's
+// plaintext GET never goes ready against a TLS listener, and a scheme that
+// leaked into every render would flip existing plaintext servers' probes.
+func TestRenderServerPod_HTTPSProbe(t *testing.T) {
+	spec := ServerPod{
+		Name:       "egresshttps",
+		ImportPath: "github.com/agent-substrate/substrate/internal/e2e/fixtures/testserver",
+		Args:       []string{"https"},
+		Port:       443,
+		TargetPort: 8443,
+	}
+
+	spec.HTTPSProbe = true
+	pod, _ := renderServerPodDocs(t, spec)
+	probe := pod.Spec.Containers[0].ReadinessProbe
+	if probe == nil || probe.HTTPGet == nil {
+		t.Fatalf("readinessProbe = %+v, want an httpGet probe", probe)
+	}
+	if got := probe.HTTPGet.Scheme; got != corev1.URISchemeHTTPS {
+		t.Errorf("probe scheme = %q, want %q", got, corev1.URISchemeHTTPS)
+	}
+	if got := probe.HTTPGet.Port.IntValue(); got != 8443 {
+		t.Errorf("probe port = %d, want the listen port 8443", got)
+	}
+
+	spec.HTTPSProbe = false
+	pod, _ = renderServerPodDocs(t, spec)
+	probe = pod.Spec.Containers[0].ReadinessProbe
+	if probe == nil || probe.HTTPGet == nil {
+		t.Fatalf("readinessProbe = %+v, want an httpGet probe", probe)
+	}
+	if got := probe.HTTPGet.Scheme; got != "" {
+		t.Errorf("probe scheme = %q, want none rendered by default", got)
+	}
+}
+
 // TestRenderServerPod covers where the listener lands when it
 // differs from the published port and when it does not. Every field kubelet or
 // the binary reaches has to follow the listener, while the Service alone keeps
