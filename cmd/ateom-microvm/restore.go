@@ -266,12 +266,13 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 
 	// Networking: rebuild the per-activation veth + tap; the snapshot's virtio-net
 	// is fd-backed, so CH needs fresh tap FDs (net_fds) on restore.
-	if _, err := ateomnet.SetupActorNetwork(ctx, ateomnet.NetworkConfig{
+	actorNet, err := ateomnet.SetupActorNetwork(ctx, ateomnet.NetworkConfig{
 		InteriorNetNS:      s.interiorNetNS,
 		HostVethHWAddr:     hostVethHWAddr,
 		SweepInteriorLinks: true,
 		EgressRedirectPort: s.egressRedirectPort(p.egressGateway != nil),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("while setting up actor network: %w", err)
 	}
 	defer func() {
@@ -406,10 +407,23 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	vsockPath := kata.VsockSocketPath(actorUID)
 	guestAC, dialErr := dialAgentRetry(ctx, vsockPath, 15*time.Second)
 	if dialErr != nil {
-		slog.WarnContext(ctx, "post-restore agent dial failed; actor log forwarding and guest stats disabled for this restore",
-			slog.String("id", actorUID), slog.Any("err", dialErr))
+		// Logged at Error, not Warn, because the guest's address families are
+		// also left unreconciled: if this pod's differ from the ones baked into
+		// the snapshot, the actor's networking is wrong for the rest of the
+		// activation and this line is the only trace of why.
+		slog.ErrorContext(ctx, "post-restore agent dial failed; log forwarding, guest stats and guest network reconciliation skipped for this restore",
+			slog.String("id", actorUID), slog.Bool("pod_ipv6", actorNet.IPv6), slog.Any("err", dialErr))
 	} else {
 		ra.guestAgent = guestAC
+		// Before log forwarding, and before the actor is published to the
+		// router below: the guest's addresses came out of the snapshot, so on
+		// this pod they may be the wrong ones.
+		recCtx, recCancel := context.WithTimeout(ctx, 20*time.Second)
+		err := s.reconcileGuestNetwork(recCtx, guestAC, actorNet)
+		recCancel()
+		if err != nil {
+			return fmt.Errorf("while reconciling guest network: %w", err)
+		}
 		attribution := p.actorAttribution()
 		for _, c := range containers {
 			s.startActorLogForwarding(guestAC, attribution, c.GetName(), c.GetName())

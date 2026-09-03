@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -411,12 +412,13 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 
 	// Networking (host side): per-activation veth into the interior netns. The
 	// tap + TC mirror is built below (after the VM exists) so its FDs are fresh.
-	if _, err := ateomnet.SetupActorNetwork(ctx, ateomnet.NetworkConfig{
+	actorNet, err := ateomnet.SetupActorNetwork(ctx, ateomnet.NetworkConfig{
 		InteriorNetNS:      s.interiorNetNS,
 		HostVethHWAddr:     hostVethHWAddr,
 		SweepInteriorLinks: true,
 		EgressRedirectPort: s.egressRedirectPort(p.egressGateway != nil),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("while setting up actor network: %w", err)
 	}
 	defer func() {
@@ -588,7 +590,7 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	}()
 
 	// Post-boot kata-agent setup: sandbox, guest networking, start each container.
-	if err := s.startActorContainers(ctx, ac, actorUID, vsockPath, ctrs); err != nil {
+	if err := s.startActorContainers(ctx, ac, actorUID, vsockPath, ctrs, actorNet); err != nil {
 		return err
 	}
 	tContainers := time.Now()
@@ -880,7 +882,7 @@ func buildFsConfigs(id string) []ch.FsConfig {
 // does at boot: establish the sandbox once (mounting the kataShared virtio-fs base),
 // configure guest networking (eth0 IP/MAC/MTU + routes) once, then start each
 // container on its own overlay rootfs. On failure it dumps guest diagnostics.
-func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentClient, id, vsockPath string, ctrs []actorContainer) error {
+func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentClient, id, vsockPath string, ctrs []actorContainer, actorNet ateomnet.ActorNetwork) error {
 	// Establish the agent sandbox + the kataShared virtio-fs mount (every
 	// container's merged rootfs, durable volumes, CSI volumes, and system-info
 	// volumes). All containers share it, so use the first container's hostname.
@@ -899,10 +901,12 @@ func (s *AteomService) startActorContainers(ctx context.Context, ac *kata.AgentC
 	// Configure guest networking (the shim's job): eth0 IP/MAC/MTU, routes, ARP.
 	mtu := uint64(s.actorVethMTU(ctx))
 	netCtx, netCancel := context.WithTimeout(ctx, 20*time.Second)
-	err = s.configureGuestNetwork(netCtx, ac, mtu)
+	err = s.configureGuestNetwork(netCtx, ac, mtu, actorNet)
 	netCancel()
 	if err != nil {
-		dump := kata.DebugConsoleDump(ctx, vsockPath, "ip addr 2>&1; echo '== route =='; ip route 2>&1; echo '== neigh =='; ip neigh 2>&1")
+		dump := kata.DebugConsoleDump(ctx, vsockPath,
+			"ip addr 2>&1; echo '== route =='; ip route 2>&1; echo '== route6 =='; ip -6 route show table all 2>&1; "+
+				"echo '== neigh =='; ip neigh 2>&1; echo '== neigh6 =='; ip -6 neigh 2>&1")
 		slog.ErrorContext(ctx, "guest network config failed; dump", slog.String("dump", dump))
 		return fmt.Errorf("while configuring guest network: %w", err)
 	}
@@ -1057,38 +1061,133 @@ func tailString(s string, n int) string {
 	return s[len(s)-n:]
 }
 
-// configureGuestNetwork replicates the kata shim's guest network setup over the
-// agent: configure eth0 (IP/MAC/MTU), install the connected + default routes, and
-// pin the gateway's ARP entry to its fixed MAC (so a restored guest's frozen
-// neighbor entry stays valid).
+// guestNetConfig is the guest's whole network configuration, as the three
+// kata-agent calls that install it. Built as data so a test can pin it without
+// an agent: the guest is only reachable over vsock from inside the worker pod.
+type guestNetConfig struct {
+	iface     *agentpb.Interface
+	routes    []*agentpb.Route
+	neighbors []*agentpb.ARPNeighbor
+}
+
+// buildGuestNetConfig describes the guest side of the actor veth: eth0's
+// address(es), MAC and MTU, the connected and default route per family, and the
+// gateway's neighbor entry pinned to its fixed MAC (so a restored guest's frozen
+// cache entry stays valid).
 //
-// TODO(#246): the guest is configured IPv4-only, so a micro-VM actor sees no
-// IPv6 even on a dual-stack pod where the host veth has one. gVisor reads the
-// interior netns and picks the address up; this path has to be told.
-func (s *AteomService) configureGuestNetwork(ctx context.Context, ac *kata.AgentClient, mtu uint64) error {
-	if err := ac.UpdateInterface(ctx, &agentpb.Interface{
-		Device: ateomnet.ActorVethName,
-		Name:   ateomnet.ActorVethName,
-		HwAddr: actorGuestMAC,
-		Mtu:    mtu,
-		IPAddresses: []*agentpb.IPAddress{
-			{Family: agentpb.IPFamily_v4, Address: ateomnet.ActorVethIP, Mask: "30"},
+// actorNet.IPv6 comes from ateomnet.SetupActorNetwork, which decides it in the
+// worker pod netns. The guest cannot work it out for itself: its eth0 is a tap
+// cross-connected to the interior veth at L2, so the addresses ateomnet put on
+// that veth are invisible here -- unlike gVisor, where runsc adopts the interior
+// netns wholesale.
+func buildGuestNetConfig(mtu uint64, actorNet ateomnet.ActorNetwork) guestNetConfig {
+	cfg := guestNetConfig{
+		iface: &agentpb.Interface{
+			Device: ateomnet.ActorVethName,
+			Name:   ateomnet.ActorVethName,
+			HwAddr: actorGuestMAC,
+			Mtu:    mtu,
+			IPAddresses: []*agentpb.IPAddress{
+				{Family: agentpb.IPFamily_v4, Address: ateomnet.ActorVethIP, Mask: "30"},
+			},
 		},
-	}); err != nil {
-		return err
+		routes: []*agentpb.Route{
+			{Dest: ateomnet.ActorVethSubnet, Device: ateomnet.ActorVethName, Scope: uint32(unix.RT_SCOPE_LINK), Family: agentpb.IPFamily_v4},
+			{Dest: "", Gateway: ateomnet.ActorVethGateway, Device: ateomnet.ActorVethName, Family: agentpb.IPFamily_v4},
+		},
+		neighbors: []*agentpb.ARPNeighbor{{
+			ToIPAddress: &agentpb.IPAddress{Family: agentpb.IPFamily_v4, Address: ateomnet.ActorVethGateway},
+			Device:      ateomnet.ActorVethName,
+			Lladdr:      hostVethMAC,
+			State:       0x80, // NUD_PERMANENT
+		}},
 	}
-	if err := ac.UpdateRoutes(ctx, []*agentpb.Route{
-		{Dest: ateomnet.ActorVethSubnet, Device: ateomnet.ActorVethName, Scope: uint32(unix.RT_SCOPE_LINK), Family: agentpb.IPFamily_v4},
-		{Dest: "", Gateway: ateomnet.ActorVethGateway, Device: ateomnet.ActorVethName, Family: agentpb.IPFamily_v4},
-	}); err != nil {
-		return err
+	if !actorNet.IPv6 {
+		return cfg
 	}
-	return ac.AddARPNeighbors(ctx, []*agentpb.ARPNeighbor{{
-		ToIPAddress: &agentpb.IPAddress{Family: agentpb.IPFamily_v4, Address: ateomnet.ActorVethGateway},
+
+	// One interface message carrying both families, not a second UpdateInterface:
+	// the agent replaces the interface's address list with what it is handed.
+	cfg.iface.IPAddresses = append(cfg.iface.IPAddresses,
+		&agentpb.IPAddress{Family: agentpb.IPFamily_v6, Address: ateomnet.ActorVethIPv6IP, Mask: "126"})
+	cfg.routes = append(cfg.routes,
+		// No Scope, unlike the v4 connected route above: the agent passes the
+		// field straight into rtm_scope, and an IPv6 route carries no scope.
+		&agentpb.Route{Dest: ateomnet.ActorVethIPv6Subnet, Device: ateomnet.ActorVethName, Family: agentpb.IPFamily_v6},
+		// Spelled ::/0 rather than borrowing the v4 default's empty-dest
+		// convention, so no agent version has to infer which family it meant.
+		// After the connected route: the gateway has to be on-link first.
+		&agentpb.Route{Dest: "::/0", Gateway: ateomnet.ActorVethIPv6Gateway, Device: ateomnet.ActorVethName, Family: agentpb.IPFamily_v6})
+	cfg.neighbors = append(cfg.neighbors, &agentpb.ARPNeighbor{
+		ToIPAddress: &agentpb.IPAddress{Family: agentpb.IPFamily_v6, Address: ateomnet.ActorVethIPv6Gateway},
 		Device:      ateomnet.ActorVethName,
 		Lladdr:      hostVethMAC,
 		State:       0x80, // NUD_PERMANENT
-	}})
+	})
+	return cfg
+}
+
+// configureGuestNetwork replicates the kata shim's guest network setup over the
+// agent, installing what buildGuestNetConfig describes.
+func (s *AteomService) configureGuestNetwork(ctx context.Context, ac *kata.AgentClient, mtu uint64, actorNet ateomnet.ActorNetwork) error {
+	cfg := buildGuestNetConfig(mtu, actorNet)
+	if err := ac.UpdateInterface(ctx, cfg.iface); err != nil {
+		return err
+	}
+	if err := ac.UpdateRoutes(ctx, cfg.routes); err != nil {
+		return err
+	}
+	return ac.AddARPNeighbors(ctx, cfg.neighbors)
+}
+
+// reconcileGuestNetwork re-runs the guest network setup when a restored guest's
+// address families no longer match the pod it landed on.
+//
+// A restored guest keeps whatever the snapshot froze, which used to be safe
+// because the configuration was pod-invariant. IPv6 is not: it is granted only
+// where the worker pod has a global address of its own. Restoring a dual-stack
+// golden onto an IPv4-only pod would leave the actor a dead fd00:169:254::2 and
+// an IPv6 default route, so it would prefer the AAAA of any dual-homed
+// destination and black-hole; the other direction strands it on IPv4 forever.
+//
+// The common case is a match, and costs one round trip.
+func (s *AteomService) reconcileGuestNetwork(ctx context.Context, ac *kata.AgentClient, actorNet ateomnet.ActorNetwork) error {
+	ifaces, err := ac.ListInterfaces(ctx)
+	if err != nil {
+		return err
+	}
+	if guestHasIPv6(ifaces) == actorNet.IPv6 {
+		return nil
+	}
+	slog.InfoContext(ctx, "restored guest's address families differ from this pod's; reconfiguring",
+		slog.Bool("pod_ipv6", actorNet.IPv6))
+	return s.configureGuestNetwork(ctx, ac, uint64(s.actorVethMTU(ctx)), actorNet)
+}
+
+// guestHasIPv6 reports whether the guest's actor veth carries the IPv6 address
+// this pod would have given it.
+//
+// Classification is by parsing the address, not by the reported Family: a
+// v4-mapped 16-byte form would pass a family check, and fe80:: would too --
+// every link has one, so it says nothing about what the guest was configured
+// with.
+func guestHasIPv6(ifaces []*agentpb.Interface) bool {
+	for _, iface := range ifaces {
+		if iface.GetName() != ateomnet.ActorVethName {
+			continue
+		}
+		for _, addr := range iface.GetIPAddresses() {
+			ip, err := netip.ParseAddr(addr.GetAddress())
+			if err != nil {
+				continue
+			}
+			ip = ip.Unmap()
+			if ip.Is6() && !ip.IsLinkLocalUnicast() && !ip.IsLoopback() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // waitForFile polls for path to exist, up to d. Used to wait for the kata-agent
