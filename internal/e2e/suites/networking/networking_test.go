@@ -82,24 +82,73 @@ func TestActorDirectAccess(t *testing.T) {
 	})
 }
 
+// egressHTTPTarget returns the origin TestActorEgress dials: testserver's http
+// subcommand, published on port 80 but listening on 8080 because the container
+// cannot bind a privileged port. Each caller gets its own copy to mutate.
+func egressHTTPTarget() e2e.ServerPod {
+	return e2e.ServerPod{
+		Name:       "egresshttp",
+		ImportPath: "github.com/agent-substrate/substrate/internal/e2e/fixtures/testserver",
+		Args:       []string{"http"},
+		Port:       80,
+		TargetPort: 8080,
+	}
+}
+
 // TestActorEgress exercises the full egress path. The Actor's outbound TCP
 // connection is transparently redirected by nftables into atunnel, wrapped in
 // mTLS with the Actor's own actor-identity certificate plus an HTTP CONNECT to
 // atenet-egress, authorized there against that certificate, and only then
-// dialed out. A masqueraded (pre-gateway) egress would also return 200, so this
-// asserts the gateway is deployed and that it did not reject the Actor.
+// dialed out.
+//
+// The origin is a server this test deploys rather than a public one, so a
+// failure means the egress path broke and not that something outside the
+// cluster did. That costs the test its only proof that the traffic left the
+// Actor at all -- a masqueraded, pre-gateway egress reaches an in-cluster
+// origin just as well -- so the access-log assertion, which the public-origin
+// version could do without, is load-bearing here.
 func TestActorEgress(t *testing.T) {
 	ctx := context.Background()
+
+	// Stand the origin up first: a fixture failure here should not leave a
+	// resumed Actor idling in the cluster waiting for a destination.
+	origin := egressHTTPTarget()
+	target := e2e.DeployServerPod(t, ctx, origin)
+
 	actorName, _ := createAndResumeActor(t, ctx, "egress", egressFixture())
 	router := mustRouterClient(t, ctx)
 	defer router.Close()
 
 	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
-	status, body := fetchThroughEgressActor(t, ctx, router, actorRef, "http://example.com/")
+	url := fmt.Sprintf("http://%s/healthz", target.Address())
+
+	// Bound the access-log scan below to lines this test could have produced:
+	// captured before the fetch that writes them, with slack for clock skew
+	// between here and the gateway's node.
+	since := metav1.NewTime(time.Now().Add(-1 * time.Minute))
+	status, body := fetchThroughEgressActor(t, ctx, router, actorRef, url)
 	if status != http.StatusOK {
-		t.Fatalf("Actor egress fetch returned HTTP %d, want 200; body: %s", status, body)
+		t.Fatalf("Actor egress fetch of %s returned HTTP %d, want 200; body: %s", url, status, body)
 	}
-	t.Logf("Actor egress fetch succeeded; body: %s", body)
+	t.Logf("Actor egress fetch of %s succeeded; body: %s", url, body)
+
+	assertEgressGatewayConnect(t, ctx, since, actorName, strconv.Itoa(origin.Port))
+
+	// The Actor resolves the URL's hostname itself, and only the resulting TCP
+	// connection is redirected into the tunnel: DNS leaves over the UDP
+	// masquerade InstallActorNftablesRules installs alongside the REDIRECT, and
+	// the authority atunnel forwards is the address that came back, never the
+	// name. Dialing an origin by address everywhere would leave that leg
+	// untested -- which is coverage the public origin this test used to fetch
+	// provided incidentally.
+	t.Run("by DNS name", func(t *testing.T) {
+		url := fmt.Sprintf("http://%s.%s.svc.cluster.local/healthz", origin.Name, target.Namespace)
+		status, body := fetchThroughEgressActor(t, ctx, router, actorRef, url)
+		if status != http.StatusOK {
+			t.Fatalf("Actor egress fetch of %s returned HTTP %d, want 200; body: %s", url, status, body)
+		}
+		t.Logf("Actor egress fetch of %s succeeded; body: %s", url, body)
+	})
 }
 
 // TestActorEgressHTTPS covers the same path as TestActorEgress with a TLS
