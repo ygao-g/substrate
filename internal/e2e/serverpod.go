@@ -51,10 +51,17 @@ type ServerPod struct {
 	// backs every server, so this is where a caller names the subcommand that
 	// picks its behavior -- []string{"grpc"}, say.
 	Args []string
-	// Port is what the binary listens on and what the Service publishes,
-	// unchanged, so an address a suite grafts into an assertion — a CONNECT
-	// authority in a gateway's access log, say — is this number.
+	// Port is what the Service publishes, so an address a suite grafts into an
+	// assertion — a CONNECT authority in a gateway's access log, say — is this
+	// number.
 	Port int
+	// TargetPort is what the binary listens on, defaulting to Port. Set it to
+	// publish a Port the container cannot bind: the pod runs as uid 65532 with
+	// every capability dropped, so a suite that needs a caller to dial 80 or 443
+	// has to let the Service map that down to an unprivileged listener. The
+	// mapping is kube-proxy's DNAT on the destination side, after everything an
+	// egress test measures, so Port is still what SO_ORIGINAL_DST returns.
+	TargetPort int
 	// Namespace deploys into an existing namespace instead of a fresh one, for
 	// a suite that has to populate that namespace first: credentials the pod
 	// mounts have to exist before it is scheduled, and DeployServerPod cannot
@@ -67,6 +74,12 @@ type ServerPod struct {
 	// HealthPath is the HTTP readiness path, defaulting to /healthz. Ignored
 	// when GRPCProbe is set.
 	HealthPath string
+	// HTTPSProbe makes kubelet's readiness GET speak TLS. A TLS-only listener
+	// closes a plaintext probe's connection without answering, so a server
+	// whose one port serves TLS never goes ready without this. kubelet does
+	// not verify the certificate, so a leaf from a test-minted CA probes fine.
+	// Ignored when GRPCProbe is set.
+	HTTPSProbe bool
 	// Volumes and VolumeMounts carry whatever credentials the server needs.
 	// Typed, rather than more YAML in the template, so the Secret names here
 	// sit beside the code that creates them instead of drifting from it.
@@ -128,16 +141,21 @@ func DeployServerPod(t *testing.T, ctx context.Context, spec ServerPod) Server {
 // does not need a cluster.
 func renderServerPod(t *testing.T, spec ServerPod, namespace string) string {
 	t.Helper()
-	port := strconv.Itoa(spec.Port)
+	targetPort := spec.TargetPort
+	if targetPort == 0 {
+		targetPort = spec.Port
+	}
+	targetPortStr := strconv.Itoa(targetPort)
 	inline := map[string]string{
-		"${NAME}":      spec.Name,
-		"${NAMESPACE}": namespace,
-		"${IMAGE}":     "ko://" + spec.ImportPath,
-		"${PORT}":      port,
+		"${NAME}":        spec.Name,
+		"${NAMESPACE}":   namespace,
+		"${IMAGE}":       "ko://" + spec.ImportPath,
+		"${PORT}":        strconv.Itoa(spec.Port),
+		"${TARGET_PORT}": targetPortStr,
 	}
 	blocks := map[string]string{
-		"${ARGS}":            serverArgs(spec, port),
-		"${READINESS_PROBE}": serverReadinessProbe(spec, port),
+		"${ARGS}":            serverArgs(spec, targetPortStr),
+		"${READINESS_PROBE}": serverReadinessProbe(spec, targetPortStr),
 		// Indented to their parents: volumeMounts is a container field, volumes
 		// a pod one. An empty list takes its whole line, key included.
 		"${VOLUME_MOUNTS}": yamlListBlock(t, "volumeMounts", spec.VolumeMounts, 4),
@@ -149,25 +167,30 @@ func renderServerPod(t *testing.T, spec ServerPod, namespace string) string {
 // serverArgs renders the container's `args:` list -- spec.Args followed by the
 // --listen the template's contract always appends -- indented to replace the
 // template's `${ARGS}` line. It is never empty: every server takes --listen.
-func serverArgs(spec ServerPod, port string) string {
+func serverArgs(spec ServerPod, targetPort string) string {
 	const pad = "    "
 	out := []string{pad + "args:"}
 	for _, arg := range spec.Args {
 		out = append(out, fmt.Sprintf("%s- %q", pad, arg))
 	}
-	out = append(out, fmt.Sprintf("%s- %q", pad, "--listen=:"+port))
+	out = append(out, fmt.Sprintf("%s- %q", pad, "--listen=:"+targetPort))
 	return strings.Join(out, "\n")
 }
 
 // serverReadinessProbe renders the probe fragment for spec, indented to sit
-// under the template's `readinessProbe:` key.
-func serverReadinessProbe(spec ServerPod, port string) string {
+// under the template's `readinessProbe:` key. kubelet dials the container
+// directly, so the probe names the listen port rather than the published one.
+func serverReadinessProbe(spec ServerPod, targetPort string) string {
 	if spec.GRPCProbe {
-		return "      grpc:\n        port: " + port
+		return "      grpc:\n        port: " + targetPort
 	}
 	path := spec.HealthPath
 	if path == "" {
 		path = "/healthz"
 	}
-	return fmt.Sprintf("      httpGet:\n        path: %s\n        port: %s", path, port)
+	probe := fmt.Sprintf("      httpGet:\n        path: %s\n        port: %s", path, targetPort)
+	if spec.HTTPSProbe {
+		probe += "\n        scheme: HTTPS"
+	}
+	return probe
 }

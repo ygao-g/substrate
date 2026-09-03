@@ -97,6 +97,11 @@ func TestActorEgressMITMTrust(t *testing.T) {
 	}
 	defer rc.Close()
 
+	// TODO(ypgao): the last e2e dial of an origin we do not control. It stays
+	// because the sdsmint gateway verifies every origin against
+	// /etc/ssl/certs/ca-certificates.crt (auto_san_validation), so the
+	// test-minted origin the rest of the suite moved to is unreachable through
+	// it until the gateway takes extra trust anchors.
 	const origin = "https://example.com/"
 
 	// sdsmintd signs with the pool mounted into the gateway pod, and kubelet

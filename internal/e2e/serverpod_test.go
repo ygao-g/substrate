@@ -17,6 +17,7 @@ package e2e
 import (
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -152,6 +153,105 @@ func TestRenderServerPod_HTTPProbe(t *testing.T) {
 	}
 	if probe.GRPC != nil {
 		t.Errorf("readinessProbe also carries a gRPC probe: %+v", probe.GRPC)
+	}
+}
+
+// TestRenderServerPod_HTTPSProbe covers the probe a TLS-only origin needs.
+// The scheme has to appear exactly when asked for: without it kubelet's
+// plaintext GET never goes ready against a TLS listener, and a scheme that
+// leaked into every render would flip existing plaintext servers' probes.
+func TestRenderServerPod_HTTPSProbe(t *testing.T) {
+	spec := ServerPod{
+		Name:       "egresshttps",
+		ImportPath: "github.com/agent-substrate/substrate/internal/e2e/fixtures/testserver",
+		Args:       []string{"https"},
+		Port:       443,
+		TargetPort: 8443,
+	}
+
+	spec.HTTPSProbe = true
+	pod, _ := renderServerPodDocs(t, spec)
+	probe := pod.Spec.Containers[0].ReadinessProbe
+	if probe == nil || probe.HTTPGet == nil {
+		t.Fatalf("readinessProbe = %+v, want an httpGet probe", probe)
+	}
+	if got := probe.HTTPGet.Scheme; got != corev1.URISchemeHTTPS {
+		t.Errorf("probe scheme = %q, want %q", got, corev1.URISchemeHTTPS)
+	}
+	if got := probe.HTTPGet.Port.IntValue(); got != 8443 {
+		t.Errorf("probe port = %d, want the listen port 8443", got)
+	}
+
+	spec.HTTPSProbe = false
+	pod, _ = renderServerPodDocs(t, spec)
+	probe = pod.Spec.Containers[0].ReadinessProbe
+	if probe == nil || probe.HTTPGet == nil {
+		t.Fatalf("readinessProbe = %+v, want an httpGet probe", probe)
+	}
+	if got := probe.HTTPGet.Scheme; got != "" {
+		t.Errorf("probe scheme = %q, want none rendered by default", got)
+	}
+}
+
+// TestRenderServerPod covers where the listener lands when it
+// differs from the published port and when it does not. Every field kubelet or
+// the binary reaches has to follow the listener, while the Service alone keeps
+// the published port -- get that backwards and the pod never goes ready, or
+// goes ready and refuses the caller's connection.
+func TestRenderServerPod(t *testing.T) {
+	tests := []struct {
+		name          string
+		spec          ServerPod
+		wantPublished int32 // the Service's port
+		wantListen    int   // args, containerPort, probe and Service targetPort
+	}{{
+		name: "maps a privileged published port to an unprivileged listener",
+		spec: ServerPod{
+			Name:       "egresshttp",
+			ImportPath: "github.com/agent-substrate/substrate/internal/e2e/fixtures/testserver",
+			Args:       []string{"http"},
+			Port:       80,
+			TargetPort: 8080,
+		},
+		wantPublished: 80,
+		wantListen:    8080,
+	}, {
+		name: "defaults the listener to Port when TargetPort is unset",
+		spec: ServerPod{
+			Name:       "httporigin",
+			ImportPath: "github.com/agent-substrate/substrate/internal/e2e/fixtures/testserver",
+			Args:       []string{"http"},
+			Port:       8080,
+		},
+		wantPublished: 8080,
+		wantListen:    8080,
+	}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod, service := renderServerPodDocs(t, tc.spec)
+
+			container := pod.Spec.Containers[0]
+			if got, want := container.Args, []string{"http", "--listen=:" + strconv.Itoa(tc.wantListen)}; !slices.Equal(got, want) {
+				t.Errorf("container args = %v, want %v", got, want)
+			}
+			if got := container.Ports[0].ContainerPort; got != int32(tc.wantListen) {
+				t.Errorf("containerPort = %d, want the listen port %d", got, tc.wantListen)
+			}
+			probe := container.ReadinessProbe
+			if probe == nil || probe.HTTPGet == nil {
+				t.Fatalf("readinessProbe = %+v, want an httpGet probe", probe)
+			}
+			if got := probe.HTTPGet.Port.IntValue(); got != tc.wantListen {
+				t.Errorf("probe port = %d, want the listen port %d", got, tc.wantListen)
+			}
+
+			if got := service.Spec.Ports[0].Port; got != tc.wantPublished {
+				t.Errorf("service port = %d, want the published port %d", got, tc.wantPublished)
+			}
+			if got := service.Spec.Ports[0].TargetPort.IntValue(); got != tc.wantListen {
+				t.Errorf("service targetPort = %d, want the listen port %d", got, tc.wantListen)
+			}
+		})
 	}
 }
 
