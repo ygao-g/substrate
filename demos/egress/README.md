@@ -74,6 +74,10 @@ rejects that option with agentgateway rather than silently omitting it.
 
 - **Egress app (`main.go`)** — the Actor: `POST /` with `{"url":"..."}` → fetches it → returns
   status + body. It also serves `POST /grpc`, described below.
+  An HTTPS fetch may add `"caPEM"` to verify the origin against those anchors instead of the
+  system roots, and `"serverName"` to name the certificate it should present — which is what
+  lets a caller point the Actor at an origin it stood up itself rather than a publicly-trusted
+  one. Omit both and the fetch is exactly the plain one above.
 - **Egress gateway** — the `atenet-egress` Deployment. Envoy uses a co-located atenet `ext_proc`
   container started with `--mode=egress`; agentgateway uses its built-in `substrateEgress` policy
   and does not need that sidecar. The installer renders the matching configuration and container.
