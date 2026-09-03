@@ -54,6 +54,10 @@ intercepted and carried over mTLS to a gateway that verifies who is making the r
 
 - **Egress app (`main.go`)** — the Actor: `POST /` with `{"url":"..."}` → fetches it → returns
   status + body. It also serves `POST /grpc`, described below.
+  An HTTPS fetch may add `"caPEM"` to verify the origin against those anchors instead of the
+  system roots, and `"serverName"` to name the certificate it should present — which is what
+  lets a caller point the Actor at an origin it stood up itself rather than a publicly-trusted
+  one. Omit both and the fetch is exactly the plain one above.
 - **Egress gateway** — `manifests/ate-install/atenet-egress.yaml`. One pod, two containers:
   an Envoy (`envoy`) and the atenet router ext_proc (`ext-proc`, `--mode=egress`), called over
   localhost. In egress mode the router serves the egress ext_proc handler only — no xDS server,

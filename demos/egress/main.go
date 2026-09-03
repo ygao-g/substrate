@@ -19,6 +19,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +50,16 @@ const (
 
 type fetchRequest struct {
 	URL string `json:"url"`
+	// CAPEM, when set, is the PEM trust anchors to verify the origin against
+	// instead of the system roots. Without it this demo can only complete TLS
+	// to a publicly-trusted origin, which forces any test of its HTTPS path to
+	// reach a real one; with it, the caller can stand up an origin it owns and
+	// hand over the CA that signed it.
+	CAPEM string `json:"caPEM,omitempty"`
+	// ServerName, when set, is the name the origin's certificate is checked
+	// against, for a caller that dials by address -- a ClusterIP, say -- but
+	// holds a certificate issued for a name.
+	ServerName string `json:"serverName,omitempty"`
 }
 
 type fetchResponse struct {
@@ -127,6 +139,12 @@ func newHandler(client *http.Client) http.Handler {
 			return
 		}
 
+		fetchClient, err := clientFor(client, input)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, fetchResponse{Error: err.Error()})
+			return
+		}
+
 		outbound, err := http.NewRequestWithContext(r.Context(), http.MethodGet, input.URL, nil)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, fetchResponse{Error: fmt.Sprintf("invalid URL: %v", err)})
@@ -135,7 +153,7 @@ func newHandler(client *http.Client) http.Handler {
 		if traceparent := r.Header.Get("traceparent"); traceparent != "" {
 			outbound.Header.Set("traceparent", traceparent)
 		}
-		response, err := client.Do(outbound)
+		response, err := fetchClient.Do(outbound)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, fetchResponse{Error: fmt.Sprintf("request failed: %v", err)})
 			return
@@ -151,6 +169,29 @@ func newHandler(client *http.Client) http.Handler {
 	})
 	mux.HandleFunc("/grpc", handleGRPC)
 	return mux
+}
+
+// clientFor returns the client to fetch input with: base itself when the
+// request named no TLS settings, so the ordinary fetch path stays exactly the
+// plain client this demo has always used, and a one-shot client carrying them
+// otherwise. Built per request rather than cached because the settings arrive
+// with the request and each caller's are its own.
+func clientFor(base *http.Client, input fetchRequest) (*http.Client, error) {
+	if input.CAPEM == "" && input.ServerName == "" {
+		return base, nil
+	}
+	config := &tls.Config{ServerName: input.ServerName}
+	if input.CAPEM != "" {
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM([]byte(input.CAPEM)) {
+			return nil, fmt.Errorf("caPEM carries no PEM certificate")
+		}
+		config.RootCAs = roots
+	}
+	return &http.Client{
+		Timeout:   base.Timeout,
+		Transport: &http.Transport{TLSClientConfig: config},
+	}, nil
 }
 
 // handleGRPC dials the requested target and echoes back what the RPCs returned.
