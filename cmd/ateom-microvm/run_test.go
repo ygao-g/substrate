@@ -20,14 +20,22 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"golang.org/x/sys/unix"
+	"google.golang.org/protobuf/testing/protocmp"
+
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/kata"
+	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/third_party/kata/agentpb"
+	"github.com/agent-substrate/substrate/internal/ateomnet"
 )
 
 // A symlink planted in the image at /etc or /etc/resolv.conf must not be followed
@@ -267,5 +275,258 @@ func TestWorkloadIDs(t *testing.T) {
 	got := workloadIDs(ctrs)
 	if want := []string{"counter", "sidecar"}; !slices.Equal(got, want) {
 		t.Errorf("workloadIDs() = %v, want %v", got, want)
+	}
+}
+
+// The IPv4 configuration is what every micro-VM actor has always booted with;
+// it has to survive the IPv6 addition byte for byte, and the IPv6 addition has
+// to be purely additive on top of it.
+func TestBuildGuestNetConfig(t *testing.T) {
+	const mtu = 1500
+
+	v4Addr := &agentpb.IPAddress{Family: agentpb.IPFamily_v4, Address: ateomnet.ActorVethIP, Mask: "30"}
+	v6Addr := &agentpb.IPAddress{Family: agentpb.IPFamily_v6, Address: ateomnet.ActorVethIPv6IP, Mask: "126"}
+	v4Routes := []*agentpb.Route{
+		{Dest: ateomnet.ActorVethSubnet, Device: ateomnet.ActorVethName, Scope: uint32(unix.RT_SCOPE_LINK), Family: agentpb.IPFamily_v4},
+		{Dest: "", Gateway: ateomnet.ActorVethGateway, Device: ateomnet.ActorVethName, Family: agentpb.IPFamily_v4},
+	}
+	v6Routes := []*agentpb.Route{
+		{Dest: ateomnet.ActorVethIPv6Subnet, Device: ateomnet.ActorVethName, Family: agentpb.IPFamily_v6},
+		{Dest: "::/0", Gateway: ateomnet.ActorVethIPv6Gateway, Device: ateomnet.ActorVethName, Family: agentpb.IPFamily_v6},
+	}
+	v4Neigh := &agentpb.ARPNeighbor{
+		ToIPAddress: &agentpb.IPAddress{Family: agentpb.IPFamily_v4, Address: ateomnet.ActorVethGateway},
+		Device:      ateomnet.ActorVethName,
+		Lladdr:      hostVethMAC,
+		State:       0x80,
+	}
+	v6Neigh := &agentpb.ARPNeighbor{
+		ToIPAddress: &agentpb.IPAddress{Family: agentpb.IPFamily_v6, Address: ateomnet.ActorVethIPv6Gateway},
+		Device:      ateomnet.ActorVethName,
+		Lladdr:      hostVethMAC,
+		State:       0x80,
+	}
+	iface := func(addrs ...*agentpb.IPAddress) *agentpb.Interface {
+		return &agentpb.Interface{
+			Device:      ateomnet.ActorVethName,
+			Name:        ateomnet.ActorVethName,
+			HwAddr:      actorGuestMAC,
+			Mtu:         mtu,
+			IPAddresses: addrs,
+		}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		actorNet ateomnet.ActorNetwork
+		want     guestNetConfig
+	}{{
+		name:     "IPv4 only",
+		actorNet: ateomnet.ActorNetwork{},
+		want: guestNetConfig{
+			iface:     iface(v4Addr),
+			routes:    v4Routes,
+			neighbors: []*agentpb.ARPNeighbor{v4Neigh},
+		},
+	}, {
+		// Both families ride in one Interface message: the agent replaces the
+		// address list with what it is handed, so a second UpdateInterface
+		// carrying only the v6 address would drop 169.254.17.2 on the floor.
+		// The routes stay grouped by family, connected before default, because
+		// the agent installs them in order and a gatewayed route needs its
+		// gateway on-link already.
+		name:     "dual stack",
+		actorNet: ateomnet.ActorNetwork{IPv6: true},
+		want: guestNetConfig{
+			iface:     iface(v4Addr, v6Addr),
+			routes:    append(append([]*agentpb.Route{}, v4Routes...), v6Routes...),
+			neighbors: []*agentpb.ARPNeighbor{v4Neigh, v6Neigh},
+		},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildGuestNetConfig(mtu, tc.actorNet)
+			if diff := cmp.Diff(tc.want.iface, got.iface, protocmp.Transform()); diff != "" {
+				t.Errorf("interface diff (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.want.routes, got.routes, protocmp.Transform()); diff != "" {
+				t.Errorf("routes diff (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.want.neighbors, got.neighbors, protocmp.Transform()); diff != "" {
+				t.Errorf("neighbors diff (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// The properties above are pinned as literal data, which catches a change but
+// not a mistake that was baked in from the start. These check the things that
+// parse, look right, and fail only in the guest.
+func TestBuildGuestNetConfigInvariants(t *testing.T) {
+	v4 := buildGuestNetConfig(1500, ateomnet.ActorNetwork{})
+	dual := buildGuestNetConfig(1500, ateomnet.ActorNetwork{IPv6: true})
+
+	t.Run("IPv6 is additive", func(t *testing.T) {
+		if diff := cmp.Diff(v4.iface.GetIPAddresses(), dual.iface.GetIPAddresses()[:1], protocmp.Transform()); diff != "" {
+			t.Errorf("v4 address changed by enabling IPv6 (-v4only +dual):\n%s", diff)
+		}
+		if diff := cmp.Diff(v4.routes, dual.routes[:len(v4.routes)], protocmp.Transform()); diff != "" {
+			t.Errorf("v4 routes changed by enabling IPv6 (-v4only +dual):\n%s", diff)
+		}
+		if diff := cmp.Diff(v4.neighbors, dual.neighbors[:len(v4.neighbors)], protocmp.Transform()); diff != "" {
+			t.Errorf("v4 neighbors changed by enabling IPv6 (-v4only +dual):\n%s", diff)
+		}
+	})
+
+	// A v4 gateway on a Family_v6 route parses, marshals and reads fine; it
+	// black-holes the guest and nothing before the guest would say so.
+	t.Run("v6 default uses the v6 gateway", func(t *testing.T) {
+		var got *agentpb.Route
+		for _, r := range dual.routes {
+			if r.GetFamily() == agentpb.IPFamily_v6 && r.GetGateway() != "" {
+				got = r
+			}
+		}
+		if got == nil {
+			t.Fatalf("no gatewayed IPv6 route in %v", dual.routes)
+		}
+		if got.GetGateway() == ateomnet.ActorVethGateway {
+			t.Errorf("IPv6 default gateway = %q, which is the IPv4 gateway", got.GetGateway())
+		}
+		if got.GetGateway() != ateomnet.ActorVethIPv6Gateway {
+			t.Errorf("IPv6 default gateway = %q, want %q", got.GetGateway(), ateomnet.ActorVethIPv6Gateway)
+		}
+		// The v4 default borrows the agent's empty-dest convention; spelling
+		// the v6 one out keeps any agent version from guessing the family.
+		if got.GetDest() != "::/0" {
+			t.Errorf("IPv6 default dest = %q, want %q", got.GetDest(), "::/0")
+		}
+	})
+
+	// The agent passes Scope straight into rtm_scope, and an IPv6 route has no
+	// scope: RT_SCOPE_LINK copied across from the v4 line is rejected.
+	t.Run("v6 routes carry no scope", func(t *testing.T) {
+		for _, r := range dual.routes {
+			if r.GetFamily() == agentpb.IPFamily_v6 && r.GetScope() != 0 {
+				t.Errorf("IPv6 route %q Scope = %d, want 0", r.GetDest(), r.GetScope())
+			}
+		}
+	})
+
+	// The masks are decimal strings here and CIDRs in ateomnet; nothing but
+	// this keeps the two spellings from drifting apart.
+	t.Run("masks match the ateomnet prefix lengths", func(t *testing.T) {
+		for _, tc := range []struct{ addr, cidr string }{
+			{ateomnet.ActorVethIP, ateomnet.ActorVethCIDR},
+			{ateomnet.ActorVethIPv6IP, ateomnet.ActorVethIPv6CIDR},
+		} {
+			prefix, err := netip.ParsePrefix(tc.cidr)
+			if err != nil {
+				t.Fatalf("ParsePrefix(%q) = %v", tc.cidr, err)
+			}
+			want := strconv.Itoa(prefix.Bits())
+			var got string
+			for _, a := range dual.iface.GetIPAddresses() {
+				if a.GetAddress() == tc.addr {
+					got = a.GetMask()
+				}
+			}
+			if got != want {
+				t.Errorf("%s mask = %q, want %q (from %s)", tc.addr, got, want, tc.cidr)
+			}
+		}
+	})
+
+	// Pinning the gateway to the guest's own MAC black-holes every restore,
+	// and it is a one-character edit away.
+	t.Run("neighbors pin the gateway to the host veth", func(t *testing.T) {
+		families := map[agentpb.IPFamily]bool{}
+		for _, n := range dual.neighbors {
+			if n.GetLladdr() == actorGuestMAC {
+				t.Errorf("neighbor %q Lladdr is the guest's own MAC", n.GetToIPAddress().GetAddress())
+			}
+			if n.GetLladdr() != hostVethMAC {
+				t.Errorf("neighbor %q Lladdr = %q, want %q", n.GetToIPAddress().GetAddress(), n.GetLladdr(), hostVethMAC)
+			}
+			if n.GetState() != 0x80 {
+				t.Errorf("neighbor %q State = %#x, want NUD_PERMANENT (%#x)", n.GetToIPAddress().GetAddress(), n.GetState(), 0x80)
+			}
+			families[n.GetToIPAddress().GetFamily()] = true
+		}
+		if !families[agentpb.IPFamily_v4] || !families[agentpb.IPFamily_v6] {
+			t.Errorf("dual-stack neighbors cover %v, want both families", families)
+		}
+	})
+}
+
+// The restore path asks this whether the guest it just thawed matches the pod
+// it landed on, so a wrong answer either strands the actor on one family or
+// re-runs the whole guest setup on every resume.
+func TestGuestHasIPv6(t *testing.T) {
+	eth0 := func(addrs ...*agentpb.IPAddress) *agentpb.Interface {
+		return &agentpb.Interface{Name: ateomnet.ActorVethName, IPAddresses: addrs}
+	}
+	v6 := func(a string) *agentpb.IPAddress {
+		return &agentpb.IPAddress{Family: agentpb.IPFamily_v6, Address: a}
+	}
+	v4 := func(a string) *agentpb.IPAddress {
+		return &agentpb.IPAddress{Family: agentpb.IPFamily_v4, Address: a}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		ifaces []*agentpb.Interface
+		want   bool
+	}{{
+		name:   "no interfaces",
+		ifaces: nil,
+		want:   false,
+	}, {
+		name:   "IPv4 only",
+		ifaces: []*agentpb.Interface{eth0(v4(ateomnet.ActorVethIP))},
+		want:   false,
+	}, {
+		// Every link with IPv6 compiled in has one, including the guest's
+		// before this change: counting it makes the answer always true and
+		// the reconcile never runs.
+		name:   "link-local alone is not IPv6",
+		ifaces: []*agentpb.Interface{eth0(v4(ateomnet.ActorVethIP), v6("fe80::a8:1eff:fe00:2"))},
+		want:   false,
+	}, {
+		name:   "dual stack",
+		ifaces: []*agentpb.Interface{eth0(v4(ateomnet.ActorVethIP), v6(ateomnet.ActorVethIPv6IP))},
+		want:   true,
+	}, {
+		// Only the actor veth is ours to reconcile.
+		name: "IPv6 on another interface",
+		ifaces: []*agentpb.Interface{
+			eth0(v4(ateomnet.ActorVethIP)),
+			{Name: "lo", IPAddresses: []*agentpb.IPAddress{v6("::1")}},
+		},
+		want: false,
+	}, {
+		// Classification is by parsing, so a mislabelled address still counts:
+		// the guest's kernel has it either way.
+		name:   "Family mis-set to v4",
+		ifaces: []*agentpb.Interface{eth0(v4(ateomnet.ActorVethIPv6IP))},
+		want:   true,
+	}, {
+		// The inverse: a v4-mapped form would satisfy a 16-byte family check.
+		name:   "v4-mapped is not IPv6",
+		ifaces: []*agentpb.Interface{eth0(v6("::ffff:169.254.17.2"))},
+		want:   false,
+	}, {
+		name:   "loopback is not IPv6",
+		ifaces: []*agentpb.Interface{eth0(v6("::1"))},
+		want:   false,
+	}, {
+		name:   "unparseable address is skipped",
+		ifaces: []*agentpb.Interface{eth0(v6("not-an-address"))},
+		want:   false,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := guestHasIPv6(tc.ifaces); got != tc.want {
+				t.Errorf("guestHasIPv6() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
