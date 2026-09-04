@@ -73,19 +73,19 @@ type SubstrateFixture struct {
 // fixture somewhere else.
 func SubstrateCounterFixture() SubstrateFixture {
 	f := SubstrateFixture{
-		Atespace:      "ate-demo-counter-substrate",
+		Atespace:      "ate-demo-counter",
 		Name:          "counter",
-		PoolNamespace: "ate-demo-counter-substrate",
-		PoolName:      "counter-substrate",
-		DeployWith:    "hack/install-ate-kind.sh --deploy-demo-counter-substrate",
+		PoolNamespace: "ate-demo-counter",
+		PoolName:      "counter",
+		DeployWith:    "hack/install-ate-kind.sh --deploy-demo-counter",
 	}
 	if IsMicroVM() {
 		f = SubstrateFixture{
-			Atespace:      "ate-demo-counter-substrate-microvm",
+			Atespace:      "ate-demo-counter-microvm",
 			Name:          "counter-microvm",
-			PoolNamespace: "ate-demo-counter-substrate-microvm",
-			PoolName:      "counter-substrate-microvm",
-			DeployWith:    "hack/install-ate-kind.sh --deploy-demo-counter-substrate-microvm",
+			PoolNamespace: "ate-demo-counter-microvm",
+			PoolName:      "counter-microvm",
+			DeployWith:    "hack/install-ate-kind.sh --deploy-demo-counter-microvm",
 		}
 	}
 	if v := os.Getenv("E2E_SUBSTRATE_TEMPLATE_ATESPACE"); v != "" {
@@ -195,10 +195,10 @@ func fixtureSubstitutions(bucket, name string) (inline, blocks map[string]string
 
 	inline["${ATEOM_IMAGE}"] = "ko://github.com/agent-substrate/substrate/cmd/ateom-microvm"
 	inline["${FIXTURE_SUFFIX}"] = "-" + SandboxClassMicroVM + "-" + name
-	// The cluster-wide SandboxConfig hack/install-microvm-deps.sh installs. A
-	// micro-VM WorkerPool has to name it: it is deliberately not the class
-	// default, so a missing or stale one fails loudly.
-	blocks["${WORKERPOOL_RUNTIME}"] = "  sandboxClass: microvm\n  sandboxConfigName: microvm"
+	// The micro-VM ActorTemplates name the cluster-wide SandboxConfig
+	// hack/install-microvm-deps.sh installs (configName: microvm), so a
+	// missing or stale one fails loudly. The pool only selects the class.
+	blocks["${WORKERPOOL_RUNTIME}"] = "  sandboxClass: microvm"
 	// Must match the WorkerPool's: a snapshot is not portable across sandbox
 	// classes, so only same-class pools are eligible to run these actors.
 	blocks["${TEMPLATE_SANDBOX_CLASS}"] = "  sandboxClass: microvm"

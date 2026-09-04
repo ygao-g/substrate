@@ -178,7 +178,7 @@ configure the WorkerPool(s) that will be used to execute actors and prepare the
 substrate's control-plane for use.  Worker Pods are started, waiting for
 assignments.
 
-An agent developer defines an ActorTemplate (a CR) which describes what it
+An agent developer defines an ActorTemplate (an ate API resource) which describes what it
 means to instantiate that actor - what OCI image to run, how much memory it
 needs, behavioral parameters, etc.  The Agent Substrate uses that ActorTemplate
 to create a "golden snapshot" of the actor, which will be used to fast-start
@@ -324,7 +324,7 @@ The node-level subsystem manages the physical execution of sandboxes and the mov
 
 ### Sandbox Classes
 
-A `WorkerPool` selects a **sandbox class** (`spec.sandboxClass`), and each class has a matching `ateom` herder image. The sandbox binaries themselves are not baked into the worker image — they, and the pause image holding the sandbox's namespaces, come at runtime from a cluster-scoped [`SandboxConfig`](api-guide.md#3-sandboxconfig-the-sandbox-itself) and are pinned into each snapshot's manifest so restores stay reproducible across runtime upgrades.
+A `WorkerPool` selects a **sandbox class** (`spec.sandboxClass`), and each class has a matching `ateom` herder image. The sandbox binaries themselves are not baked into the worker image — they, and the pause image holding the sandbox's namespaces, come at runtime from a cluster-scoped [`SandboxConfig`](api-guide.md#3-sandboxconfig-the-sandbox-itself) the `ActorTemplate` names in its sandbox config (naming one is currently required; per-class cluster defaults are planned) and are pinned into each snapshot's manifest so restores stay reproducible across runtime upgrades.
 
   * **gVisor** (`ateom-gvisor`, the default): Runs the workload under `runsc` for kernel-level sandboxing. Suspend and resume leverage gVisor's native checkpoint/restore of the sandboxed process tree.
 

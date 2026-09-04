@@ -39,7 +39,7 @@ type RPCService struct {
 	persistence           serviceStore
 	workerCache           *workercache.Cache
 	dialer                *AteletDialer
-	workerPoolLister      listersv1alpha1.WorkerPoolLister
+	sandboxConfigLister   listersv1alpha1.SandboxConfigLister
 	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister
 	actorWorkflow         *ActorWorkflow
 	workerWorkflow        *WorkerWorkflow
@@ -62,8 +62,6 @@ type VolumePluginRegistry interface {
 func NewRPCService(
 	persistence store.Interface,
 	workerCache *workercache.Cache,
-	actorTemplateLister listersv1alpha1.ActorTemplateLister,
-	workerPoolLister listersv1alpha1.WorkerPoolLister,
 	sandboxConfigLister listersv1alpha1.SandboxConfigLister,
 	csiDriverConfigLister listersv1alpha1.CSIDriverConfigLister,
 	storageClassLister storagev1listers.StorageClassLister,
@@ -72,18 +70,18 @@ func NewRPCService(
 	egressGatewayAddress string,
 	volumePlugins map[string]volume.VolumePluginControlPlane,
 ) *RPCService {
-	impl := newServiceImpl(persistence, actorTemplateLister, storageClassLister)
+	impl := newServiceImpl(persistence, storageClassLister)
 	s := &RPCService{
 		impl:                  impl,
 		persistence:           persistence,
 		workerCache:           workerCache,
-		workerPoolLister:      workerPoolLister,
+		sandboxConfigLister:   sandboxConfigLister,
 		csiDriverConfigLister: csiDriverConfigLister,
 		dialer:                dialer,
 		instruments:           instruments,
 		volumePlugins:         volumePlugins,
 	}
-	s.actorWorkflow = NewActorWorkflow(impl, workerCache, dialer, actorTemplateLister, workerPoolLister, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, s)
+	s.actorWorkflow = NewActorWorkflow(impl, workerCache, dialer, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, s)
 	s.workerWorkflow = NewWorkerWorkflow(impl)
 	return s
 }
@@ -115,6 +113,7 @@ type serviceStore interface {
 	DeleteActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef) (*ateapipb.ActorTemplate, error)
 	ListWorkers(ctx context.Context, opts store.ListOptions) (store.ListResponse[*ateapipb.Worker], error)
 	GetWorker(ctx context.Context, name string) (*ateapipb.Worker, error)
+	ListWorkerAssignments(ctx context.Context, workerName string, opts store.ListOptions) (store.ListResponse[*ateapipb.ActorAssignment], error)
 	CreateWorker(ctx context.Context, worker *ateapipb.Worker) (*ateapipb.Worker, error)
 	UpdateWorker(ctx context.Context, name string, precondition store.Precondition, mutate func(toUpdate *ateapipb.Worker) error) (*ateapipb.Worker, error)
 	AcquireLease(ctx context.Context, key string) (*store.Lease, error)
@@ -150,8 +149,7 @@ type ServiceImpl struct {
 	// methods we need to trap.
 	store store.Interface
 
-	actorTemplateLister listersv1alpha1.ActorTemplateLister
-	storageClassLister  storagev1listers.StorageClassLister
+	storageClassLister storagev1listers.StorageClassLister
 }
 
 var _ store.Interface = (*ServiceImpl)(nil)
@@ -160,13 +158,11 @@ var _ store.Interface = (*ServiceImpl)(nil)
 // implementation layer.
 func newServiceImpl(
 	persistence store.Interface,
-	actorTemplateLister listersv1alpha1.ActorTemplateLister,
 	storageClassLister storagev1listers.StorageClassLister,
 ) *ServiceImpl {
 	s := &ServiceImpl{
-		store:               persistence,
-		actorTemplateLister: actorTemplateLister,
-		storageClassLister:  storageClassLister,
+		store:              persistence,
+		storageClassLister: storageClassLister,
 	}
 	return s
 }
@@ -174,9 +170,4 @@ func newServiceImpl(
 // Pass-through.
 func (s *ServiceImpl) AcquireLease(ctx context.Context, key string) (*store.Lease, error) {
 	return s.store.AcquireLease(ctx, key)
-}
-
-// Pass-through.
-func (s *ServiceImpl) DebugClearAll(ctx context.Context) error {
-	return s.store.DebugClearAll(ctx)
 }

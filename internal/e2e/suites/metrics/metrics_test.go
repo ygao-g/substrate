@@ -238,6 +238,16 @@ func TestPlatformMetricsEmitted(t *testing.T) {
 						crashErrs = append(crashErrs, fmt.Sprintf("ate_failure_reason %q is invalid (must be a registered ateerrors reason enum like CORRUPTED_ASSIGNMENT, WORKER_POD_GONE, WORKER_REASSIGNED, UNKNOWN)", reasonVal))
 					}
 
+					// The pair travels together, and the domain must agree with the
+					// reason: a consumer splitting infrastructure from workload faults
+					// reads the domain and never matches on the names of the reasons.
+					domainVal := extractLabelValue(line, "ate_failure_domain")
+					if domainVal == "" {
+						crashErrs = append(crashErrs, "ate_failure_domain label is missing or empty")
+					} else if want := ateattr.FailureDomain(reasonVal); domainVal != want {
+						crashErrs = append(crashErrs, fmt.Sprintf("ate_failure_domain %q disagrees with ate_failure_reason %q, which classifies as %q", domainVal, reasonVal, want))
+					}
+
 					if tmplAtespaceVal == "" {
 						crashErrs = append(crashErrs, "ate_template_atespace label is missing or empty")
 					}
@@ -268,6 +278,10 @@ func TestPlatformMetricsEmitted(t *testing.T) {
 			}
 
 			if err := validateSnapshotPhaseLabels(scrape); err != nil {
+				errs = append(errs, err.Error())
+			}
+
+			if err := validateNodeAttribution(scrape); err != nil {
 				errs = append(errs, err.Error())
 			}
 
@@ -354,6 +368,29 @@ func validateSnapshotPhaseLabels(scrape string) error {
 		if !labelled {
 			return fmt.Errorf("no %s line carried all of ate_snapshot_kind, ate_snapshot_scope and ate_sandbox_class", m)
 		}
+	}
+	return nil
+}
+
+// validateNodeAttribution guards k8s.node.name on the node-scoped resources.
+// atelet takes it from the Downward API in its DaemonSet, ateom from the worker
+// pod ate-controller builds. No deployed collector runs k8sattributes, so an
+// unexpanded or dropped attribute has nothing downstream to restore it.
+func validateNodeAttribution(scrape string) error {
+	var checked int
+	for _, svc := range []string{"atelet", "ateom-gvisor", "ateom-microvm"} {
+		if !e2e.CollectorHasService(scrape, svc) {
+			continue
+		}
+		checked++
+		if node := e2e.TargetInfoLabel(scrape, svc, "k8s_node_name"); node == "" {
+			return fmt.Errorf("%s published telemetry with no k8s_node_name on its target_info; OTEL_RESOURCE_ATTRIBUTES lost k8s.node.name or its $(NODE_NAME) did not expand", svc)
+		}
+	}
+	// Only one ateom runtime runs per cluster, so the set is checked as it is
+	// found; zero of them means the assertion above proved nothing.
+	if checked == 0 {
+		return fmt.Errorf("no node-scoped service reached the collector, so k8s_node_name went unchecked")
 	}
 	return nil
 }

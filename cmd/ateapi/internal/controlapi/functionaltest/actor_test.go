@@ -16,6 +16,7 @@ package functionaltest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -103,7 +104,6 @@ func TestCreateActor_WithExternalVolumes(t *testing.T) {
 	volumes := []*ateapipb.Volume{
 		{
 			Name: "ext-vol-1",
-			Type: "ExternalVolumeTemplate",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
 				Capacity:         "10Gi",
@@ -181,6 +181,7 @@ func TestCreateActor_SubstrateTemplateRef(t *testing.T) {
 	defer tc.cleanup()
 
 	ctx := context.Background()
+	ensureDefaultGvisorSandboxConfig(t, tc)
 	if _, err := tc.client.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{
 		ActorTemplate: &ateapipb.ActorTemplate{
 			Metadata:        &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "sub-tmpl"},
@@ -314,6 +315,7 @@ func TestCreateActor_RejectsSnapshotWithExternalVolumes(t *testing.T) {
 	ns := namespaceForTest("ns-snapshot-external-volume")
 	tc := setupTest(t, ns)
 	defer tc.cleanup()
+	ensureDefaultGvisorSandboxConfig(t, tc)
 	template, err := tc.client.CreateActorTemplate(context.Background(), &ateapipb.CreateActorTemplateRequest{
 		ActorTemplate: &ateapipb.ActorTemplate{
 			Metadata:        &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "tmpl1"},
@@ -327,7 +329,6 @@ func TestCreateActor_RejectsSnapshotWithExternalVolumes(t *testing.T) {
 			}},
 			Volumes: []*ateapipb.Volume{{
 				Name: "data",
-				Type: "ExternalVolumeTemplate",
 				ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 					Capacity: "1Gi", StorageClassName: "standard",
 				},
@@ -667,16 +668,106 @@ func TestUpdateActor_Success(t *testing.T) {
 	}
 }
 
+// TestUpdateActor_RepointTemplate verifies UpdateActor can point an actor at
+// a different substrate ActorTemplate (effective on the next ResumeActor),
+// and that a ref to an absent template, or to one with a different sandbox
+// config, volumes, or volume mounts, is rejected.
+func TestUpdateActor_RepointTemplate(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		wantCode codes.Code
+	}{
+		{name: "absent-template", template: "absent", wantCode: codes.FailedPrecondition},
+		{name: "different-mounts", template: "tmpl-c", wantCode: codes.FailedPrecondition},
+		{name: "different-volumes", template: "tmpl-d", wantCode: codes.FailedPrecondition},
+		{name: "different-sandbox-config", template: "tmpl-e", wantCode: codes.FailedPrecondition},
+		{name: "same-volumes", template: "tmpl-b", wantCode: codes.OK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := namespaceForTest("ns-update-repoint-" + tt.name)
+			tc := setupTest(t, ns)
+			defer tc.cleanup()
+
+			ctx := context.Background()
+			ensureDefaultGvisorSandboxConfig(t, tc)
+			ensureGvisorSandboxConfig(t, tc, "gvisor-nightly")
+			// tmpl-a and tmpl-b are volume-compatible; tmpl-c mounts the data
+			// volume elsewhere, tmpl-d declares an extra volume, and tmpl-e
+			// names a different SandboxConfig.
+			dataVolume := &ateapipb.Volume{Name: "data", DurableDir: &ateapipb.DurableDirVolumeSource{}}
+			scratchVolume := &ateapipb.Volume{Name: "scratch", DurableDir: &ateapipb.DurableDirVolumeSource{}}
+			templates := map[string]struct {
+				mountPath  string
+				volumes    []*ateapipb.Volume
+				configName string
+			}{
+				"tmpl-a": {"/data", []*ateapipb.Volume{dataVolume}, "gvisor-default"},
+				"tmpl-b": {"/data", []*ateapipb.Volume{dataVolume}, "gvisor-default"},
+				"tmpl-c": {"/mnt/data", []*ateapipb.Volume{dataVolume}, "gvisor-default"},
+				"tmpl-d": {"/data", []*ateapipb.Volume{dataVolume, scratchVolume}, "gvisor-default"},
+				"tmpl-e": {"/data", []*ateapipb.Volume{dataVolume}, "gvisor-nightly"},
+			}
+			for name, tmpl := range templates {
+				if _, err := tc.client.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{
+					ActorTemplate: &ateapipb.ActorTemplate{
+						Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: name},
+						Containers: []*ateapipb.Container{{
+							Name:         "main",
+							Image:        "example.com/app:v1",
+							VolumeMounts: []*ateapipb.VolumeMount{{Name: "data", MountPath: tmpl.mountPath}},
+						}},
+						Volumes:         tmpl.volumes,
+						SnapshotsConfig: &ateapipb.SnapshotsConfig{StorageLocation: "gs://my-bucket/snapshots"},
+						SandboxConfig:   &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: tmpl.configName},
+					},
+				}); err != nil {
+					t.Fatalf("CreateActorTemplate %s failed: %v", name, err)
+				}
+			}
+
+			created, err := tc.client.CreateActor(ctx, &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+				Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "repoint-actor"},
+				ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl-a"},
+			}})
+			if err != nil {
+				t.Fatalf("CreateActor failed: %v", err)
+			}
+
+			updated, err := tc.client.UpdateActor(ctx, &ateapipb.UpdateActorRequest{Actor: &ateapipb.Actor{
+				Metadata:      created.GetMetadata(),
+				ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: tt.template},
+			}})
+			if got := status.Code(err); got != tt.wantCode {
+				t.Fatalf("UpdateActor repointing at %s = %v, want %v (err: %v)", tt.template, got, tt.wantCode, err)
+			}
+			if tt.wantCode != codes.OK {
+				return
+			}
+
+			want := &ateapipb.Actor{
+				Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "repoint-actor", Version: 2},
+				ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: tt.template},
+				Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+			}
+			if diff := cmp.Diff(want, updated, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {
+				t.Errorf("UpdateActor response mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestUpdateActor verifies a typical RMW UpdateActor flow: a
 // client reads an actor, modifies it and send an UpdateActor request.
-// Output-only fields it sets are ignored, and changes to immutable fields are
-// rejected.
+// Output-only fields it sets are ignored, and the mutable actor_template ref
+// can repoint the actor at another template.
 func TestUpdateActor(t *testing.T) {
 	ns := namespaceForTest("ns-update-replace")
 	tc := setupTest(t, ns)
 	defer tc.cleanup()
 
-	createTemplate(t, tc, ns)
+	tmpl := createTemplate(t, tc, ns)
 
 	created, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
 		Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "id1"},
@@ -710,12 +801,24 @@ func TestUpdateActor(t *testing.T) {
 		t.Errorf("UpdateActor response mismatch (-want +got):\n%s", diff)
 	}
 
-	// Immutable field
-	updatedActor.ActorTemplate = &ateapipb.ObjectRef{Name: "new-templace", Atespace: "atespace"}
-	_, err = tc.client.UpdateActor(context.Background(), &ateapipb.UpdateActorRequest{
-		Actor: updatedActor,
-	})
-	assertGrpcErrorRegex(t, err, codes.InvalidArgument, "actor.actor_template: Invalid value: null: field is immutable")
+	// Mutable template ref: repoint the actor at a second template.
+	tmpl2 := proto.Clone(tmpl).(*ateapipb.ActorTemplate)
+	tmpl2.Metadata = &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "tmpl2"}
+	tmpl2.Status = nil
+	if _, err := tc.client.CreateActorTemplate(context.Background(), &ateapipb.CreateActorTemplateRequest{ActorTemplate: tmpl2}); err != nil {
+		t.Fatalf("CreateActorTemplate failed: %v", err)
+	}
+
+	updatedActor.ActorTemplate = &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl2"}
+	repointed, err := tc.client.UpdateActor(context.Background(), &ateapipb.UpdateActorRequest{Actor: updatedActor})
+	if err != nil {
+		t.Fatalf("UpdateActor failed: %v", err)
+	}
+	wantActor.Metadata.Version = 3
+	wantActor.ActorTemplate = &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl2"}
+	if diff := cmp.Diff(wantActor, repointed, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {
+		t.Errorf("UpdateActor response mismatch after template repoint (-want +got):\n%s", diff)
+	}
 }
 
 // TestUpdateActor_Preconditions verifies the required version and uid guards
@@ -1223,7 +1326,6 @@ func TestActorLifecycle_WithExternalVolumes(t *testing.T) {
 	volumes := []*ateapipb.Volume{
 		{
 			Name: "data-vol",
-			Type: "ExternalVolumeTemplate",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "fast",
 				Capacity:         "20Gi",
@@ -1365,7 +1467,6 @@ func TestResumeActor_VolumeCreationFailure(t *testing.T) {
 	volumes := []*ateapipb.Volume{
 		{
 			Name: "succ-vol1",
-			Type: "ExternalVolumeTemplate",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
 				Capacity:         "10Gi",
@@ -1373,7 +1474,6 @@ func TestResumeActor_VolumeCreationFailure(t *testing.T) {
 		},
 		{
 			Name: "fail-vol2",
-			Type: "ExternalVolumeTemplate",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
 				Capacity:         "10Gi",
@@ -1509,7 +1609,6 @@ func TestResumeActor_VolumeCreationRetrySuccess(t *testing.T) {
 	volumes := []*ateapipb.Volume{
 		{
 			Name: "succ-vol1",
-			Type: "ExternalVolumeTemplate",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
 				Capacity:         "10Gi",
@@ -1517,7 +1616,6 @@ func TestResumeActor_VolumeCreationRetrySuccess(t *testing.T) {
 		},
 		{
 			Name: "retry-vol2",
-			Type: "ExternalVolumeTemplate",
 			ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
 				StorageClassName: "standard",
 				Capacity:         "10Gi",
@@ -1626,7 +1724,7 @@ func TestResumeActor(t *testing.T) {
 	tc := setupTest(t, ns)
 	defer tc.cleanup()
 
-	createTemplate(t, tc, ns)
+	tmpl := createTemplate(t, tc, ns)
 
 	podUID := createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
 
@@ -1660,7 +1758,9 @@ func TestResumeActor(t *testing.T) {
 		Metadata:      &ateapipb.ResourceMetadata{Name: name, Atespace: testAtespace},
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
 		Status: &ateapipb.ActorStatus{
-			State: ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			State:                   ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			CurrentActorTemplate:    &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+			CurrentActorTemplateUid: tmpl.GetMetadata().GetUid(),
 			WorkerAssignment: &ateapipb.WorkerAssignment{
 				Worker:          &ateapipb.ObjectRef{Name: podUID},
 				WorkerNamespace: ns,
@@ -1702,18 +1802,15 @@ func TestResumeActor(t *testing.T) {
 		SandboxClass:    "gvisor",
 		Labels:          map[string]string{poolLabelKey: ns},
 		Status: &ateapipb.WorkerStatus{
-			Assignment: &ateapipb.ActorAssignment{
-				ActorTemplateRef: &ateapipb.ObjectRef{
-					Atespace: testAtespace,
-					Name:     "tmpl1",
-				},
-				Actor: &ateapipb.ObjectRef{
-					Name:     name,
-					Atespace: testAtespace,
-				},
-				ActorUid: getResp.GetMetadata().GetUid(),
-			},
 			State: ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Allocation: &ateapipb.WorkerAllocation{
+				// Only the ceiling the worker reported.
+				Capacity: &ateapipb.WorkerResources{Actors: 1},
+				// All a listing reports of the assignments. The actor declares
+				// no compute limits, so it registers as one actor and nothing
+				// else.
+				Allocated: &ateapipb.WorkerResources{Actors: 1},
+			},
 		},
 	}
 
@@ -2009,7 +2106,7 @@ func TestSuspendActor(t *testing.T) {
 	tc := setupTest(t, ns)
 	defer tc.cleanup()
 
-	createTemplate(t, tc, ns)
+	tmpl := createTemplate(t, tc, ns)
 
 	workerName := createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
 	name := "id1"
@@ -2154,7 +2251,11 @@ func TestSuspendActor(t *testing.T) {
 	want := &ateapipb.Actor{
 		Metadata:      &ateapipb.ResourceMetadata{Name: name, Atespace: testAtespace},
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
-		Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+		Status: &ateapipb.ActorStatus{
+			State:                   ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+			CurrentActorTemplate:    &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+			CurrentActorTemplateUid: tmpl.GetMetadata().GetUid(),
+		},
 	}
 
 	if diff := cmp.Diff(want, getResp,
@@ -2198,7 +2299,7 @@ func TestPauseActor(t *testing.T) {
 	tc := setupTest(t, ns)
 	defer tc.cleanup()
 
-	createTemplate(t, tc, ns)
+	tmpl := createTemplate(t, tc, ns)
 
 	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
 
@@ -2246,6 +2347,8 @@ func TestPauseActor(t *testing.T) {
 				NodeVmsWithLocalSnapshots: []string{"node1"},
 				ContentScope:              ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			},
+			CurrentActorTemplate:    &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+			CurrentActorTemplateUid: tmpl.GetMetadata().GetUid(),
 		},
 	}
 
@@ -2367,20 +2470,12 @@ func TestResumeActor_ReleasesStaleWorkerWhenPoolBecomesIneligible(t *testing.T) 
 		}
 		switch w.GetWorkerPool() {
 		case "pool-a":
-			if wass := w.GetStatus().GetAssignment(); wass != nil {
-				got := "<nil-actor>"
-				if wass.Actor != nil {
-					got = wass.Actor.Name
-				}
-				t.Errorf("expected worker-a (now-ineligible pool-a) to be released, got actor name=%q", got)
+			if n := w.GetStatus().GetAllocation().GetAllocated().GetActors(); n != 0 {
+				t.Errorf("expected worker-a (now-ineligible pool-a) to be released, still holds %d actors", n)
 			}
 		case "pool-b":
-			if wass := w.GetStatus().GetAssignment(); wass != nil {
-				got := "<nil-actor>"
-				if wass.Actor != nil {
-					got = wass.Actor.Name
-				}
-				t.Errorf("expected worker-b to stay free (actor crashed, not migrated), got actor name=%q", got)
+			if n := w.GetStatus().GetAllocation().GetAllocated().GetActors(); n != 0 {
+				t.Errorf("expected worker-b to stay free (actor crashed, not migrated), holds %d actors", n)
 			}
 		}
 	}
@@ -2491,8 +2586,8 @@ func TestResumeActor_CrashesIfAssignedWorkerIsDraining(t *testing.T) {
 			continue
 		}
 		if w.GetWorkerPod() == assignedPod {
-			if w.GetStatus().GetAssignment() != nil {
-				t.Errorf("expected draining worker %q to be released, still assigned to %q", assignedPod, w.GetStatus().GetAssignment().GetActor().GetName())
+			if n := w.GetStatus().GetAllocation().GetAllocated().GetActors(); n != 0 {
+				t.Errorf("expected draining worker %q to be released, still holds %d actors", assignedPod, n)
 			}
 		}
 	}
@@ -3132,4 +3227,55 @@ func TestCreateActor_RejectsUnknownRequestFields(t *testing.T) {
 
 	_, err := tc.client.CreateActor(context.Background(), req)
 	assertGrpcError(t, err, codes.InvalidArgument, "request: Invalid value: unknown field with protobuf tag 9999")
+}
+
+// The assignment commits before the Actor is updated to point at it, so a
+// crash in between leaves a row no Actor references. Deleting the Actor has to
+// release it anyway: nothing else ever would, and its share of the Worker's
+// capacity would stay booked until the Worker itself went away.
+func TestDeleteActor_ReleasesAnAssignmentTheActorDoesNotReference(t *testing.T) {
+	ns := namespaceForTest("ns-delete-orphan")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+
+	createTemplate(t, tc, ns)
+	createWorkerPool(t, tc, ns, "pool-1", nil)
+	podUID := createWorkerPod(t, tc, ns, "worker-1", "node-1", "pool-1")
+
+	ctx := context.Background()
+	actor, err := tc.client.CreateActor(ctx, &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "orphaned"},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+	}})
+	if err != nil {
+		t.Fatalf("CreateActor failed: %v", err)
+	}
+	actorUID := actor.GetMetadata().GetUid()
+
+	// Bind straight through the store, leaving the Actor's backlink unset:
+	// exactly the state a crash between the two writes leaves behind.
+	if err := tc.persistence.BindActorToWorker(ctx, podUID, &ateapipb.ActorAssignment{
+		Actor:            &ateapipb.ObjectRef{Atespace: testAtespace, Name: "orphaned"},
+		ActorUid:         actorUID,
+		ActorTemplateRef: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+	}, nil); err != nil {
+		t.Fatalf("BindActorToWorker failed: %v", err)
+	}
+
+	if _, err := tc.client.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "orphaned"},
+	}); err != nil {
+		t.Fatalf("DeleteActor failed: %v", err)
+	}
+
+	if _, err := tc.persistence.GetWorkerAssignment(ctx, podUID, actorUID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("the orphaned assignment survived DeleteActor: %v", err)
+	}
+	worker, err := tc.persistence.GetWorker(ctx, podUID)
+	if err != nil {
+		t.Fatalf("GetWorker failed: %v", err)
+	}
+	if got := worker.GetStatus().GetAllocation().GetAllocated().GetActors(); got != 0 {
+		t.Errorf("worker still books %d actors after the Actor was deleted, want 0", got)
+	}
 }

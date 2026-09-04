@@ -23,7 +23,6 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
-	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -96,8 +95,9 @@ type Interface interface {
 	// Returns ErrPreconditionRequired if the precondition omits either guard,
 	// ErrNotFound if missing, ErrUIDConflict or ErrVersionConflict if the
 	// precondition no longer holds, ErrVersionConflict if the retry budget is
-	// exhausted, ErrImmutableField if the mutated actor changed a field that is
-	// immutable for its lifetime, or the mutate's error verbatim otherwise.
+	// exhausted, or the mutate's error verbatim otherwise. Immutable fields
+	// are not checked here; the service layer enforces them via declarative
+	// validation before the write.
 	UpdateActor(ctx context.Context, actorRef resources.ActorRef, precondition Precondition, mutate func(toUpdate *ateapipb.Actor) error) (*ateapipb.Actor, error)
 
 	// Removes an actor and returns the deleted resource. Returns ErrNotFound if
@@ -222,10 +222,42 @@ type Interface interface {
 	// exhausted, or the mutate's error verbatim otherwise.
 	UpdateWorker(ctx context.Context, name string, precondition Precondition, mutate func(toUpdate *ateapipb.Worker) error) (*ateapipb.Worker, error)
 
-	// Removes a worker by name and returns the deleted resource. Returns
-	// ErrNotFound if missing, or ErrUIDConflict/ErrVersionConflict if pre does
-	// not describe the worker the caller observed.
+	// Removes a worker by name, along with every assignment it holds, and
+	// returns the deleted resource. Returns ErrNotFound if missing, or
+	// ErrUIDConflict/ErrVersionConflict if pre does not describe the worker the
+	// caller observed.
 	DeleteWorker(ctx context.Context, name string, pre DeletePreconditions) (*ateapipb.Worker, error)
+
+	// Assignments and Worker allocation are updated atomically.
+
+	// BindActorToWorker assigns an Actor and updates the Worker's allocation.
+	// Rebinding the same Actor replaces its assignment.
+	//
+	// admit decides whether the Worker will take the Actor, and runs against the
+	// Worker as it stands with its row locked, so the answer cannot go stale
+	// between the check and the bind. Returning an error from it refuses the
+	// bind and is returned unchanged. It is consulted only for a new binding: an
+	// Actor already on this Worker is already counted against it.
+	//
+	// ErrNotFound if the Worker is gone.
+	BindActorToWorker(ctx context.Context, workerName string, assignment *ateapipb.ActorAssignment, admit func(*ateapipb.Worker) error) error
+
+	// ReleaseActorFromWorker removes an assignment and updates allocation,
+	// returning the Worker as it now stands so the caller can feed the
+	// watch-fed cache, which until then reports it full. It returns nil if the
+	// assignment was already absent.
+	ReleaseActorFromWorker(ctx context.Context, workerName string, actorUID string) (*ateapipb.Worker, error)
+
+	// GetWorkerAssignment returns a Worker's assignment for actorUID, or
+	// ErrNotFound when the Worker is not hosting that Actor.
+	GetWorkerAssignment(ctx context.Context, workerName, actorUID string) (*ateapipb.ActorAssignment, error)
+
+	// ListWorkerAssignments returns a page of the Actors a Worker hosts.
+	ListWorkerAssignments(ctx context.Context, workerName string, opts ListOptions) (ListResponse[*ateapipb.ActorAssignment], error)
+
+	// FindWorkerHostingActor names the Worker holding an assignment for
+	// actorUID, or ErrNotFound if none does.
+	FindWorkerHostingActor(ctx context.Context, actorUID string) (string, error)
 
 	// WatchWorkers returns an active subscription to track worker state changes.
 	// The watch's Events channel is closed when the caller calls Close, the
@@ -238,9 +270,6 @@ type Interface interface {
 	// held and renewed automatically until the returned Lease is closed.
 	// Returns ErrLeaseConflict if the lease is already held by another client.
 	AcquireLease(ctx context.Context, key string) (*Lease, error)
-
-	// DebugClearAll drop all data from the database. Useful for debugging / local testing/
-	DebugClearAll(ctx context.Context) error
 }
 
 // Precondition guards an update with the uid and version the caller observed:
@@ -278,45 +307,6 @@ func (p DeletePreconditions) Check(md *ateapipb.ResourceMetadata) error {
 	}
 	if p.Version != 0 && p.Version != md.GetVersion() {
 		return ErrVersionConflict
-	}
-	return nil
-}
-
-// CheckWorkerMutation reports whether an UpdateWorker mutation left the
-// worker's immutable identity fields alone. A backend calls it between running
-// the mutation and writing the result. It lives here, above any one backend,
-// so the rule is stated once and a second backend inherits it rather than
-// restating it.
-//
-// metadata is not checked: a backend re-stamps it from the object it read, so
-// whatever the mutation made of it is discarded either way.
-//
-// capacity is checked along with the rest because UpdateWorker replaces the
-// worker rather than patching it: a request that omits capacity is asking to
-// clear it, and silently losing a worker's compute capacity is worse than
-// rejecting the write. A future pod resize has to relax this rule first.
-//
-// A rejection wraps ErrImmutableField, so a backend can return it as-is and
-// callers still get the sentinel they map to INVALID_ARGUMENT.
-func CheckWorkerMutation(stored, mutated *ateapipb.Worker) error {
-	for _, f := range []struct {
-		name    string
-		stored  string
-		mutated string
-	}{
-		{"worker_namespace", stored.GetWorkerNamespace(), mutated.GetWorkerNamespace()},
-		{"worker_pool", stored.GetWorkerPool(), mutated.GetWorkerPool()},
-		{"worker_pod", stored.GetWorkerPod(), mutated.GetWorkerPod()},
-		{"worker_pod_uid", stored.GetWorkerPodUid(), mutated.GetWorkerPodUid()},
-		{"node_name", stored.GetNodeName(), mutated.GetNodeName()},
-		{"ip", stored.GetIp(), mutated.GetIp()},
-	} {
-		if f.stored != f.mutated {
-			return fmt.Errorf("%w: %s changed from %q to %q", ErrImmutableField, f.name, f.stored, f.mutated)
-		}
-	}
-	if !proto.Equal(stored.GetCapacity(), mutated.GetCapacity()) {
-		return fmt.Errorf("%w: capacity changed from %v to %v", ErrImmutableField, stored.GetCapacity(), mutated.GetCapacity())
 	}
 	return nil
 }

@@ -72,9 +72,9 @@ func mustMetric(t *testing.T, reader *sdkmetric.ManualReader, name string) metri
 }
 
 func worker(namespace, pool, class string, assigned bool) *ateapipb.Worker {
-	w := &ateapipb.Worker{WorkerNamespace: namespace, WorkerPool: pool, SandboxClass: class, Status: &ateapipb.WorkerStatus{}}
+	w := &ateapipb.Worker{WorkerNamespace: namespace, WorkerPool: pool, SandboxClass: class, Status: &ateapipb.WorkerStatus{Allocation: &ateapipb.WorkerAllocation{}}}
 	if assigned {
-		w.Status.Assignment = &ateapipb.ActorAssignment{}
+		w.Status.Allocation.Allocated = &ateapipb.WorkerResources{Actors: 1}
 	}
 	return w
 }
@@ -213,9 +213,9 @@ func TestLifecycleOpDurationShape(t *testing.T) {
 			WorkerAssignment: &ateapipb.WorkerAssignment{WorkerNamespace: "ate-workers", WorkerPool: "pool-a"},
 		},
 	}
-	template := mustTemplateFromCRD(&atev1alpha1.ActorTemplate{
-		Spec: atev1alpha1.ActorTemplateSpec{SandboxClass: atev1alpha1.SandboxClassGvisor},
-	})
+	template := &ateapipb.ActorTemplate{
+		SandboxConfig: &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR},
+	}
 	inst.recordLifecycleOp(context.Background(), ateattr.OperationResume, time.Now(), nil,
 		lifecycleOpAttrs(actor, template, ateattr.SnapshotKindLatest, ateattr.SnapshotScopeDataOnGolden)...)
 

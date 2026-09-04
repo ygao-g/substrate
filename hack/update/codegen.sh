@@ -62,6 +62,7 @@ function codegen::protobuf() {
         (
             cd "${dir}" || exit 1
             "${ROOT}"/hack/protoc.sh \
+                -I "${ROOT}" -I . \
                 --plugin=protoc-gen-go="${protoc_gen_go}" \
                 --plugin=protoc-gen-go-grpc="${protoc_gen_go_rpc}" \
                 --go_out=paths=source_relative:. \

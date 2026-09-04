@@ -45,7 +45,7 @@ const (
 	// Captures process memory, root filesystem changes, and durable data.
 	SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL SnapshotContentScope = 1
 	// Captures durable data without process memory or root filesystem changes.
-	SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA SnapshotContentScope = 2
+	SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA SnapshotContentScope = 2 // Keep this in sync with the maximums on fields of this type.
 )
 
 // Enum value maps for SnapshotContentScope.
@@ -216,7 +216,7 @@ type SandboxClass int32
 const (
 	SandboxClass_SANDBOX_CLASS_UNSPECIFIED SandboxClass = 0
 	SandboxClass_SANDBOX_CLASS_GVISOR      SandboxClass = 1
-	SandboxClass_SANDBOX_CLASS_MICROVM     SandboxClass = 2
+	SandboxClass_SANDBOX_CLASS_MICROVM     SandboxClass = 2 // Keep this in sync with SandboxConfig.sandbox_class's maximum.
 )
 
 // Enum value maps for SandboxClass.
@@ -271,7 +271,7 @@ const (
 	ResumeSource_RESUME_SOURCE_COLD_BOOT ResumeSource = 1
 	// Restores with the version's golden snapshot and the actor's own
 	// durable data.
-	ResumeSource_RESUME_SOURCE_GOLDEN ResumeSource = 2
+	ResumeSource_RESUME_SOURCE_GOLDEN ResumeSource = 2 // Keep this in sync with OnResumeConfig.from_data's maximum.
 )
 
 // Enum value maps for ResumeSource.
@@ -322,7 +322,7 @@ const (
 	ActorMetadataField_ACTOR_METADATA_FIELD_UNSPECIFIED ActorMetadataField = 0
 	ActorMetadataField_ACTOR_METADATA_FIELD_NAME        ActorMetadataField = 1
 	ActorMetadataField_ACTOR_METADATA_FIELD_ATESPACE    ActorMetadataField = 2
-	ActorMetadataField_ACTOR_METADATA_FIELD_UID         ActorMetadataField = 3
+	ActorMetadataField_ACTOR_METADATA_FIELD_UID         ActorMetadataField = 3 // Keep this in sync with ActorMetadataItem.field's maximum.
 )
 
 // Enum value maps for ActorMetadataField.
@@ -375,7 +375,7 @@ const (
 	// Ready; schedulable.
 	WorkerState_WORKER_STATE_ACTIVE WorkerState = 1
 	// Pod terminating. Not schedulable.
-	WorkerState_WORKER_STATE_DRAINING WorkerState = 2
+	WorkerState_WORKER_STATE_DRAINING WorkerState = 2 // Keep this in sync with WorkerStatus.state's maximum.
 )
 
 // Enum value maps for WorkerState.
@@ -423,7 +423,7 @@ type ActorCertificatePurpose int32
 
 const (
 	ActorCertificatePurpose_ACTOR_CERTIFICATE_PURPOSE_UNSPECIFIED ActorCertificatePurpose = 0
-	ActorCertificatePurpose_ACTOR_CERTIFICATE_PURPOSE_ATUNNEL     ActorCertificatePurpose = 1
+	ActorCertificatePurpose_ACTOR_CERTIFICATE_PURPOSE_ATUNNEL     ActorCertificatePurpose = 1 // Keep this in sync with MintCertRequest.purpose's maximum.
 )
 
 // Enum value maps for ActorCertificatePurpose.
@@ -474,7 +474,7 @@ const (
 	// Volume successfully created in the storage system.
 	ExternalVolume_STATUS_CREATED ExternalVolume_Status = 2
 	// Volume being deleted from the storage system.
-	ExternalVolume_STATUS_DELETING ExternalVolume_Status = 3
+	ExternalVolume_STATUS_DELETING ExternalVolume_Status = 3 // Keep this in sync with ExternalVolume.status's maximum.
 )
 
 // Enum value maps for ExternalVolume_Status.
@@ -522,12 +522,29 @@ func (ExternalVolume_Status) EnumDescriptor() ([]byte, []int) {
 
 type LocalSnapshotInfo struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The name of the local checkpoint on each of the nodes below.
+	// The name of the local checkpoint on each of the nodes below. Checkpoint
+	// names are server-generated UUIDs, but any resource name is valid here.
+	//
+	// +k8s:optional
+	// +k8s:format=k8s-short-name
 	SnapshotName string `protobuf:"bytes,1,opt,name=snapshot_name,json=snapshotName,proto3" json:"snapshot_name,omitempty"`
 	// Node VMs that have local snapshots for this actor, while it's PAUSED.
+	// Each node appears at most once.
+	//
+	// TODO: revisit this design; a snapshot propagated to every node would
+	// grow this list with the fleet, and the bound below is provisional.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=256
+	// +k8s:listType=set
+	// +k8s:eachVal=+k8s:format=k8s-long-name
 	NodeVmsWithLocalSnapshots []string `protobuf:"bytes,2,rep,name=node_vms_with_local_snapshots,json=nodeVmsWithLocalSnapshots,proto3" json:"node_vms_with_local_snapshots,omitempty"`
 	// Scope the pause checkpoint captured (the template's onPause at pause
-	// time).
+	// time). UNSPECIFIED is tolerated for compatibility and reads as FULL.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	// +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
 	ContentScope  SnapshotContentScope `protobuf:"varint,3,opt,name=content_scope,json=contentScope,proto3,enum=ateapi.SnapshotContentScope" json:"content_scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -772,16 +789,51 @@ func (x *ResourceMetadata) GetUpdateTime() *timestamppb.Timestamp {
 
 type ExternalVolume struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Name of the volume specified in the actor template.
+	// Name of the volume specified in the actor template. Template volume
+	// names are DNS labels.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-short-name
+	// +k8s:update=NoModify
+	// +k8s:update=NoUnset # set-once; immutable would reject the create
+	// ratchet's nil->set when the final object is validated as an update
 	VolumeName string `protobuf:"bytes,1,opt,name=volume_name,json=volumeName,proto3" json:"volume_name,omitempty"`
 	// The globally unique volume_id returned from the storage system.
-	// This will be initially empty during volume creation
+	// This will be initially empty during volume creation. Its format is the
+	// storage system's own, so it is only bounded and checked for control
+	// characters (U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+007F-U+009F).
+	// The CSI spec caps IDs at 128 bytes but does not require it, so allow
+	// some slack. Set once when provisioning completes, then never changed.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=256
+	// +k8s:update=NoModify
+	// +k8s:update=NoUnset
+	// +k8s:customValidation # no control characters
 	StorageVolumeId string `protobuf:"bytes,2,opt,name=storage_volume_id,json=storageVolumeId,proto3" json:"storage_volume_id,omitempty"`
-	// Internal volume plugin name or CSI driver name.
-	VolumeType string                `protobuf:"bytes,3,opt,name=volume_type,json=volumeType,proto3" json:"volume_type,omitempty"`
-	Status     ExternalVolume_Status `protobuf:"varint,4,opt,name=status,proto3,enum=ateapi.ExternalVolume_Status" json:"status,omitempty"`
+	// Internal volume plugin name or CSI driver name, from the StorageClass
+	// provisioner. Must be a DNS subdomain, optionally prefixed with
+	// "substrate.io/" (per the CSI spec's driver-name syntax).
+	//
+	// +k8s:required
+	// +k8s:maxLength=253
+	// +k8s:update=NoModify
+	// +k8s:update=NoUnset # set-once, like volume_name above
+	// +k8s:customValidation
+	VolumeType string `protobuf:"bytes,3,opt,name=volume_type,json=volumeType,proto3" json:"volume_type,omitempty"`
+	// +k8s:optional
+	// +k8s:minimum=1
+	// +k8s:maximum=3 # keep this in sync with the Status enum
+	Status ExternalVolume_Status `protobuf:"varint,4,opt,name=status,proto3,enum=ateapi.ExternalVolume_Status" json:"status,omitempty"`
 	// volume_context contains metadata returned by the CSI driver during volume
-	// provisioning, needed by the node plugin for mounting (e.g. attachment info).
+	// provisioning, needed by the node plugin for mounting (e.g. attachment
+	// info). Keys and values are the driver's own, so they are only bounded,
+	// not validated.
+	//
+	// +k8s:optional
+	// +k8s:maxProperties=32
+	// +k8s:eachKey=+k8s:maxLength=128
+	// +k8s:eachVal=+k8s:maxLength=256
 	VolumeContext map[string]string `protobuf:"bytes,5,rep,name=volume_context,json=volumeContext,proto3" json:"volume_context,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -859,23 +911,10 @@ type Actor struct {
 	// +k8s:required
 	// +k8s:subfield(atespace)=+k8s:required
 	Metadata *ResourceMetadata `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	// The template is named by the legacy CRD namespace/name pair below or by
-	// the substrate actor_template ref; actor_template takes precedence when
-	// set.
-	//
-	// TODO: delete both fields once we start using actor_template below.
-	// +k8s:optional
-	// +k8s:format=k8s-short-name
-	// +k8s:immutable
-	ActorTemplateNamespace string `protobuf:"bytes,2,opt,name=actor_template_namespace,json=actorTemplateNamespace,proto3" json:"actor_template_namespace,omitempty"`
-	// +k8s:optional
-	// +k8s:format=k8s-long-name
-	// +k8s:immutable
-	ActorTemplateName string `protobuf:"bytes,3,opt,name=actor_template_name,json=actorTemplateName,proto3" json:"actor_template_name,omitempty"`
 	// TODO: replace with full actor_template spec if we decide to make each Actor self-contained.
-	// +k8s:optional # TODO: this should be required?
+	// +k8s:required
 	// +k8s:subfield(atespace)=+k8s:required
-	// +k8s:immutable # TODO: is this mutable?
+	// +k8s:mutable
 	ActorTemplate *ObjectRef `protobuf:"bytes,4,opt,name=actor_template,json=actorTemplate,proto3" json:"actor_template,omitempty"`
 	// worker_selector is the per-actor placement constraint. The scheduler
 	// evaluates the AND of this selector and the template's workerSelector to
@@ -938,20 +977,6 @@ func (x *Actor) GetMetadata() *ResourceMetadata {
 	return nil
 }
 
-func (x *Actor) GetActorTemplateNamespace() string {
-	if x != nil {
-		return x.ActorTemplateNamespace
-	}
-	return ""
-}
-
-func (x *Actor) GetActorTemplateName() string {
-	if x != nil {
-		return x.ActorTemplateName
-	}
-	return ""
-}
-
 func (x *Actor) GetActorTemplate() *ObjectRef {
 	if x != nil {
 		return x.ActorTemplate
@@ -998,6 +1023,7 @@ type EgressPolicy struct {
 	//
 	// +k8s:optional
 	// +k8s:maxItems=256
+	// +k8s:listType=atomic # rule order matters
 	Rules         []*EgressRule `protobuf:"bytes,2,rep,name=rules,proto3" json:"rules,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1399,30 +1425,68 @@ type ActorStatus struct {
 	// +k8s:optional
 	// +k8s:update=NoModify # can be set and cleared, but not changed in place
 	WorkerAssignment *WorkerAssignment `protobuf:"bytes,2,opt,name=worker_assignment,json=workerAssignment,proto3" json:"worker_assignment,omitempty"`
-	// TODO: Add DV (optional, maxLength?)
+	// The name the in-progress durable snapshot will be stored under. Snapshot
+	// names are server-generated UUIDs, but any resource name is valid here.
+	//
+	// +k8s:optional
+	// +k8s:format=k8s-short-name
 	InProgressSnapshotName string `protobuf:"bytes,3,opt,name=in_progress_snapshot_name,json=inProgressSnapshotName,proto3" json:"in_progress_snapshot_name,omitempty"`
-	// The latest durable snapshot created for this Actor.
-	// +k8s:opaqueType
-	// TODO: Add DV (required?)
+	// The latest durable snapshot created for this Actor. Unset until the first
+	// snapshot exists.
+	//
+	// +k8s:optional
+	// +k8s:subfield(atespace)=+k8s:required
 	LatestSnapshot *ObjectRef `protobuf:"bytes,4,opt,name=latest_snapshot,json=latestSnapshot,proto3" json:"latest_snapshot,omitempty"`
 	// Node-local state used only while the Actor is paused.
-	// TODO: Add DV (optional, need to recurse into this type)
+	//
+	// +k8s:optional
 	LocalSnapshotInfo *LocalSnapshotInfo `protobuf:"bytes,5,opt,name=local_snapshot_info,json=localSnapshotInfo,proto3" json:"local_snapshot_info,omitempty"`
 	// Actor version captured when the current durable snapshot began.
-	// TODO: Add DV (optional, minimum?)
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
 	InProgressSnapshotSourceActorVersion int64 `protobuf:"varint,6,opt,name=in_progress_snapshot_source_actor_version,json=inProgressSnapshotSourceActorVersion,proto3" json:"in_progress_snapshot_source_actor_version,omitempty"`
 	// Volumes attached to the actor. These volumes only live as long as the actor.
-	// They are deleted when the actor is deleted.
-	// TODO: Add DV (optional, need to recurse into this type, immutable?)
+	// They are deleted when the actor is deleted. Each template volume
+	// appears at most once.
+	//
+	// TODO: consider a literal map keyed by volume_name instead of a list-map.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=32 # matches the template's volumes bound
+	// +k8s:listType=map
+	// +k8s:listMapKey=volume_name
 	ActorVolumes []*ExternalVolume `protobuf:"bytes,7,rep,name=actor_volumes,json=actorVolumes,proto3" json:"actor_volumes,omitempty"`
-	// TODO: Add DV (optional, maxLength?)
+	// The name of the in-progress node-local checkpoint. Like durable snapshot
+	// names, these are server-generated UUIDs.
+	//
+	// +k8s:optional
+	// +k8s:format=k8s-short-name
 	InProgressLocalSnapshotName string `protobuf:"bytes,8,opt,name=in_progress_local_snapshot_name,json=inProgressLocalSnapshotName,proto3" json:"in_progress_local_snapshot_name,omitempty"`
 	// How this Actor was seeded from an ActorSnapshot at CreateActor. Unset if
-	// the Actor was not created from a snapshot.
-	// TODO: Add DV (optional, need to recurse into this type, immutable?)
+	// the Actor was not created from a snapshot. Set once at creation and
+	// never changed afterward.
+	//
+	// +k8s:optional
+	// +k8s:update=NoModify
+	// +k8s:update=NoUnset # together: set once, never changed, never cleared.
+	// Not immutable: create validates the final object against the request
+	// with op=Update, and immutable rejects that nil->set.
 	SourceSnapshot *ActorSourceSnapshotStatus `protobuf:"bytes,9,opt,name=source_snapshot,json=sourceSnapshot,proto3" json:"source_snapshot,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The actor template the Actor's guest state is currently built on: the
+	// one its latest sprint booted with, recorded when the resume (or first
+	// boot) commits RUNNING. Diverges from the Actor's actor_template ref when
+	// a suspended Actor is repointed at a replacement template.
+	//
+	// +k8s:optional
+	CurrentActorTemplate *ObjectRef `protobuf:"bytes,10,opt,name=current_actor_template,json=currentActorTemplate,proto3" json:"current_actor_template,omitempty"`
+	// The UID of the actor template the Actor's guest state is currently
+	// built on, recorded when the resume (or first boot) commits RUNNING.
+	//
+	// +k8s:optional
+	CurrentActorTemplateUid string `protobuf:"bytes,11,opt,name=current_actor_template_uid,json=currentActorTemplateUid,proto3" json:"current_actor_template_uid,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *ActorStatus) Reset() {
@@ -1518,15 +1582,34 @@ func (x *ActorStatus) GetSourceSnapshot() *ActorSourceSnapshotStatus {
 	return nil
 }
 
+func (x *ActorStatus) GetCurrentActorTemplate() *ObjectRef {
+	if x != nil {
+		return x.CurrentActorTemplate
+	}
+	return nil
+}
+
+func (x *ActorStatus) GetCurrentActorTemplateUid() string {
+	if x != nil {
+		return x.CurrentActorTemplateUid
+	}
+	return ""
+}
+
 // ActorSourceSnapshotStatus records what an Actor's source_snapshot_tag
 // resolved to at CreateActor time. Set once, immutable afterward.
 type ActorSourceSnapshotStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The (atespace, name) of the snapshot the tag resolved to at
 	// creation time.
-	// +k8s:opaqueType
+	//
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	Snapshot *ObjectRef `protobuf:"bytes,1,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
 	// UID of the snapshot resolved at creation time.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-uuid
 	SnapshotUid   string `protobuf:"bytes,2,opt,name=snapshot_uid,json=snapshotUid,proto3" json:"snapshot_uid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1755,14 +1838,12 @@ func (x *ActorSnapshot) GetStatus() *ActorSnapshotStatus {
 type ActorSnapshotStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// +k8s:opaqueType
-	SourceActor            *ObjectRef           `protobuf:"bytes,1,opt,name=source_actor,json=sourceActor,proto3" json:"source_actor,omitempty"`
-	SourceActorUid         string               `protobuf:"bytes,2,opt,name=source_actor_uid,json=sourceActorUid,proto3" json:"source_actor_uid,omitempty"`
-	SourceActorVersion     int64                `protobuf:"varint,3,opt,name=source_actor_version,json=sourceActorVersion,proto3" json:"source_actor_version,omitempty"`
-	ActorTemplateNamespace string               `protobuf:"bytes,4,opt,name=actor_template_namespace,json=actorTemplateNamespace,proto3" json:"actor_template_namespace,omitempty"`
-	ActorTemplateName      string               `protobuf:"bytes,5,opt,name=actor_template_name,json=actorTemplateName,proto3" json:"actor_template_name,omitempty"`
-	ActorTemplateUid       string               `protobuf:"bytes,6,opt,name=actor_template_uid,json=actorTemplateUid,proto3" json:"actor_template_uid,omitempty"`
-	ContentScope           SnapshotContentScope `protobuf:"varint,7,opt,name=content_scope,json=contentScope,proto3,enum=ateapi.SnapshotContentScope" json:"content_scope,omitempty"`
-	SnapshotUri            string               `protobuf:"bytes,8,opt,name=snapshot_uri,json=snapshotUri,proto3" json:"snapshot_uri,omitempty"`
+	SourceActor        *ObjectRef           `protobuf:"bytes,1,opt,name=source_actor,json=sourceActor,proto3" json:"source_actor,omitempty"`
+	SourceActorUid     string               `protobuf:"bytes,2,opt,name=source_actor_uid,json=sourceActorUid,proto3" json:"source_actor_uid,omitempty"`
+	SourceActorVersion int64                `protobuf:"varint,3,opt,name=source_actor_version,json=sourceActorVersion,proto3" json:"source_actor_version,omitempty"`
+	ActorTemplateUid   string               `protobuf:"bytes,6,opt,name=actor_template_uid,json=actorTemplateUid,proto3" json:"actor_template_uid,omitempty"`
+	ContentScope       SnapshotContentScope `protobuf:"varint,7,opt,name=content_scope,json=contentScope,proto3,enum=ateapi.SnapshotContentScope" json:"content_scope,omitempty"`
+	SnapshotUri        string               `protobuf:"bytes,8,opt,name=snapshot_uri,json=snapshotUri,proto3" json:"snapshot_uri,omitempty"`
 	// Immutable reference to the actor_template where the snapshot was created from.
 	// +k8s:opaqueType
 	ActorTemplate *ObjectRef `protobuf:"bytes,9,opt,name=actor_template,json=actorTemplate,proto3" json:"actor_template,omitempty"`
@@ -1819,20 +1900,6 @@ func (x *ActorSnapshotStatus) GetSourceActorVersion() int64 {
 		return x.SourceActorVersion
 	}
 	return 0
-}
-
-func (x *ActorSnapshotStatus) GetActorTemplateNamespace() string {
-	if x != nil {
-		return x.ActorTemplateNamespace
-	}
-	return ""
-}
-
-func (x *ActorSnapshotStatus) GetActorTemplateName() string {
-	if x != nil {
-		return x.ActorTemplateName
-	}
-	return ""
 }
 
 func (x *ActorSnapshotStatus) GetActorTemplateUid() string {
@@ -2046,21 +2113,36 @@ func (x *ObjectRef) GetName() string {
 type ActorTemplate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Common resource metadata: atespace, name, uid, version, timestamps.
-	// +k8s:opaqueType
+	//
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	Metadata *ResourceMetadata `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
 	// worker_selector restricts which worker pools actors from this template
 	// may use.
 	//
-	// +k8s:opaqueType
-	WorkerSelector *Selector    `protobuf:"bytes,2,opt,name=worker_selector,json=workerSelector,proto3" json:"worker_selector,omitempty"`
-	Containers     []*Container `protobuf:"bytes,3,rep,name=containers,proto3" json:"containers,omitempty"`
 	// +k8s:optional
-	Volumes         []*Volume        `protobuf:"bytes,4,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	WorkerSelector *Selector `protobuf:"bytes,2,opt,name=worker_selector,json=workerSelector,proto3" json:"worker_selector,omitempty"`
+	// +k8s:required # at least one container
+	// +k8s:maxItems=10
+	// +k8s:listType=map
+	// +k8s:listMapKey=name
+	Containers []*Container `protobuf:"bytes,3,rep,name=containers,proto3" json:"containers,omitempty"`
+	// +k8s:optional
+	// +k8s:maxItems=32
+	// +k8s:listType=map
+	// +k8s:listMapKey=name
+	Volumes []*Volume `protobuf:"bytes,4,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	// +k8s:required
 	SnapshotsConfig *SnapshotsConfig `protobuf:"bytes,5,opt,name=snapshots_config,json=snapshotsConfig,proto3" json:"snapshots_config,omitempty"`
 	// sandbox_config selects the sandbox runtime this version's actors run on.
+	//
+	// +k8s:required
 	SandboxConfig *SandboxConfig `protobuf:"bytes,6,opt,name=sandbox_config,json=sandboxConfig,proto3" json:"sandbox_config,omitempty"`
 	// Resource usage configuration.
-	Resources     *Resources           `protobuf:"bytes,7,opt,name=resources,proto3" json:"resources,omitempty"`
+	//
+	// +k8s:optional
+	Resources *Resources `protobuf:"bytes,7,opt,name=resources,proto3" json:"resources,omitempty"`
+	// +k8s:optional
 	Status        *ActorTemplateStatus `protobuf:"bytes,8,opt,name=status,proto3" json:"status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2153,8 +2235,17 @@ func (x *ActorTemplate) GetStatus() *ActorTemplateStatus {
 }
 
 type Resources struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Limits        []*Limits              `protobuf:"bytes,1,rep,name=limits,proto3" json:"limits,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// limits is the maximum amount of compute resources allowed. Only "cpu"
+	// and "memory" are supported, each at most once, and each quantity must be
+	// greater than zero; the cpu limit must be less than 1000 cores.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=2
+	// +k8s:listType=map
+	// +k8s:listMapKey=name
+	// +k8s:customValidation # names, quantity parse/positivity, cpu bound
+	Limits        []*Limits `protobuf:"bytes,1,rep,name=limits,proto3" json:"limits,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2197,9 +2288,16 @@ func (x *Resources) GetLimits() []*Limits {
 }
 
 type Limits struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Quantity      string                 `protobuf:"bytes,2,opt,name=quantity,proto3" json:"quantity,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// +k8s:required
+	// +k8s:maxLength=16 # the hook on Resources.limits restricts values to cpu/memory
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// quantity is in Kubernetes resource.Quantity string form (e.g. "500m",
+	// "2Gi").
+	//
+	// +k8s:required
+	// +k8s:maxLength=32 # the hook on Resources.limits requires a parseable quantity
+	Quantity      string `protobuf:"bytes,2,opt,name=quantity,proto3" json:"quantity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2256,8 +2354,7 @@ type GoldenSnapshotStatus struct {
 	// +k8s:opaqueType
 	GoldenSnapshot *ObjectRef `protobuf:"bytes,1,opt,name=golden_snapshot,json=goldenSnapshot,proto3" json:"golden_snapshot,omitempty"`
 	// take_golden_snapshot_at is when the golden-actor warmup ends and the
-	// golden snapshot may be taken. Mirrors the CRD's status.takeGoldenSnapshotAt
-	// cmd/atecontroller/internal/controllers/actortemplate_controller.go
+	// golden snapshot may be taken.
 	TakeGoldenSnapshotAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=take_golden_snapshot_at,json=takeGoldenSnapshotAt,proto3" json:"take_golden_snapshot_at,omitempty"`
 	ErrorMessage         string                 `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
 	unknownFields        protoimpl.UnknownFields
@@ -2363,10 +2460,16 @@ func (x *ActorTemplateStatus) GetGoldenSnapshotStatus() *GoldenSnapshotStatus {
 type SandboxConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// sandbox_class selects the sandbox runtime family.
-	// Required; must be specified..
+	//
+	// +k8s:required
+	// +k8s:minimum=1
+	// +k8s:maximum=2 # keep this in sync with the SandboxClass enum
 	SandboxClass SandboxClass `protobuf:"varint,1,opt,name=sandbox_class,json=sandboxClass,proto3,enum=ateapi.SandboxClass" json:"sandbox_class,omitempty"`
 	// config_name names the cluster-scoped SandboxConfig Kubernetes object
 	// supplying the sandbox binaries. Required; must match sandbox_class.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-long-name
 	ConfigName    string `protobuf:"bytes,2,opt,name=config_name,json=configName,proto3" json:"config_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2416,18 +2519,34 @@ func (x *SandboxConfig) GetConfigName() string {
 	return ""
 }
 
+// +k8s:customValidation # on_commit must be a subset of on_pause
 type SnapshotsConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// on_pause selects what is captured during pause actor.
+	// on_pause selects what is captured during pause actor. UNSPECIFIED is
+	// tolerated for compatibility and reads as FULL.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	// +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
 	OnPause SnapshotContentScope `protobuf:"varint,1,opt,name=on_pause,json=onPause,proto3,enum=ateapi.SnapshotContentScope" json:"on_pause,omitempty"`
 	// on_commit selects what captures.
 	// Must be a subset of on_pause: FULL allows FULL or DATA, DATA allows DATA.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	// +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
 	OnCommit SnapshotContentScope `protobuf:"varint,2,opt,name=on_commit,json=onCommit,proto3,enum=ateapi.SnapshotContentScope" json:"on_commit,omitempty"`
 	// on_resume selects, per snapshot situation, what supplies the guest state
 	// at resume. Unset means the defaults documented on OnResumeConfig.
+	//
+	// +k8s:optional
 	OnResume *OnResumeConfig `protobuf:"bytes,3,opt,name=on_resume,json=onResume,proto3" json:"on_resume,omitempty"`
 	// storage_location is the base object-storage URI snapshots of actors on
 	// this version are stored under. Required.
+	//
+	// +k8s:required
+	// +k8s:maxLength=1024 # bound only; object-storage URI formats vary
+	// TODO: validate that this is a well-formed object-storage URI
 	StorageLocation string `protobuf:"bytes,4,opt,name=storage_location,json=storageLocation,proto3" json:"storage_location,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -2498,7 +2617,11 @@ func (x *SnapshotsConfig) GetStorageLocation() string {
 type OnResumeConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// from_data applies when the resume uses a DATA-scope snapshot (from
-	// on_pause or on_commit).
+	// on_pause or on_commit). UNSPECIFIED selects the documented default.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	// +k8s:maximum=2 # keep this in sync with the ResumeSource enum
 	FromData      ResumeSource `protobuf:"varint,1,opt,name=from_data,json=fromData,proto3,enum=ateapi.ResumeSource" json:"from_data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2544,25 +2667,64 @@ func (x *OnResumeConfig) GetFromData() ResumeSource {
 // Container is a single application container of an ActorTemplate.
 type Container struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Image string                 `protobuf:"bytes,2,opt,name=image,proto3" json:"image,omitempty"`
+	// +k8s:required
+	// +k8s:format=k8s-short-name
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// +k8s:required
+	// +k8s:maxLength=512 # matches ImageVolumeSource.reference's bound
+	// TODO: validate that this is a well-formed image reference
+	Image string `protobuf:"bytes,2,opt,name=image,proto3" json:"image,omitempty"`
 	// Entrypoint array; when set, the image's ENTRYPOINT and CMD are both
 	// ignored and the process argv is command + args. Unlike Kubernetes,
 	// $(VAR_NAME) references are NOT expanded.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=64
+	// +k8s:listType=atomic
+	// +k8s:eachVal=+k8s:maxLength=4096 # argv strings; guardrail, not a contract
 	Command []string `protobuf:"bytes,3,rep,name=command,proto3" json:"command,omitempty"`
 	// Arguments to the entrypoint; the image's CMD is used if unset (unless
 	// command is set, which discards the image's CMD).
-	Args []string  `protobuf:"bytes,4,rep,name=args,proto3" json:"args,omitempty"`
-	Env  []*EnvVar `protobuf:"bytes,5,rep,name=env,proto3" json:"env,omitempty"`
+	//
+	// +k8s:optional
+	// +k8s:maxItems=64
+	// +k8s:listType=atomic
+	// +k8s:eachVal=+k8s:maxLength=4096 # argv strings; guardrail, not a contract
+	Args []string `protobuf:"bytes,4,rep,name=args,proto3" json:"args,omitempty"`
+	// Env variables to set in the container's process environment. Unlike
+	// Kubernetes, $(VAR_NAME) references are NOT expanded in this field.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=32
+	// +k8s:listType=map # each variable is set at most once
+	// +k8s:listMapKey=name
+	Env []*EnvVar `protobuf:"bytes,5,rep,name=env,proto3" json:"env,omitempty"`
 	// readyz is an optional HTTP readiness probe; when set the actor is not
 	// ready until the endpoint returns 200.
-	Readyz       *ContainerReadyz `protobuf:"bytes,6,opt,name=readyz,proto3" json:"readyz,omitempty"`
-	VolumeMounts []*VolumeMount   `protobuf:"bytes,7,rep,name=volume_mounts,json=volumeMounts,proto3" json:"volume_mounts,omitempty"`
+	//
+	// +k8s:optional
+	Readyz *ContainerReadyz `protobuf:"bytes,6,opt,name=readyz,proto3" json:"readyz,omitempty"`
+	// Each volume may be mounted at most once per container.
+	//
+	// TODO: Kubernetes permits mounting a single volume at multiple paths (which
+	// requires keying by mountPath). We restrict it to one mount per volume (keyed
+	// by name). Note that keying by name means DV will not catch
+	// two different volumes mounted to the same path.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=32
+	// +k8s:listType=map
+	// +k8s:listMapKey=name
+	VolumeMounts []*VolumeMount `protobuf:"bytes,7,rep,name=volume_mounts,json=volumeMounts,proto3" json:"volume_mounts,omitempty"`
 	// security_context adjusts the container's security settings. Unset leaves
 	// the default capability set.
+	//
+	// +k8s:optional
 	SecurityContext *SecurityContext `protobuf:"bytes,8,opt,name=security_context,json=securityContext,proto3" json:"security_context,omitempty"`
 	// resources carries this container's compute limits, enforced inside the
 	// actor's sandbox. Only cpu and memory limits are supported.
+	//
+	// +k8s:optional
 	Resources     *Resources `protobuf:"bytes,9,opt,name=resources,proto3" json:"resources,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2666,6 +2828,8 @@ func (x *Container) GetResources() *Resources {
 type SecurityContext struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// capabilities adjusts the Linux capabilities of the container's process.
+	//
+	// +k8s:optional
 	Capabilities  *Capabilities `protobuf:"bytes,1,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2714,9 +2878,21 @@ func (x *SecurityContext) GetCapabilities() *Capabilities {
 // removes the whole default set.
 type Capabilities struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// add lists capabilities to grant on top of the default set.
+	// add lists capabilities to grant on top of the default set. "ALL" is
+	// rejected: name the individual capabilities the container needs.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=64
+	// +k8s:listType=set
+	// +k8s:customValidation # capability grammar; "ALL" not accepted
 	Add []string `protobuf:"bytes,1,rep,name=add,proto3" json:"add,omitempty"`
-	// drop lists capabilities to remove from the default set.
+	// drop lists capabilities to remove from the default set. "ALL" drops the
+	// whole set, so drop+add expresses an exact set rather than a relative one.
+	//
+	// +k8s:optional
+	// +k8s:maxItems=64
+	// +k8s:listType=set
+	// +k8s:customValidation # capability grammar
 	Drop          []string `protobuf:"bytes,2,rep,name=drop,proto3" json:"drop,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2771,8 +2947,15 @@ func (x *Capabilities) GetDrop() []string {
 type EnvVar struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name may be any printable ASCII character except '='.
+	//
+	// +k8s:required
+	// +k8s:maxLength=256 # guardrail;
+	// +k8s:customValidation # printable ASCII except '='
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// value is the literal value.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=32768 # guardrail;
 	Value         string `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2826,9 +3009,15 @@ func (x *EnvVar) GetValue() string {
 type ContainerReadyz struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// http_get specifies the HTTP request to perform. Required.
+	//
+	// +k8s:required
 	HttpGet *HTTPGetAction `protobuf:"bytes,1,opt,name=http_get,json=httpGet,proto3" json:"http_get,omitempty"`
 	// timeout_seconds bounds how long to poll http_get before failing the
 	// actor start. 0 means the server-applied default (30s).
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	// +k8s:maximum=3600
 	TimeoutSeconds int32 `protobuf:"varint,2,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -2881,9 +3070,17 @@ func (x *ContainerReadyz) GetTimeoutSeconds() int32 {
 // HTTPGetAction describes an HTTP GET against the container's interior IP.
 type HTTPGetAction struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// path defaults to "/readyz".
-	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Port          int32  `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
+	// path defaults to "/readyz". Must be a URL path starting with "/", using
+	// only RFC 3986 path-segment characters, without query or fragment.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=1024
+	// +k8s:customValidation # RFC 3986 path shape; no regex/pattern tag exists
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// +k8s:required
+	// +k8s:minimum=1
+	// +k8s:maximum=65535
+	Port          int32 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2935,18 +3132,27 @@ func (x *HTTPGetAction) GetPort() int32 {
 type Volume struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name of the volume. Must be a DNS label.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-short-name
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Exactly one of durable_dir / external_volume_template / image /
 	// system_info must be set.
-	DurableDir             *DurableDirVolumeSource `protobuf:"bytes,2,opt,name=durable_dir,json=durableDir,proto3" json:"durable_dir,omitempty"`
+	//
+	// +k8s:optional
+	// +k8s:unionMember
+	DurableDir *DurableDirVolumeSource `protobuf:"bytes,2,opt,name=durable_dir,json=durableDir,proto3" json:"durable_dir,omitempty"`
+	// +k8s:optional
+	// +k8s:unionMember
 	ExternalVolumeTemplate *ExternalVolumeTemplate `protobuf:"bytes,3,opt,name=external_volume_template,json=externalVolumeTemplate,proto3" json:"external_volume_template,omitempty"`
 	// +k8s:optional
+	// +k8s:unionMember
 	SystemInfo *SystemInfoVolumeSource `protobuf:"bytes,5,opt,name=system_info,json=systemInfo,proto3" json:"system_info,omitempty"`
 	// image mounts the contents of an OCI image, read-only.
-	Image *ImageVolumeSource `protobuf:"bytes,6,opt,name=image,proto3" json:"image,omitempty"`
-	// type discriminates the source union: "DurableDir",
-	// "ExternalVolumeTemplate", "Image" or "SystemInfo".
-	Type          string `protobuf:"bytes,4,opt,name=type,proto3" json:"type,omitempty"`
+	//
+	// +k8s:optional
+	// +k8s:unionMember
+	Image         *ImageVolumeSource `protobuf:"bytes,6,opt,name=image,proto3" json:"image,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3016,19 +3222,16 @@ func (x *Volume) GetImage() *ImageVolumeSource {
 	return nil
 }
 
-func (x *Volume) GetType() string {
-	if x != nil {
-		return x.Type
-	}
-	return ""
-}
-
 // ImageVolumeSource mounts the contents of an OCI image, read-only. The
 // reference must be pinned by digest: changing the image invalidates
 // snapshots.
 type ImageVolumeSource struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// reference is the OCI image reference, pinned by digest.
+	//
+	// +k8s:required
+	// +k8s:maxLength=512
+	// +k8s:customValidation # must be pinned by digest; no contains tag exists
 	Reference     string `protobuf:"bytes,1,opt,name=reference,proto3" json:"reference,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3115,9 +3318,15 @@ type ExternalVolumeTemplate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// capacity of the volume to create, in Kubernetes resource.Quantity string
 	// form (e.g. "10Gi"). Required.
+	//
+	// +k8s:required
+	// +k8s:customValidation # must parse as a resource.Quantity
 	Capacity string `protobuf:"bytes,1,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	// storage_class_name names the cluster-scoped Kubernetes StorageClass to
 	// create the volume from. Required.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-long-name
 	StorageClassName string `protobuf:"bytes,2,opt,name=storage_class_name,json=storageClassName,proto3" json:"storage_class_name,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
@@ -3169,7 +3378,7 @@ func (x *ExternalVolumeTemplate) GetStorageClassName() string {
 
 // SystemInfoVolumeSource is a read-only volume of substrate-generated
 // per-actor files (identity fields, projected trust bundles), regenerated by
-// atelet on every Run/Restore. Mirrors the CRD's systemInfo volume source.
+// atelet on every Run/Restore.
 type SystemInfoVolumeSource struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// data_sources lists the projections to place within the volume. At most
@@ -3178,6 +3387,7 @@ type SystemInfoVolumeSource struct {
 	//
 	// +k8s:optional
 	// +k8s:maxItems=8
+	// +k8s:listType=atomic
 	DataSources   []*SystemInfoDataSource `protobuf:"bytes,1,rep,name=data_sources,json=dataSources,proto3" json:"data_sources,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3338,6 +3548,8 @@ func (x *ActorMetadataDataSource) GetItems() []*ActorMetadataItem {
 type ActorMetadataItem struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// +k8s:required
+	// +k8s:minimum=1
+	// +k8s:maximum=3 # keep this in sync with the ActorMetadataField enum
 	Field ActorMetadataField `protobuf:"varint,1,opt,name=field,proto3,enum=ateapi.ActorMetadataField" json:"field,omitempty"`
 	// +k8s:required
 	// +k8s:minLength=1
@@ -3455,8 +3667,17 @@ func (x *TrustBundleDataSource) GetPath() string {
 type VolumeMount struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name must match the name of a Volume.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-short-name
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// mount_path within the container. Must be a clean absolute Unix path.
+	// mount_path within the container. Must be a clean absolute Unix path:
+	// must start with '/', not be '/', and contain no ':', '..', '.', '//',
+	// trailing '/', or control characters.
+	//
+	// +k8s:required
+	// +k8s:maxLength=4096
+	// +k8s:customValidation # clean-absolute-path shape; no regex/pattern tag exists
 	MountPath     string `protobuf:"bytes,2,opt,name=mount_path,json=mountPath,proto3" json:"mount_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3812,7 +4033,8 @@ func (x *CreateActorTemplateRequest) GetActorTemplate() *ActorTemplate {
 
 type GetActorTemplateRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// +k8s:opaqueType
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	ActorTemplate *ObjectRef `protobuf:"bytes,1,opt,name=actor_template,json=actorTemplate,proto3" json:"actor_template,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3859,13 +4081,22 @@ type ListActorTemplatesRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The atespace to list actor templates from. Empty lists across all
 	// atespaces.
+	//
+	// +k8s:optional
+	// +k8s:format=k8s-short-name
 	Atespace string `protobuf:"bytes,1,opt,name=atespace,proto3" json:"atespace,omitempty"`
 	// Requested page size; the server may return fewer, or occasionally
 	// slightly more. If unspecified, defaults to a server-chosen value;
 	// values above 1000 are coerced to 1000.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
 	PageSize int32 `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
 	// Pagination token from a previous ListActorTemplates response.
 	// Omit or leave empty for the first request.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=256
 	PageToken     string `protobuf:"bytes,3,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3979,7 +4210,8 @@ func (x *ListActorTemplatesResponse) GetNextPageToken() string {
 
 type DeleteActorTemplateRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// +k8s:opaqueType
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	ActorTemplate *ObjectRef `protobuf:"bytes,1,opt,name=actor_template,json=actorTemplate,proto3" json:"actor_template,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4024,7 +4256,8 @@ func (x *DeleteActorTemplateRequest) GetActorTemplate() *ObjectRef {
 
 type GetActorRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// +k8s:opaqueType
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	Actor         *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4173,7 +4406,8 @@ func (x *UpdateActorRequest) GetActor() *Actor {
 
 type SuspendActorRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// +k8s:opaqueType
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	Actor         *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4262,7 +4496,8 @@ func (x *SuspendActorResponse) GetActor() *Actor {
 
 type PauseActorRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// +k8s:opaqueType
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	Actor         *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4351,9 +4586,12 @@ func (x *PauseActorResponse) GetActor() *Actor {
 
 type ResumeActorRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// +k8s:opaqueType
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	Actor *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
 	// If true, skip golden snapshot and boot the workload from scratch.
+	//
+	// +k8s:optional
 	Boot          bool `protobuf:"varint,2,opt,name=boot,proto3" json:"boot,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4459,9 +4697,13 @@ func (x *ResumeActorResponse) GetResumed() bool {
 
 type DeleteActorRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// +k8s:opaqueType
-	Actor         *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
-	AnyState      bool       `protobuf:"varint,2,opt,name=any_state,json=anyState,proto3" json:"any_state,omitempty"`
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
+	Actor *ObjectRef `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
+	// If true, delete the actor regardless of its state.
+	//
+	// +k8s:optional
+	AnyState      bool `protobuf:"varint,2,opt,name=any_state,json=anyState,proto3" json:"any_state,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5087,9 +5329,15 @@ func (x *DeleteActorSnapshotTagRequest) GetActorSnapshotTag() *ObjectRef {
 type DeleteOptions struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// If non-zero, delete only if the server's current version matches.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
 	Version int64 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
 	// If non-empty, delete only if the server's current uid matches. Guards
 	// against name reuse across lifecycles.
+	//
+	// +k8s:optional
+	// +k8s:format=k8s-uuid
 	Uid           string `protobuf:"bytes,2,opt,name=uid,proto3" json:"uid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5139,14 +5387,151 @@ func (x *DeleteOptions) GetUid() string {
 	return ""
 }
 
+// ListWorkerActorAssignmentsRequest asks for a page of the Actors one Worker hosts.
+type ListWorkerActorAssignmentsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The Worker whose Actors to list. atespace is always empty; Workers are
+	// global-scoped.
+	//
+	// +k8s:required
+	// +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
+	Worker *ObjectRef `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
+	// Requested page size; the server may return fewer. If unspecified, defaults
+	// to a server-chosen value; values above 1000 are coerced to 1000.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	PageSize int32 `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	// Pagination token from a previous ListWorkerActorAssignments response.
+	// Omit or leave empty for the first request.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=256
+	PageToken     string `protobuf:"bytes,3,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListWorkerActorAssignmentsRequest) Reset() {
+	*x = ListWorkerActorAssignmentsRequest{}
+	mi := &file_ateapi_proto_msgTypes[75]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWorkerActorAssignmentsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWorkerActorAssignmentsRequest) ProtoMessage() {}
+
+func (x *ListWorkerActorAssignmentsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ateapi_proto_msgTypes[75]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWorkerActorAssignmentsRequest.ProtoReflect.Descriptor instead.
+func (*ListWorkerActorAssignmentsRequest) Descriptor() ([]byte, []int) {
+	return file_ateapi_proto_rawDescGZIP(), []int{75}
+}
+
+func (x *ListWorkerActorAssignmentsRequest) GetWorker() *ObjectRef {
+	if x != nil {
+		return x.Worker
+	}
+	return nil
+}
+
+func (x *ListWorkerActorAssignmentsRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ListWorkerActorAssignmentsRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+// ListWorkerActorAssignmentsResponse is one page of a Worker's Actors.
+type ListWorkerActorAssignmentsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The Actors this page of the listing covers.
+	ActorAssignments []*ActorAssignment `protobuf:"bytes,1,rep,name=actor_assignments,json=actorAssignments,proto3" json:"actor_assignments,omitempty"`
+	// Pagination token for the next page. Empty if this is the last page.
+	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListWorkerActorAssignmentsResponse) Reset() {
+	*x = ListWorkerActorAssignmentsResponse{}
+	mi := &file_ateapi_proto_msgTypes[76]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWorkerActorAssignmentsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWorkerActorAssignmentsResponse) ProtoMessage() {}
+
+func (x *ListWorkerActorAssignmentsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ateapi_proto_msgTypes[76]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWorkerActorAssignmentsResponse.ProtoReflect.Descriptor instead.
+func (*ListWorkerActorAssignmentsResponse) Descriptor() ([]byte, []int) {
+	return file_ateapi_proto_rawDescGZIP(), []int{76}
+}
+
+func (x *ListWorkerActorAssignmentsResponse) GetActorAssignments() []*ActorAssignment {
+	if x != nil {
+		return x.ActorAssignments
+	}
+	return nil
+}
+
+func (x *ListWorkerActorAssignmentsResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
 type ListWorkersRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Requested page size; the server may return fewer, or occasionally
 	// slightly more. If unspecified, defaults to a server-chosen value;
 	// values above 1000 are coerced to 1000.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
 	PageSize int32 `protobuf:"varint,1,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
 	// Pagination token from a previous ListWorkers response.
 	// Omit or leave empty for the first request.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=256
 	PageToken     string `protobuf:"bytes,2,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5154,7 +5539,7 @@ type ListWorkersRequest struct {
 
 func (x *ListWorkersRequest) Reset() {
 	*x = ListWorkersRequest{}
-	mi := &file_ateapi_proto_msgTypes[75]
+	mi := &file_ateapi_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5166,7 +5551,7 @@ func (x *ListWorkersRequest) String() string {
 func (*ListWorkersRequest) ProtoMessage() {}
 
 func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[75]
+	mi := &file_ateapi_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5179,7 +5564,7 @@ func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkersRequest.ProtoReflect.Descriptor instead.
 func (*ListWorkersRequest) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{75}
+	return file_ateapi_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *ListWorkersRequest) GetPageSize() int32 {
@@ -5208,7 +5593,7 @@ type ListWorkersResponse struct {
 
 func (x *ListWorkersResponse) Reset() {
 	*x = ListWorkersResponse{}
-	mi := &file_ateapi_proto_msgTypes[76]
+	mi := &file_ateapi_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5220,7 +5605,7 @@ func (x *ListWorkersResponse) String() string {
 func (*ListWorkersResponse) ProtoMessage() {}
 
 func (x *ListWorkersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[76]
+	mi := &file_ateapi_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5233,7 +5618,7 @@ func (x *ListWorkersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkersResponse.ProtoReflect.Descriptor instead.
 func (*ListWorkersResponse) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{76}
+	return file_ateapi_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *ListWorkersResponse) GetWorkers() []*Worker {
@@ -5253,7 +5638,9 @@ func (x *ListWorkersResponse) GetNextPageToken() string {
 type GetWorkerRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The Worker to fetch. atespace is always empty; Workers are global-scoped.
-	// +k8s:opaqueType
+	//
+	// +k8s:required
+	// +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
 	Worker        *ObjectRef `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5261,7 +5648,7 @@ type GetWorkerRequest struct {
 
 func (x *GetWorkerRequest) Reset() {
 	*x = GetWorkerRequest{}
-	mi := &file_ateapi_proto_msgTypes[77]
+	mi := &file_ateapi_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5273,7 +5660,7 @@ func (x *GetWorkerRequest) String() string {
 func (*GetWorkerRequest) ProtoMessage() {}
 
 func (x *GetWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[77]
+	mi := &file_ateapi_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5286,7 +5673,7 @@ func (x *GetWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetWorkerRequest.ProtoReflect.Descriptor instead.
 func (*GetWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{77}
+	return file_ateapi_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *GetWorkerRequest) GetWorker() *ObjectRef {
@@ -5299,6 +5686,8 @@ func (x *GetWorkerRequest) GetWorker() *ObjectRef {
 type CreateWorkerRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The Worker to register.
+	//
+	// +k8s:required
 	Worker        *Worker `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5306,7 +5695,7 @@ type CreateWorkerRequest struct {
 
 func (x *CreateWorkerRequest) Reset() {
 	*x = CreateWorkerRequest{}
-	mi := &file_ateapi_proto_msgTypes[78]
+	mi := &file_ateapi_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5318,7 +5707,7 @@ func (x *CreateWorkerRequest) String() string {
 func (*CreateWorkerRequest) ProtoMessage() {}
 
 func (x *CreateWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[78]
+	mi := &file_ateapi_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5331,7 +5720,7 @@ func (x *CreateWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateWorkerRequest.ProtoReflect.Descriptor instead.
 func (*CreateWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{78}
+	return file_ateapi_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *CreateWorkerRequest) GetWorker() *Worker {
@@ -5354,6 +5743,11 @@ type UpdateWorkerRequest struct {
 	// send the whole thing back. A request that alters an immutable field, by
 	// changing it or by omitting it, returns INVALID_ARGUMENT naming the field.
 	// status is output-only and whatever it carries is ignored.
+	//
+	// +k8s:required
+	// +k8s:opaqueType # updates are handled in 2 steps, do not descend
+	// +k8s:subfield(metadata)=+k8s:required
+	// +k8s:customValidation # TODO: when we get nested subfields, forbid metadata.atespace
 	Worker        *Worker `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5361,7 +5755,7 @@ type UpdateWorkerRequest struct {
 
 func (x *UpdateWorkerRequest) Reset() {
 	*x = UpdateWorkerRequest{}
-	mi := &file_ateapi_proto_msgTypes[79]
+	mi := &file_ateapi_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5373,7 +5767,7 @@ func (x *UpdateWorkerRequest) String() string {
 func (*UpdateWorkerRequest) ProtoMessage() {}
 
 func (x *UpdateWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[79]
+	mi := &file_ateapi_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5386,7 +5780,7 @@ func (x *UpdateWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateWorkerRequest.ProtoReflect.Descriptor instead.
 func (*UpdateWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{79}
+	return file_ateapi_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *UpdateWorkerRequest) GetWorker() *Worker {
@@ -5399,9 +5793,13 @@ func (x *UpdateWorkerRequest) GetWorker() *Worker {
 type DeleteWorkerRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The Worker to deregister.
-	// +k8s:opaqueType
+	//
+	// +k8s:required
+	// +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
 	Worker *ObjectRef `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
 	// Optional per-delete preconditions.
+	//
+	// +k8s:optional
 	Options       *DeleteOptions `protobuf:"bytes,2,opt,name=options,proto3" json:"options,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5409,7 +5807,7 @@ type DeleteWorkerRequest struct {
 
 func (x *DeleteWorkerRequest) Reset() {
 	*x = DeleteWorkerRequest{}
-	mi := &file_ateapi_proto_msgTypes[80]
+	mi := &file_ateapi_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5421,7 +5819,7 @@ func (x *DeleteWorkerRequest) String() string {
 func (*DeleteWorkerRequest) ProtoMessage() {}
 
 func (x *DeleteWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[80]
+	mi := &file_ateapi_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5434,7 +5832,7 @@ func (x *DeleteWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteWorkerRequest.ProtoReflect.Descriptor instead.
 func (*DeleteWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{80}
+	return file_ateapi_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *DeleteWorkerRequest) GetWorker() *ObjectRef {
@@ -5454,7 +5852,9 @@ func (x *DeleteWorkerRequest) GetOptions() *DeleteOptions {
 type DrainWorkerRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The Worker to mark as terminating.
-	// +k8s:opaqueType
+	//
+	// +k8s:required
+	// +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
 	Worker        *ObjectRef `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5462,7 +5862,7 @@ type DrainWorkerRequest struct {
 
 func (x *DrainWorkerRequest) Reset() {
 	*x = DrainWorkerRequest{}
-	mi := &file_ateapi_proto_msgTypes[81]
+	mi := &file_ateapi_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5474,7 +5874,7 @@ func (x *DrainWorkerRequest) String() string {
 func (*DrainWorkerRequest) ProtoMessage() {}
 
 func (x *DrainWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[81]
+	mi := &file_ateapi_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5487,7 +5887,7 @@ func (x *DrainWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DrainWorkerRequest.ProtoReflect.Descriptor instead.
 func (*DrainWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{81}
+	return file_ateapi_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *DrainWorkerRequest) GetWorker() *ObjectRef {
@@ -5502,13 +5902,22 @@ func (x *DrainWorkerRequest) GetWorker() *ObjectRef {
 type ListActorsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The atespace to list actors from. Empty lists across all atespaces.
+	//
+	// +k8s:optional
+	// +k8s:format=k8s-short-name
 	Atespace string `protobuf:"bytes,1,opt,name=atespace,proto3" json:"atespace,omitempty"`
 	// Requested page size; the server may return fewer, or occasionally
 	// slightly more. If unspecified, defaults to a server-chosen value;
 	// values above 1000 are coerced to 1000.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
 	PageSize int32 `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
 	// Pagination token from a previous ListActors response.
 	// Omit or leave empty for the first request.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=256
 	PageToken     string `protobuf:"bytes,3,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5516,7 +5925,7 @@ type ListActorsRequest struct {
 
 func (x *ListActorsRequest) Reset() {
 	*x = ListActorsRequest{}
-	mi := &file_ateapi_proto_msgTypes[82]
+	mi := &file_ateapi_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5528,7 +5937,7 @@ func (x *ListActorsRequest) String() string {
 func (*ListActorsRequest) ProtoMessage() {}
 
 func (x *ListActorsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[82]
+	mi := &file_ateapi_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5541,7 +5950,7 @@ func (x *ListActorsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListActorsRequest.ProtoReflect.Descriptor instead.
 func (*ListActorsRequest) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{82}
+	return file_ateapi_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *ListActorsRequest) GetAtespace() string {
@@ -5577,7 +5986,7 @@ type ListActorsResponse struct {
 
 func (x *ListActorsResponse) Reset() {
 	*x = ListActorsResponse{}
-	mi := &file_ateapi_proto_msgTypes[83]
+	mi := &file_ateapi_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5589,7 +5998,7 @@ func (x *ListActorsResponse) String() string {
 func (*ListActorsResponse) ProtoMessage() {}
 
 func (x *ListActorsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[83]
+	mi := &file_ateapi_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5602,7 +6011,7 @@ func (x *ListActorsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListActorsResponse.ProtoReflect.Descriptor instead.
 func (*ListActorsResponse) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{83}
+	return file_ateapi_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *ListActorsResponse) GetActors() []*Actor {
@@ -5633,24 +6042,57 @@ type Worker struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Output-only: name, uid, version and timestamps are all server-assigned.
 	// uid and version are echoed back on UpdateWorker as preconditions.
-	// +k8s:opaqueType
+	//
+	// +k8s:required
+	// +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
 	Metadata *ResourceMetadata `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
 	// Kubernetes coordinates. Immutable, set at creation.
+	//
+	// +k8s:required
+	// +k8s:format=k8s-short-name
+	// +k8s:immutable
 	WorkerNamespace string `protobuf:"bytes,2,opt,name=worker_namespace,json=workerNamespace,proto3" json:"worker_namespace,omitempty"`
-	WorkerPool      string `protobuf:"bytes,3,opt,name=worker_pool,json=workerPool,proto3" json:"worker_pool,omitempty"`
-	WorkerPod       string `protobuf:"bytes,4,opt,name=worker_pod,json=workerPod,proto3" json:"worker_pod,omitempty"`
-	WorkerPodUid    string `protobuf:"bytes,5,opt,name=worker_pod_uid,json=workerPodUid,proto3" json:"worker_pod_uid,omitempty"`
-	NodeName        string `protobuf:"bytes,6,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
-	Ip              string `protobuf:"bytes,7,opt,name=ip,proto3" json:"ip,omitempty"`
-	// Mutable.
-	SandboxClass string            `protobuf:"bytes,8,opt,name=sandbox_class,json=sandboxClass,proto3" json:"sandbox_class,omitempty"`
-	Labels       map[string]string `protobuf:"bytes,9,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// The compute capacity this worker can give an actor sandbox. Immutable, set
-	// at creation: a worker pod's limits are fixed for its lifetime.
-	Capacity *WorkerCapacity `protobuf:"bytes,10,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	// +k8s:required
+	// +k8s:format=k8s-long-name
+	// +k8s:immutable
+	WorkerPool string `protobuf:"bytes,3,opt,name=worker_pool,json=workerPool,proto3" json:"worker_pool,omitempty"`
+	// +k8s:required
+	// +k8s:format=k8s-long-name
+	// +k8s:immutable
+	WorkerPod string `protobuf:"bytes,4,opt,name=worker_pod,json=workerPod,proto3" json:"worker_pod,omitempty"`
+	// +k8s:required
+	// +k8s:format=k8s-uuid
+	// +k8s:immutable
+	WorkerPodUid string `protobuf:"bytes,5,opt,name=worker_pod_uid,json=workerPodUid,proto3" json:"worker_pod_uid,omitempty"`
+	// +k8s:required
+	// +k8s:format=k8s-long-name
+	// +k8s:immutable
+	NodeName string `protobuf:"bytes,6,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
+	// +k8s:required
+	// +k8s:customValidation # until `format=k8s-ip` is supported
+	// +k8s:immutable
+	Ip string `protobuf:"bytes,7,opt,name=ip,proto3" json:"ip,omitempty"`
+	// sandbox_class mirrors the WorkerPool's sandboxClass; its values are the
+	// CRD's own vocabulary, so it is only bounded, not validated. Mutable.
+	//
+	// +k8s:optional
+	// +k8s:maxLength=63
+	SandboxClass string `protobuf:"bytes,8,opt,name=sandbox_class,json=sandboxClass,proto3" json:"sandbox_class,omitempty"`
+	// labels mirror the WorkerPool object's Kubernetes labels, which selectors
+	// match against.
+	// Kubernetes does not cap an object's label count, so the bound below is
+	// a generous guardrail, not a mirror of an upstream limit.
+	//
+	// +k8s:optional
+	// +k8s:maxProperties=64
+	// +k8s:eachKey=+k8s:format=k8s-label-key
+	// +k8s:eachVal=+k8s:format=k8s-label-value
+	Labels map[string]string `protobuf:"bytes,9,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Output-only server-managed state. Absent from Create/Update request
 	// payloads; whatever a request carries here is ignored. DrainWorker is the
-	// only way a client moves state, and assignment is the scheduler's.
+	// only way a client moves state, and the assignments are the scheduler's.
+	//
+	// +k8s:optional
 	Status        *WorkerStatus `protobuf:"bytes,11,opt,name=status,proto3" json:"status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5658,7 +6100,7 @@ type Worker struct {
 
 func (x *Worker) Reset() {
 	*x = Worker{}
-	mi := &file_ateapi_proto_msgTypes[84]
+	mi := &file_ateapi_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5670,7 +6112,7 @@ func (x *Worker) String() string {
 func (*Worker) ProtoMessage() {}
 
 func (x *Worker) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[84]
+	mi := &file_ateapi_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5683,7 +6125,7 @@ func (x *Worker) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Worker.ProtoReflect.Descriptor instead.
 func (*Worker) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{84}
+	return file_ateapi_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *Worker) GetMetadata() *ResourceMetadata {
@@ -5749,13 +6191,6 @@ func (x *Worker) GetLabels() map[string]string {
 	return nil
 }
 
-func (x *Worker) GetCapacity() *WorkerCapacity {
-	if x != nil {
-		return x.Capacity
-	}
-	return nil
-}
-
 func (x *Worker) GetStatus() *WorkerStatus {
 	if x != nil {
 		return x.Status
@@ -5765,16 +6200,22 @@ func (x *Worker) GetStatus() *WorkerStatus {
 
 type WorkerStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	State WorkerState            `protobuf:"varint,1,opt,name=state,proto3,enum=ateapi.WorkerState" json:"state,omitempty"`
-	// The Actor currently bound to this Worker, if any.
-	Assignment    *ActorAssignment `protobuf:"bytes,2,opt,name=assignment,proto3" json:"assignment,omitempty"`
+	// +k8s:required
+	// +k8s:minimum=1
+	// +k8s:maximum=2 # keep this in sync with the WorkerState enum
+	State WorkerState `protobuf:"varint,1,opt,name=state,proto3,enum=ateapi.WorkerState" json:"state,omitempty"`
+	// What this Worker has and what is spoken for. Observed, not requested: no
+	// client sets it, which is why it is status.
+	//
+	// +k8s:optional
+	Allocation    *WorkerAllocation `protobuf:"bytes,2,opt,name=allocation,proto3" json:"allocation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WorkerStatus) Reset() {
 	*x = WorkerStatus{}
-	mi := &file_ateapi_proto_msgTypes[85]
+	mi := &file_ateapi_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5786,7 +6227,7 @@ func (x *WorkerStatus) String() string {
 func (*WorkerStatus) ProtoMessage() {}
 
 func (x *WorkerStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[85]
+	mi := &file_ateapi_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5799,7 +6240,7 @@ func (x *WorkerStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkerStatus.ProtoReflect.Descriptor instead.
 func (*WorkerStatus) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{85}
+	return file_ateapi_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *WorkerStatus) GetState() WorkerState {
@@ -5809,42 +6250,52 @@ func (x *WorkerStatus) GetState() WorkerState {
 	return WorkerState_WORKER_STATE_UNSPECIFIED
 }
 
-func (x *WorkerStatus) GetAssignment() *ActorAssignment {
+func (x *WorkerStatus) GetAllocation() *WorkerAllocation {
 	if x != nil {
-		return x.Assignment
+		return x.Allocation
 	}
 	return nil
 }
 
-// WorkerCapacity is the worker pod's compute capacity available to host an
-// actor sandbox, taken from the ateom container's resource limits. The
-// scheduler only places an actor on a worker whose capacity is >= the actor's
-// declared resource limits. An unset message, or a zero field within it, means
-// "unknown/unset" for that dimension: treated as unconstrained so placement is
-// not blocked (matching the pre-capacity behavior).
-type WorkerCapacity struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CpuMilli      int64                  `protobuf:"varint,1,opt,name=cpu_milli,json=cpuMilli,proto3" json:"cpu_milli,omitempty"`          // CPU capacity in millicores (1000 = one core).
-	MemoryBytes   int64                  `protobuf:"varint,2,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"` // Memory capacity in bytes.
+// WorkerAllocation is a Worker's total against its committed share, in one
+// message because placement only ever reads the two together.
+type WorkerAllocation struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// What the Worker can supply, as it reports through
+	// WorkerService.SetWorkerCapacity.
+	//
+	// Complete, not partial: a Worker reports every dimension it has, so a name
+	// missing here is one it cannot supply at all and no Actor asking for that
+	// name is placed on it. Shrinking below allocated stops new placements and
+	// evicts nothing.
+	//
+	// +k8s:optional
+	Capacity *WorkerResources `protobuf:"bytes,1,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	// What the assignments consume of capacity. A running total because placement
+	// reads it for every Worker on every decision, and summing the assignments
+	// would cost the fleet's actor count each time.
+	//
+	// +k8s:optional
+	Allocated     *WorkerResources `protobuf:"bytes,2,opt,name=allocated,proto3" json:"allocated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *WorkerCapacity) Reset() {
-	*x = WorkerCapacity{}
-	mi := &file_ateapi_proto_msgTypes[86]
+func (x *WorkerAllocation) Reset() {
+	*x = WorkerAllocation{}
+	mi := &file_ateapi_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *WorkerCapacity) String() string {
+func (x *WorkerAllocation) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*WorkerCapacity) ProtoMessage() {}
+func (*WorkerAllocation) ProtoMessage() {}
 
-func (x *WorkerCapacity) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[86]
+func (x *WorkerAllocation) ProtoReflect() protoreflect.Message {
+	mi := &file_ateapi_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5855,46 +6306,133 @@ func (x *WorkerCapacity) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use WorkerCapacity.ProtoReflect.Descriptor instead.
-func (*WorkerCapacity) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{86}
+// Deprecated: Use WorkerAllocation.ProtoReflect.Descriptor instead.
+func (*WorkerAllocation) Descriptor() ([]byte, []int) {
+	return file_ateapi_proto_rawDescGZIP(), []int{88}
 }
 
-func (x *WorkerCapacity) GetCpuMilli() int64 {
+func (x *WorkerAllocation) GetCapacity() *WorkerResources {
 	if x != nil {
-		return x.CpuMilli
+		return x.Capacity
+	}
+	return nil
+}
+
+func (x *WorkerAllocation) GetAllocated() *WorkerResources {
+	if x != nil {
+		return x.Allocated
+	}
+	return nil
+}
+
+// WorkerResources represents schedulable resources.
+type WorkerResources struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Resources match the actor's definition of resources.
+	// They are matched by name, used for placement.
+	//
+	// Sorted by name, so equal capacities compare equal.
+	//
+	// +k8s:optional
+	Resources *Resources `protobuf:"bytes,1,opt,name=resources,proto3" json:"resources,omitempty"`
+	// How many Actors may be bound at once. Not a resource because nothing
+	// divides it: every Actor costs exactly one. It bounds what one more Actor
+	// costs where CPU and memory do not — netns, mounts, file descriptors, blast
+	// radius. Kubernetes bounds a node the same way, with allocatable pods.
+	//
+	// Absent until the Worker reports, and a Worker that has reported no ceiling
+	// holds no Actors, like any other dimension.
+	//
+	// +k8s:optional
+	// +k8s:minimum=1
+	Actors        int32 `protobuf:"varint,2,opt,name=actors,proto3" json:"actors,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkerResources) Reset() {
+	*x = WorkerResources{}
+	mi := &file_ateapi_proto_msgTypes[89]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerResources) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerResources) ProtoMessage() {}
+
+func (x *WorkerResources) ProtoReflect() protoreflect.Message {
+	mi := &file_ateapi_proto_msgTypes[89]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerResources.ProtoReflect.Descriptor instead.
+func (*WorkerResources) Descriptor() ([]byte, []int) {
+	return file_ateapi_proto_rawDescGZIP(), []int{89}
+}
+
+func (x *WorkerResources) GetResources() *Resources {
+	if x != nil {
+		return x.Resources
+	}
+	return nil
+}
+
+func (x *WorkerResources) GetActors() int32 {
+	if x != nil {
+		return x.Actors
 	}
 	return 0
 }
 
-func (x *WorkerCapacity) GetMemoryBytes() int64 {
-	if x != nil {
-		return x.MemoryBytes
-	}
-	return 0
-}
-
-// ActorAssignment names the Actor currently bound to a Worker — the inverse of
-// WorkerAssignment.
+// ActorAssignment is an Actor bound to a Worker, a subresource of Worker
+// rather than a field on it: a Worker hosts thousands, and a listing that
+// carried them would grow with occupancy. The inverse of WorkerAssignment.
 type ActorAssignment struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The KubeNamespacedObjectRef actor_template names the CRD-backed template
-	// of an actor created with the legacy CRD path
-	// actor_template_ref names the substrate ActorTemplate resource.
-	// Exactly one is set.
-	ActorTemplate *KubeNamespacedObjectRef `protobuf:"bytes,1,opt,name=actor_template,json=actorTemplate,proto3" json:"actor_template,omitempty"`
-	// +k8s:opaqueType
-	Actor    *ObjectRef `protobuf:"bytes,2,opt,name=actor,proto3" json:"actor,omitempty"`
-	ActorUid string     `protobuf:"bytes,3,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
-	// +k8s:opaqueType
+	// atespace is always empty, as it is on the Worker these belong to. name is
+	// the Actor's UID, so the Actor that caused an assignment is what addresses
+	// it.
+	//
+	// +k8s:required
+	// +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
+	Metadata *ResourceMetadata `protobuf:"bytes,6,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
+	Actor *ObjectRef `protobuf:"bytes,2,opt,name=actor,proto3" json:"actor,omitempty"`
+	// +k8s:required
+	// +k8s:format=k8s-uuid
+	ActorUid string `protobuf:"bytes,3,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	// actor_template_ref names the substrate ActorTemplate resource the
+	// assigned actor uses.
+	//
+	// +k8s:required
+	// +k8s:subfield(atespace)=+k8s:required
 	ActorTemplateRef *ObjectRef `protobuf:"bytes,4,opt,name=actor_template_ref,json=actorTemplateRef,proto3" json:"actor_template_ref,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// What the Worker admitted this Actor for: the Actor's declared limits as
+	// they read at placement time. Recorded rather than re-read so release
+	// returns exactly what binding consumed, even if the template changed since.
+	//
+	// Sorted by name, as WorkerResources.resources is.
+	//
+	// +k8s:optional
+	Resources     *Resources `protobuf:"bytes,5,opt,name=resources,proto3" json:"resources,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ActorAssignment) Reset() {
 	*x = ActorAssignment{}
-	mi := &file_ateapi_proto_msgTypes[87]
+	mi := &file_ateapi_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5906,7 +6444,7 @@ func (x *ActorAssignment) String() string {
 func (*ActorAssignment) ProtoMessage() {}
 
 func (x *ActorAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[87]
+	mi := &file_ateapi_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5919,12 +6457,12 @@ func (x *ActorAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActorAssignment.ProtoReflect.Descriptor instead.
 func (*ActorAssignment) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{87}
+	return file_ateapi_proto_rawDescGZIP(), []int{90}
 }
 
-func (x *ActorAssignment) GetActorTemplate() *KubeNamespacedObjectRef {
+func (x *ActorAssignment) GetMetadata() *ResourceMetadata {
 	if x != nil {
-		return x.ActorTemplate
+		return x.Metadata
 	}
 	return nil
 }
@@ -5950,29 +6488,46 @@ func (x *ActorAssignment) GetActorTemplateRef() *ObjectRef {
 	return nil
 }
 
-type KubeNamespacedObjectRef struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+func (x *ActorAssignment) GetResources() *Resources {
+	if x != nil {
+		return x.Resources
+	}
+	return nil
+}
+
+type SetWorkerCapacityRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The Worker being reported on. atespace is always empty; Workers are
+	// global-scoped.
+	//
+	// +k8s:required
+	// +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
+	Worker *ObjectRef `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
+	// Everything the Worker can hold. This replaces what is recorded rather than
+	// merging into it: a dimension left out is one the Worker no longer supplies,
+	// and an Actor asking for that dimension will not be placed here.
+	//
+	// +k8s:required
+	Capacity      *WorkerResources `protobuf:"bytes,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *KubeNamespacedObjectRef) Reset() {
-	*x = KubeNamespacedObjectRef{}
-	mi := &file_ateapi_proto_msgTypes[88]
+func (x *SetWorkerCapacityRequest) Reset() {
+	*x = SetWorkerCapacityRequest{}
+	mi := &file_ateapi_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *KubeNamespacedObjectRef) String() string {
+func (x *SetWorkerCapacityRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*KubeNamespacedObjectRef) ProtoMessage() {}
+func (*SetWorkerCapacityRequest) ProtoMessage() {}
 
-func (x *KubeNamespacedObjectRef) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[88]
+func (x *SetWorkerCapacityRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ateapi_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5983,46 +6538,48 @@ func (x *KubeNamespacedObjectRef) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use KubeNamespacedObjectRef.ProtoReflect.Descriptor instead.
-func (*KubeNamespacedObjectRef) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{88}
+// Deprecated: Use SetWorkerCapacityRequest.ProtoReflect.Descriptor instead.
+func (*SetWorkerCapacityRequest) Descriptor() ([]byte, []int) {
+	return file_ateapi_proto_rawDescGZIP(), []int{91}
 }
 
-func (x *KubeNamespacedObjectRef) GetNamespace() string {
+func (x *SetWorkerCapacityRequest) GetWorker() *ObjectRef {
 	if x != nil {
-		return x.Namespace
+		return x.Worker
 	}
-	return ""
+	return nil
 }
 
-func (x *KubeNamespacedObjectRef) GetName() string {
+func (x *SetWorkerCapacityRequest) GetCapacity() *WorkerResources {
 	if x != nil {
-		return x.Name
+		return x.Capacity
 	}
-	return ""
+	return nil
 }
 
-type DebugClearRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+type SetWorkerCapacityResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The Worker as recorded, so a caller sees what its report resolved to.
+	Worker        *Worker `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *DebugClearRequest) Reset() {
-	*x = DebugClearRequest{}
-	mi := &file_ateapi_proto_msgTypes[89]
+func (x *SetWorkerCapacityResponse) Reset() {
+	*x = SetWorkerCapacityResponse{}
+	mi := &file_ateapi_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *DebugClearRequest) String() string {
+func (x *SetWorkerCapacityResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DebugClearRequest) ProtoMessage() {}
+func (*SetWorkerCapacityResponse) ProtoMessage() {}
 
-func (x *DebugClearRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[89]
+func (x *SetWorkerCapacityResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ateapi_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6033,60 +6590,44 @@ func (x *DebugClearRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DebugClearRequest.ProtoReflect.Descriptor instead.
-func (*DebugClearRequest) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{89}
+// Deprecated: Use SetWorkerCapacityResponse.ProtoReflect.Descriptor instead.
+func (*SetWorkerCapacityResponse) Descriptor() ([]byte, []int) {
+	return file_ateapi_proto_rawDescGZIP(), []int{92}
 }
 
-type DebugClearResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *DebugClearResponse) Reset() {
-	*x = DebugClearResponse{}
-	mi := &file_ateapi_proto_msgTypes[90]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DebugClearResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DebugClearResponse) ProtoMessage() {}
-
-func (x *DebugClearResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[90]
+func (x *SetWorkerCapacityResponse) GetWorker() *Worker {
 	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
+		return x.Worker
 	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DebugClearResponse.ProtoReflect.Descriptor instead.
-func (*DebugClearResponse) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{90}
+	return nil
 }
 
 type MintJWTRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Audience      []string               `protobuf:"bytes,1,rep,name=audience,proto3" json:"audience,omitempty"`
-	Atespace      string                 `protobuf:"bytes,2,opt,name=atespace,proto3" json:"atespace,omitempty"`
-	ActorName     string                 `protobuf:"bytes,3,opt,name=actor_name,json=actorName,proto3" json:"actor_name,omitempty"`
-	ActorUid      string                 `protobuf:"bytes,4,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The audiences the minted JWT is bound to. Tokens are only issued with
+	// audience bindings, so at least one is required.
+	//
+	// +k8s:required
+	// +k8s:maxItems=16 # guardrail; tokens realistically bind a handful of audiences
+	// +k8s:listType=set
+	// +k8s:eachVal=+k8s:maxLength=512 # audiences are caller-defined URIs; bound only
+	Audience []string `protobuf:"bytes,1,rep,name=audience,proto3" json:"audience,omitempty"`
+	// +k8s:required
+	// +k8s:format=k8s-short-name
+	Atespace string `protobuf:"bytes,2,opt,name=atespace,proto3" json:"atespace,omitempty"`
+	// +k8s:required
+	// +k8s:format=k8s-short-name
+	ActorName string `protobuf:"bytes,3,opt,name=actor_name,json=actorName,proto3" json:"actor_name,omitempty"`
+	// +k8s:optional
+	// +k8s:format=k8s-uuid
+	ActorUid      string `protobuf:"bytes,4,opt,name=actor_uid,json=actorUid,proto3" json:"actor_uid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MintJWTRequest) Reset() {
 	*x = MintJWTRequest{}
-	mi := &file_ateapi_proto_msgTypes[91]
+	mi := &file_ateapi_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6098,7 +6639,7 @@ func (x *MintJWTRequest) String() string {
 func (*MintJWTRequest) ProtoMessage() {}
 
 func (x *MintJWTRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[91]
+	mi := &file_ateapi_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6111,7 +6652,7 @@ func (x *MintJWTRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MintJWTRequest.ProtoReflect.Descriptor instead.
 func (*MintJWTRequest) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{91}
+	return file_ateapi_proto_rawDescGZIP(), []int{93}
 }
 
 func (x *MintJWTRequest) GetAudience() []string {
@@ -6170,7 +6711,7 @@ type MintJWTResponse struct {
 
 func (x *MintJWTResponse) Reset() {
 	*x = MintJWTResponse{}
-	mi := &file_ateapi_proto_msgTypes[92]
+	mi := &file_ateapi_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6182,7 +6723,7 @@ func (x *MintJWTResponse) String() string {
 func (*MintJWTResponse) ProtoMessage() {}
 
 func (x *MintJWTResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[92]
+	mi := &file_ateapi_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6195,7 +6736,7 @@ func (x *MintJWTResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MintJWTResponse.ProtoReflect.Descriptor instead.
 func (*MintJWTResponse) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{92}
+	return file_ateapi_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *MintJWTResponse) GetActorJwt() string {
@@ -6215,23 +6756,34 @@ type MintCertRequest struct {
 	// This is the one caller that recovers a Worker name from a pod certificate:
 	// the atelet has only the worker Pod's identity to go on. Everywhere else the
 	// name is opaque and must be carried, not reconstructed.
-	// +k8s:opaqueType
+	//
+	// +k8s:beta(since: "0.0")=+k8s:subfield(atespace)=+k8s:forbidden # TODO: get rid of beta prefix
+	// +k8s:required
 	Worker *ObjectRef `protobuf:"bytes,1,opt,name=worker,proto3" json:"worker,omitempty"`
 	// Request contains DER encoded bytes of a x509 certificate signing request.
 	// The signer will ignore the contents of the CSR except to extract the
 	// subject public key.
+	//
+	// +k8s:required
+	// +k8s:customValidation # size bound; maxLength is string-only
 	CertificateSigningRequest []byte `protobuf:"bytes,2,opt,name=certificate_signing_request,json=certificateSigningRequest,proto3" json:"certificate_signing_request,omitempty"`
 	// Actor incarnation expected by the activation. This is only a stale-request
 	// guard: ateapi derives the actor and its identity from the worker assignment.
-	ExpectedActorUid string                  `protobuf:"bytes,3,opt,name=expected_actor_uid,json=expectedActorUid,proto3" json:"expected_actor_uid,omitempty"`
-	Purpose          ActorCertificatePurpose `protobuf:"varint,4,opt,name=purpose,proto3,enum=ateapi.ActorCertificatePurpose" json:"purpose,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	//
+	// +k8s:required
+	// +k8s:format=k8s-uuid
+	ExpectedActorUid string `protobuf:"bytes,3,opt,name=expected_actor_uid,json=expectedActorUid,proto3" json:"expected_actor_uid,omitempty"`
+	// +k8s:required
+	// +k8s:minimum=1
+	// +k8s:maximum=1 # keep this in sync with the ActorCertificatePurpose enum
+	Purpose       ActorCertificatePurpose `protobuf:"varint,4,opt,name=purpose,proto3,enum=ateapi.ActorCertificatePurpose" json:"purpose,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MintCertRequest) Reset() {
 	*x = MintCertRequest{}
-	mi := &file_ateapi_proto_msgTypes[93]
+	mi := &file_ateapi_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6243,7 +6795,7 @@ func (x *MintCertRequest) String() string {
 func (*MintCertRequest) ProtoMessage() {}
 
 func (x *MintCertRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[93]
+	mi := &file_ateapi_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6256,7 +6808,7 @@ func (x *MintCertRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MintCertRequest.ProtoReflect.Descriptor instead.
 func (*MintCertRequest) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{93}
+	return file_ateapi_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *MintCertRequest) GetWorker() *ObjectRef {
@@ -6299,7 +6851,7 @@ type MintCertResponse struct {
 
 func (x *MintCertResponse) Reset() {
 	*x = MintCertResponse{}
-	mi := &file_ateapi_proto_msgTypes[94]
+	mi := &file_ateapi_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6311,7 +6863,7 @@ func (x *MintCertResponse) String() string {
 func (*MintCertResponse) ProtoMessage() {}
 
 func (x *MintCertResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ateapi_proto_msgTypes[94]
+	mi := &file_ateapi_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6324,7 +6876,7 @@ func (x *MintCertResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MintCertResponse.ProtoReflect.Descriptor instead.
 func (*MintCertResponse) Descriptor() ([]byte, []int) {
-	return file_ateapi_proto_rawDescGZIP(), []int{94}
+	return file_ateapi_proto_rawDescGZIP(), []int{96}
 }
 
 func (x *MintCertResponse) GetActorCertificates() [][]byte {
@@ -6372,11 +6924,9 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSTATUS_PENDING\x10\x01\x12\x12\n" +
 	"\x0eSTATUS_CREATED\x10\x02\x12\x13\n" +
-	"\x0fSTATUS_DELETING\x10\x03\"\x8c\x03\n" +
+	"\x0fSTATUS_DELETING\x10\x03\"\xa2\x02\n" +
 	"\x05Actor\x124\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x18.ateapi.ResourceMetadataR\bmetadata\x128\n" +
-	"\x18actor_template_namespace\x18\x02 \x01(\tR\x16actorTemplateNamespace\x12.\n" +
-	"\x13actor_template_name\x18\x03 \x01(\tR\x11actorTemplateName\x128\n" +
 	"\x0eactor_template\x18\x04 \x01(\v2\x11.ateapi.ObjectRefR\ractorTemplate\x129\n" +
 	"\x0fworker_selector\x18\x05 \x01(\v2\x10.ateapi.SelectorR\x0eworkerSelector\x12A\n" +
 	"\x13source_snapshot_tag\x18\x06 \x01(\v2\x11.ateapi.ObjectRefR\x11sourceSnapshotTag\x12+\n" +
@@ -6399,7 +6949,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x19CredentialHeaderInjection\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x16\n" +
 	"\x06prefix\x18\x02 \x01(\tR\x06prefix\x12%\n" +
-	"\x0ecredential_uri\x18\x03 \x01(\tR\rcredentialUri\"\xe8\x04\n" +
+	"\x0ecredential_uri\x18\x03 \x01(\tR\rcredentialUri\"\xee\x05\n" +
 	"\vActorStatus\x12(\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x12.ateapi.ActorStateR\x05state\x12E\n" +
 	"\x11worker_assignment\x18\x02 \x01(\v2\x18.ateapi.WorkerAssignmentR\x10workerAssignment\x129\n" +
@@ -6409,7 +6959,10 @@ const file_ateapi_proto_rawDesc = "" +
 	")in_progress_snapshot_source_actor_version\x18\x06 \x01(\x03R$inProgressSnapshotSourceActorVersion\x12;\n" +
 	"\ractor_volumes\x18\a \x03(\v2\x16.ateapi.ExternalVolumeR\factorVolumes\x12D\n" +
 	"\x1fin_progress_local_snapshot_name\x18\b \x01(\tR\x1binProgressLocalSnapshotName\x12J\n" +
-	"\x0fsource_snapshot\x18\t \x01(\v2!.ateapi.ActorSourceSnapshotStatusR\x0esourceSnapshot\"m\n" +
+	"\x0fsource_snapshot\x18\t \x01(\v2!.ateapi.ActorSourceSnapshotStatusR\x0esourceSnapshot\x12G\n" +
+	"\x16current_actor_template\x18\n" +
+	" \x01(\v2\x11.ateapi.ObjectRefR\x14currentActorTemplate\x12;\n" +
+	"\x1acurrent_actor_template_uid\x18\v \x01(\tR\x17currentActorTemplateUid\"m\n" +
 	"\x19ActorSourceSnapshotStatus\x12-\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\bsnapshot\x12!\n" +
 	"\fsnapshot_uid\x18\x02 \x01(\tR\vsnapshotUid\"\xf2\x01\n" +
@@ -6424,13 +6977,11 @@ const file_ateapi_proto_rawDesc = "" +
 	"\rworker_pod_ip\x18\x05 \x01(\tR\vworkerPodIp\"z\n" +
 	"\rActorSnapshot\x124\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x18.ateapi.ResourceMetadataR\bmetadata\x123\n" +
-	"\x06status\x18\x02 \x01(\v2\x1b.ateapi.ActorSnapshotStatusR\x06status\"\xdf\x03\n" +
+	"\x06status\x18\x02 \x01(\v2\x1b.ateapi.ActorSnapshotStatusR\x06status\"\xf5\x02\n" +
 	"\x13ActorSnapshotStatus\x124\n" +
 	"\fsource_actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\vsourceActor\x12(\n" +
 	"\x10source_actor_uid\x18\x02 \x01(\tR\x0esourceActorUid\x120\n" +
-	"\x14source_actor_version\x18\x03 \x01(\x03R\x12sourceActorVersion\x128\n" +
-	"\x18actor_template_namespace\x18\x04 \x01(\tR\x16actorTemplateNamespace\x12.\n" +
-	"\x13actor_template_name\x18\x05 \x01(\tR\x11actorTemplateName\x12,\n" +
+	"\x14source_actor_version\x18\x03 \x01(\x03R\x12sourceActorVersion\x12,\n" +
 	"\x12actor_template_uid\x18\x06 \x01(\tR\x10actorTemplateUid\x12A\n" +
 	"\rcontent_scope\x18\a \x01(\x0e2\x1c.ateapi.SnapshotContentScopeR\fcontentScope\x12!\n" +
 	"\fsnapshot_uri\x18\b \x01(\tR\vsnapshotUri\x128\n" +
@@ -6500,7 +7051,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x0ftimeout_seconds\x18\x02 \x01(\x05R\x0etimeoutSeconds\"7\n" +
 	"\rHTTPGetAction\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
-	"\x04port\x18\x02 \x01(\x05R\x04port\"\xbd\x02\n" +
+	"\x04port\x18\x02 \x01(\x05R\x04port\"\xa9\x02\n" +
 	"\x06Volume\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12?\n" +
 	"\vdurable_dir\x18\x02 \x01(\v2\x1e.ateapi.DurableDirVolumeSourceR\n" +
@@ -6508,8 +7059,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x18external_volume_template\x18\x03 \x01(\v2\x1e.ateapi.ExternalVolumeTemplateR\x16externalVolumeTemplate\x12?\n" +
 	"\vsystem_info\x18\x05 \x01(\v2\x1e.ateapi.SystemInfoVolumeSourceR\n" +
 	"systemInfo\x12/\n" +
-	"\x05image\x18\x06 \x01(\v2\x19.ateapi.ImageVolumeSourceR\x05image\x12\x12\n" +
-	"\x04type\x18\x04 \x01(\tR\x04type\"1\n" +
+	"\x05image\x18\x06 \x01(\v2\x19.ateapi.ImageVolumeSourceR\x05image\"1\n" +
 	"\x11ImageVolumeSource\x12\x1c\n" +
 	"\treference\x18\x01 \x01(\tR\treference\"\x18\n" +
 	"\x16DurableDirVolumeSource\"b\n" +
@@ -6613,7 +7163,15 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x12actor_snapshot_tag\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x10actorSnapshotTag\";\n" +
 	"\rDeleteOptions\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x03R\aversion\x12\x10\n" +
-	"\x03uid\x18\x02 \x01(\tR\x03uid\"P\n" +
+	"\x03uid\x18\x02 \x01(\tR\x03uid\"\x8a\x01\n" +
+	"!ListWorkerActorAssignmentsRequest\x12)\n" +
+	"\x06worker\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x06worker\x12\x1b\n" +
+	"\tpage_size\x18\x02 \x01(\x05R\bpageSize\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x03 \x01(\tR\tpageToken\"\x92\x01\n" +
+	"\"ListWorkerActorAssignmentsResponse\x12D\n" +
+	"\x11actor_assignments\x18\x01 \x03(\v2\x17.ateapi.ActorAssignmentR\x10actorAssignments\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"P\n" +
 	"\x12ListWorkersRequest\x12\x1b\n" +
 	"\tpage_size\x18\x01 \x01(\x05R\bpageSize\x12\x1d\n" +
 	"\n" +
@@ -6639,7 +7197,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"page_token\x18\x03 \x01(\tR\tpageToken\"c\n" +
 	"\x12ListActorsResponse\x12%\n" +
 	"\x06actors\x18\x01 \x03(\v2\r.ateapi.ActorR\x06actors\x12&\n" +
-	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xf2\x03\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xbe\x03\n" +
 	"\x06Worker\x124\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x18.ateapi.ResourceMetadataR\bmetadata\x12)\n" +
 	"\x10worker_namespace\x18\x02 \x01(\tR\x0fworkerNamespace\x12\x1f\n" +
@@ -6651,31 +7209,33 @@ const file_ateapi_proto_rawDesc = "" +
 	"\tnode_name\x18\x06 \x01(\tR\bnodeName\x12\x0e\n" +
 	"\x02ip\x18\a \x01(\tR\x02ip\x12#\n" +
 	"\rsandbox_class\x18\b \x01(\tR\fsandboxClass\x122\n" +
-	"\x06labels\x18\t \x03(\v2\x1a.ateapi.Worker.LabelsEntryR\x06labels\x122\n" +
-	"\bcapacity\x18\n" +
-	" \x01(\v2\x16.ateapi.WorkerCapacityR\bcapacity\x12,\n" +
+	"\x06labels\x18\t \x03(\v2\x1a.ateapi.Worker.LabelsEntryR\x06labels\x12,\n" +
 	"\x06status\x18\v \x01(\v2\x14.ateapi.WorkerStatusR\x06status\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"r\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"s\n" +
 	"\fWorkerStatus\x12)\n" +
-	"\x05state\x18\x01 \x01(\x0e2\x13.ateapi.WorkerStateR\x05state\x127\n" +
+	"\x05state\x18\x01 \x01(\x0e2\x13.ateapi.WorkerStateR\x05state\x128\n" +
 	"\n" +
-	"assignment\x18\x02 \x01(\v2\x17.ateapi.ActorAssignmentR\n" +
-	"assignment\"P\n" +
-	"\x0eWorkerCapacity\x12\x1b\n" +
-	"\tcpu_milli\x18\x01 \x01(\x03R\bcpuMilli\x12!\n" +
-	"\fmemory_bytes\x18\x02 \x01(\x03R\vmemoryBytes\"\xe0\x01\n" +
-	"\x0fActorAssignment\x12F\n" +
-	"\x0eactor_template\x18\x01 \x01(\v2\x1f.ateapi.KubeNamespacedObjectRefR\ractorTemplate\x12'\n" +
+	"allocation\x18\x02 \x01(\v2\x18.ateapi.WorkerAllocationR\n" +
+	"allocation\"~\n" +
+	"\x10WorkerAllocation\x123\n" +
+	"\bcapacity\x18\x01 \x01(\v2\x17.ateapi.WorkerResourcesR\bcapacity\x125\n" +
+	"\tallocated\x18\x02 \x01(\v2\x17.ateapi.WorkerResourcesR\tallocated\"Z\n" +
+	"\x0fWorkerResources\x12/\n" +
+	"\tresources\x18\x01 \x01(\v2\x11.ateapi.ResourcesR\tresources\x12\x16\n" +
+	"\x06actors\x18\x02 \x01(\x05R\x06actors\"\xff\x01\n" +
+	"\x0fActorAssignment\x124\n" +
+	"\bmetadata\x18\x06 \x01(\v2\x18.ateapi.ResourceMetadataR\bmetadata\x12'\n" +
 	"\x05actor\x18\x02 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\x12\x1b\n" +
 	"\tactor_uid\x18\x03 \x01(\tR\bactorUid\x12?\n" +
-	"\x12actor_template_ref\x18\x04 \x01(\v2\x11.ateapi.ObjectRefR\x10actorTemplateRef\"K\n" +
-	"\x17KubeNamespacedObjectRef\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"\x13\n" +
-	"\x11DebugClearRequest\"\x14\n" +
-	"\x12DebugClearResponse\"\x84\x01\n" +
+	"\x12actor_template_ref\x18\x04 \x01(\v2\x11.ateapi.ObjectRefR\x10actorTemplateRef\x12/\n" +
+	"\tresources\x18\x05 \x01(\v2\x11.ateapi.ResourcesR\tresources\"z\n" +
+	"\x18SetWorkerCapacityRequest\x12)\n" +
+	"\x06worker\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x06worker\x123\n" +
+	"\bcapacity\x18\x02 \x01(\v2\x17.ateapi.WorkerResourcesR\bcapacity\"C\n" +
+	"\x19SetWorkerCapacityResponse\x12&\n" +
+	"\x06worker\x18\x01 \x01(\v2\x0e.ateapi.WorkerR\x06worker\"\x84\x01\n" +
 	"\x0eMintJWTRequest\x12\x1a\n" +
 	"\baudience\x18\x01 \x03(\tR\baudience\x12\x1a\n" +
 	"\batespace\x18\x02 \x01(\tR\batespace\x12\x1d\n" +
@@ -6729,7 +7289,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x15WORKER_STATE_DRAINING\x10\x02*k\n" +
 	"\x17ActorCertificatePurpose\x12)\n" +
 	"%ACTOR_CERTIFICATE_PURPOSE_UNSPECIFIED\x10\x00\x12%\n" +
-	"!ACTOR_CERTIFICATE_PURPOSE_ATUNNEL\x10\x012\x84\x13\n" +
+	"!ACTOR_CERTIFICATE_PURPOSE_ATUNNEL\x10\x012\xfb\x13\n" +
 	"\aControl\x124\n" +
 	"\bGetActor\x12\x17.ateapi.GetActorRequest\x1a\r.ateapi.Actor\"\x00\x12:\n" +
 	"\vCreateActor\x12\x1a.ateapi.CreateActorRequest\x1a\r.ateapi.Actor\"\x00\x12:\n" +
@@ -6754,7 +7314,8 @@ const file_ateapi_proto_rawDesc = "" +
 	"\fCreateWorker\x12\x1b.ateapi.CreateWorkerRequest\x1a\x0e.ateapi.Worker\"\x00\x12=\n" +
 	"\fUpdateWorker\x12\x1b.ateapi.UpdateWorkerRequest\x1a\x0e.ateapi.Worker\"\x00\x12=\n" +
 	"\fDeleteWorker\x12\x1b.ateapi.DeleteWorkerRequest\x1a\x0e.ateapi.Worker\"\x00\x12;\n" +
-	"\vDrainWorker\x12\x1a.ateapi.DrainWorkerRequest\x1a\x0e.ateapi.Worker\"\x00\x12E\n" +
+	"\vDrainWorker\x12\x1a.ateapi.DrainWorkerRequest\x1a\x0e.ateapi.Worker\"\x00\x12u\n" +
+	"\x1aListWorkerActorAssignments\x12).ateapi.ListWorkerActorAssignmentsRequest\x1a*.ateapi.ListWorkerActorAssignmentsResponse\"\x00\x12E\n" +
 	"\n" +
 	"ListActors\x12\x19.ateapi.ListActorsRequest\x1a\x1a.ateapi.ListActorsResponse\"\x00\x12C\n" +
 	"\x0eCreateAtespace\x12\x1d.ateapi.CreateAtespaceRequest\x1a\x10.ateapi.Atespace\"\x00\x12=\n" +
@@ -6764,13 +7325,12 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x13CreateActorTemplate\x12\".ateapi.CreateActorTemplateRequest\x1a\x15.ateapi.ActorTemplate\"\x00\x12L\n" +
 	"\x10GetActorTemplate\x12\x1f.ateapi.GetActorTemplateRequest\x1a\x15.ateapi.ActorTemplate\"\x00\x12]\n" +
 	"\x12ListActorTemplates\x12!.ateapi.ListActorTemplatesRequest\x1a\".ateapi.ListActorTemplatesResponse\"\x00\x12R\n" +
-	"\x13DeleteActorTemplate\x12\".ateapi.DeleteActorTemplateRequest\x1a\x15.ateapi.ActorTemplate\"\x002N\n" +
-	"\x05Debug\x12E\n" +
-	"\n" +
-	"DebugClear\x12\x19.ateapi.DebugClearRequest\x1a\x1a.ateapi.DebugClearResponse\"\x002\x8a\x01\n" +
+	"\x13DeleteActorTemplate\x12\".ateapi.DeleteActorTemplateRequest\x1a\x15.ateapi.ActorTemplate\"\x002\x8a\x01\n" +
 	"\rActorIdentity\x12:\n" +
 	"\aMintJWT\x12\x16.ateapi.MintJWTRequest\x1a\x17.ateapi.MintJWTResponse\x12=\n" +
-	"\bMintCert\x12\x17.ateapi.MintCertRequest\x1a\x18.ateapi.MintCertResponseB9Z7github.com/agent-substrate/substrate/pkg/proto/ateapipbb\x06proto3"
+	"\bMintCert\x12\x17.ateapi.MintCertRequest\x1a\x18.ateapi.MintCertResponse2i\n" +
+	"\rWorkerService\x12X\n" +
+	"\x11SetWorkerCapacity\x12 .ateapi.SetWorkerCapacityRequest\x1a!.ateapi.SetWorkerCapacityResponseB9Z7github.com/agent-substrate/substrate/pkg/proto/ateapipbb\x06proto3"
 
 var (
 	file_ateapi_proto_rawDescOnce sync.Once
@@ -6785,125 +7345,127 @@ func file_ateapi_proto_rawDescGZIP() []byte {
 }
 
 var file_ateapi_proto_enumTypes = make([]protoimpl.EnumInfo, 9)
-var file_ateapi_proto_msgTypes = make([]protoimpl.MessageInfo, 98)
+var file_ateapi_proto_msgTypes = make([]protoimpl.MessageInfo, 100)
 var file_ateapi_proto_goTypes = []any{
-	(SnapshotContentScope)(0),              // 0: ateapi.SnapshotContentScope
-	(ActorSnapshotTagScope)(0),             // 1: ateapi.ActorSnapshotTagScope
-	(ActorState)(0),                        // 2: ateapi.ActorState
-	(SandboxClass)(0),                      // 3: ateapi.SandboxClass
-	(ResumeSource)(0),                      // 4: ateapi.ResumeSource
-	(ActorMetadataField)(0),                // 5: ateapi.ActorMetadataField
-	(WorkerState)(0),                       // 6: ateapi.WorkerState
-	(ActorCertificatePurpose)(0),           // 7: ateapi.ActorCertificatePurpose
-	(ExternalVolume_Status)(0),             // 8: ateapi.ExternalVolume.Status
-	(*LocalSnapshotInfo)(nil),              // 9: ateapi.LocalSnapshotInfo
-	(*Selector)(nil),                       // 10: ateapi.Selector
-	(*ResourceMetadata)(nil),               // 11: ateapi.ResourceMetadata
-	(*ExternalVolume)(nil),                 // 12: ateapi.ExternalVolume
-	(*Actor)(nil),                          // 13: ateapi.Actor
-	(*EgressPolicy)(nil),                   // 14: ateapi.EgressPolicy
-	(*EgressRule)(nil),                     // 15: ateapi.EgressRule
-	(*HostnameRule)(nil),                   // 16: ateapi.HostnameRule
-	(*IPBlockRule)(nil),                    // 17: ateapi.IPBlockRule
-	(*EgressRuleEffects)(nil),              // 18: ateapi.EgressRuleEffects
-	(*CredentialHeaderInjection)(nil),      // 19: ateapi.CredentialHeaderInjection
-	(*ActorStatus)(nil),                    // 20: ateapi.ActorStatus
-	(*ActorSourceSnapshotStatus)(nil),      // 21: ateapi.ActorSourceSnapshotStatus
-	(*WorkerAssignment)(nil),               // 22: ateapi.WorkerAssignment
-	(*ActorSnapshot)(nil),                  // 23: ateapi.ActorSnapshot
-	(*ActorSnapshotStatus)(nil),            // 24: ateapi.ActorSnapshotStatus
-	(*ActorSnapshotTag)(nil),               // 25: ateapi.ActorSnapshotTag
-	(*Atespace)(nil),                       // 26: ateapi.Atespace
-	(*ObjectRef)(nil),                      // 27: ateapi.ObjectRef
-	(*ActorTemplate)(nil),                  // 28: ateapi.ActorTemplate
-	(*Resources)(nil),                      // 29: ateapi.Resources
-	(*Limits)(nil),                         // 30: ateapi.Limits
-	(*GoldenSnapshotStatus)(nil),           // 31: ateapi.GoldenSnapshotStatus
-	(*ActorTemplateStatus)(nil),            // 32: ateapi.ActorTemplateStatus
-	(*SandboxConfig)(nil),                  // 33: ateapi.SandboxConfig
-	(*SnapshotsConfig)(nil),                // 34: ateapi.SnapshotsConfig
-	(*OnResumeConfig)(nil),                 // 35: ateapi.OnResumeConfig
-	(*Container)(nil),                      // 36: ateapi.Container
-	(*SecurityContext)(nil),                // 37: ateapi.SecurityContext
-	(*Capabilities)(nil),                   // 38: ateapi.Capabilities
-	(*EnvVar)(nil),                         // 39: ateapi.EnvVar
-	(*ContainerReadyz)(nil),                // 40: ateapi.ContainerReadyz
-	(*HTTPGetAction)(nil),                  // 41: ateapi.HTTPGetAction
-	(*Volume)(nil),                         // 42: ateapi.Volume
-	(*ImageVolumeSource)(nil),              // 43: ateapi.ImageVolumeSource
-	(*DurableDirVolumeSource)(nil),         // 44: ateapi.DurableDirVolumeSource
-	(*ExternalVolumeTemplate)(nil),         // 45: ateapi.ExternalVolumeTemplate
-	(*SystemInfoVolumeSource)(nil),         // 46: ateapi.SystemInfoVolumeSource
-	(*SystemInfoDataSource)(nil),           // 47: ateapi.SystemInfoDataSource
-	(*ActorMetadataDataSource)(nil),        // 48: ateapi.ActorMetadataDataSource
-	(*ActorMetadataItem)(nil),              // 49: ateapi.ActorMetadataItem
-	(*TrustBundleDataSource)(nil),          // 50: ateapi.TrustBundleDataSource
-	(*VolumeMount)(nil),                    // 51: ateapi.VolumeMount
-	(*CreateAtespaceRequest)(nil),          // 52: ateapi.CreateAtespaceRequest
-	(*GetAtespaceRequest)(nil),             // 53: ateapi.GetAtespaceRequest
-	(*ListAtespacesRequest)(nil),           // 54: ateapi.ListAtespacesRequest
-	(*ListAtespacesResponse)(nil),          // 55: ateapi.ListAtespacesResponse
-	(*DeleteAtespaceRequest)(nil),          // 56: ateapi.DeleteAtespaceRequest
-	(*CreateActorTemplateRequest)(nil),     // 57: ateapi.CreateActorTemplateRequest
-	(*GetActorTemplateRequest)(nil),        // 58: ateapi.GetActorTemplateRequest
-	(*ListActorTemplatesRequest)(nil),      // 59: ateapi.ListActorTemplatesRequest
-	(*ListActorTemplatesResponse)(nil),     // 60: ateapi.ListActorTemplatesResponse
-	(*DeleteActorTemplateRequest)(nil),     // 61: ateapi.DeleteActorTemplateRequest
-	(*GetActorRequest)(nil),                // 62: ateapi.GetActorRequest
-	(*CreateActorRequest)(nil),             // 63: ateapi.CreateActorRequest
-	(*UpdateActorRequest)(nil),             // 64: ateapi.UpdateActorRequest
-	(*SuspendActorRequest)(nil),            // 65: ateapi.SuspendActorRequest
-	(*SuspendActorResponse)(nil),           // 66: ateapi.SuspendActorResponse
-	(*PauseActorRequest)(nil),              // 67: ateapi.PauseActorRequest
-	(*PauseActorResponse)(nil),             // 68: ateapi.PauseActorResponse
-	(*ResumeActorRequest)(nil),             // 69: ateapi.ResumeActorRequest
-	(*ResumeActorResponse)(nil),            // 70: ateapi.ResumeActorResponse
-	(*DeleteActorRequest)(nil),             // 71: ateapi.DeleteActorRequest
-	(*GetActorEgressPolicyRequest)(nil),    // 72: ateapi.GetActorEgressPolicyRequest
-	(*CreateActorEgressPolicyRequest)(nil), // 73: ateapi.CreateActorEgressPolicyRequest
-	(*UpdateActorEgressPolicyRequest)(nil), // 74: ateapi.UpdateActorEgressPolicyRequest
-	(*DeleteActorEgressPolicyRequest)(nil), // 75: ateapi.DeleteActorEgressPolicyRequest
-	(*GetActorSnapshotRequest)(nil),        // 76: ateapi.GetActorSnapshotRequest
-	(*GetActorSnapshotTagRequest)(nil),     // 77: ateapi.GetActorSnapshotTagRequest
-	(*ListActorSnapshotsRequest)(nil),      // 78: ateapi.ListActorSnapshotsRequest
-	(*ListActorSnapshotsResponse)(nil),     // 79: ateapi.ListActorSnapshotsResponse
-	(*CreateActorSnapshotTagRequest)(nil),  // 80: ateapi.CreateActorSnapshotTagRequest
-	(*UpdateActorSnapshotTagRequest)(nil),  // 81: ateapi.UpdateActorSnapshotTagRequest
-	(*DeleteActorSnapshotTagRequest)(nil),  // 82: ateapi.DeleteActorSnapshotTagRequest
-	(*DeleteOptions)(nil),                  // 83: ateapi.DeleteOptions
-	(*ListWorkersRequest)(nil),             // 84: ateapi.ListWorkersRequest
-	(*ListWorkersResponse)(nil),            // 85: ateapi.ListWorkersResponse
-	(*GetWorkerRequest)(nil),               // 86: ateapi.GetWorkerRequest
-	(*CreateWorkerRequest)(nil),            // 87: ateapi.CreateWorkerRequest
-	(*UpdateWorkerRequest)(nil),            // 88: ateapi.UpdateWorkerRequest
-	(*DeleteWorkerRequest)(nil),            // 89: ateapi.DeleteWorkerRequest
-	(*DrainWorkerRequest)(nil),             // 90: ateapi.DrainWorkerRequest
-	(*ListActorsRequest)(nil),              // 91: ateapi.ListActorsRequest
-	(*ListActorsResponse)(nil),             // 92: ateapi.ListActorsResponse
-	(*Worker)(nil),                         // 93: ateapi.Worker
-	(*WorkerStatus)(nil),                   // 94: ateapi.WorkerStatus
-	(*WorkerCapacity)(nil),                 // 95: ateapi.WorkerCapacity
-	(*ActorAssignment)(nil),                // 96: ateapi.ActorAssignment
-	(*KubeNamespacedObjectRef)(nil),        // 97: ateapi.KubeNamespacedObjectRef
-	(*DebugClearRequest)(nil),              // 98: ateapi.DebugClearRequest
-	(*DebugClearResponse)(nil),             // 99: ateapi.DebugClearResponse
-	(*MintJWTRequest)(nil),                 // 100: ateapi.MintJWTRequest
-	(*MintJWTResponse)(nil),                // 101: ateapi.MintJWTResponse
-	(*MintCertRequest)(nil),                // 102: ateapi.MintCertRequest
-	(*MintCertResponse)(nil),               // 103: ateapi.MintCertResponse
-	nil,                                    // 104: ateapi.Selector.MatchLabelsEntry
-	nil,                                    // 105: ateapi.ExternalVolume.VolumeContextEntry
-	nil,                                    // 106: ateapi.Worker.LabelsEntry
-	(*timestamppb.Timestamp)(nil),          // 107: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),                  // 108: google.protobuf.Empty
+	(SnapshotContentScope)(0),                  // 0: ateapi.SnapshotContentScope
+	(ActorSnapshotTagScope)(0),                 // 1: ateapi.ActorSnapshotTagScope
+	(ActorState)(0),                            // 2: ateapi.ActorState
+	(SandboxClass)(0),                          // 3: ateapi.SandboxClass
+	(ResumeSource)(0),                          // 4: ateapi.ResumeSource
+	(ActorMetadataField)(0),                    // 5: ateapi.ActorMetadataField
+	(WorkerState)(0),                           // 6: ateapi.WorkerState
+	(ActorCertificatePurpose)(0),               // 7: ateapi.ActorCertificatePurpose
+	(ExternalVolume_Status)(0),                 // 8: ateapi.ExternalVolume.Status
+	(*LocalSnapshotInfo)(nil),                  // 9: ateapi.LocalSnapshotInfo
+	(*Selector)(nil),                           // 10: ateapi.Selector
+	(*ResourceMetadata)(nil),                   // 11: ateapi.ResourceMetadata
+	(*ExternalVolume)(nil),                     // 12: ateapi.ExternalVolume
+	(*Actor)(nil),                              // 13: ateapi.Actor
+	(*EgressPolicy)(nil),                       // 14: ateapi.EgressPolicy
+	(*EgressRule)(nil),                         // 15: ateapi.EgressRule
+	(*HostnameRule)(nil),                       // 16: ateapi.HostnameRule
+	(*IPBlockRule)(nil),                        // 17: ateapi.IPBlockRule
+	(*EgressRuleEffects)(nil),                  // 18: ateapi.EgressRuleEffects
+	(*CredentialHeaderInjection)(nil),          // 19: ateapi.CredentialHeaderInjection
+	(*ActorStatus)(nil),                        // 20: ateapi.ActorStatus
+	(*ActorSourceSnapshotStatus)(nil),          // 21: ateapi.ActorSourceSnapshotStatus
+	(*WorkerAssignment)(nil),                   // 22: ateapi.WorkerAssignment
+	(*ActorSnapshot)(nil),                      // 23: ateapi.ActorSnapshot
+	(*ActorSnapshotStatus)(nil),                // 24: ateapi.ActorSnapshotStatus
+	(*ActorSnapshotTag)(nil),                   // 25: ateapi.ActorSnapshotTag
+	(*Atespace)(nil),                           // 26: ateapi.Atespace
+	(*ObjectRef)(nil),                          // 27: ateapi.ObjectRef
+	(*ActorTemplate)(nil),                      // 28: ateapi.ActorTemplate
+	(*Resources)(nil),                          // 29: ateapi.Resources
+	(*Limits)(nil),                             // 30: ateapi.Limits
+	(*GoldenSnapshotStatus)(nil),               // 31: ateapi.GoldenSnapshotStatus
+	(*ActorTemplateStatus)(nil),                // 32: ateapi.ActorTemplateStatus
+	(*SandboxConfig)(nil),                      // 33: ateapi.SandboxConfig
+	(*SnapshotsConfig)(nil),                    // 34: ateapi.SnapshotsConfig
+	(*OnResumeConfig)(nil),                     // 35: ateapi.OnResumeConfig
+	(*Container)(nil),                          // 36: ateapi.Container
+	(*SecurityContext)(nil),                    // 37: ateapi.SecurityContext
+	(*Capabilities)(nil),                       // 38: ateapi.Capabilities
+	(*EnvVar)(nil),                             // 39: ateapi.EnvVar
+	(*ContainerReadyz)(nil),                    // 40: ateapi.ContainerReadyz
+	(*HTTPGetAction)(nil),                      // 41: ateapi.HTTPGetAction
+	(*Volume)(nil),                             // 42: ateapi.Volume
+	(*ImageVolumeSource)(nil),                  // 43: ateapi.ImageVolumeSource
+	(*DurableDirVolumeSource)(nil),             // 44: ateapi.DurableDirVolumeSource
+	(*ExternalVolumeTemplate)(nil),             // 45: ateapi.ExternalVolumeTemplate
+	(*SystemInfoVolumeSource)(nil),             // 46: ateapi.SystemInfoVolumeSource
+	(*SystemInfoDataSource)(nil),               // 47: ateapi.SystemInfoDataSource
+	(*ActorMetadataDataSource)(nil),            // 48: ateapi.ActorMetadataDataSource
+	(*ActorMetadataItem)(nil),                  // 49: ateapi.ActorMetadataItem
+	(*TrustBundleDataSource)(nil),              // 50: ateapi.TrustBundleDataSource
+	(*VolumeMount)(nil),                        // 51: ateapi.VolumeMount
+	(*CreateAtespaceRequest)(nil),              // 52: ateapi.CreateAtespaceRequest
+	(*GetAtespaceRequest)(nil),                 // 53: ateapi.GetAtespaceRequest
+	(*ListAtespacesRequest)(nil),               // 54: ateapi.ListAtespacesRequest
+	(*ListAtespacesResponse)(nil),              // 55: ateapi.ListAtespacesResponse
+	(*DeleteAtespaceRequest)(nil),              // 56: ateapi.DeleteAtespaceRequest
+	(*CreateActorTemplateRequest)(nil),         // 57: ateapi.CreateActorTemplateRequest
+	(*GetActorTemplateRequest)(nil),            // 58: ateapi.GetActorTemplateRequest
+	(*ListActorTemplatesRequest)(nil),          // 59: ateapi.ListActorTemplatesRequest
+	(*ListActorTemplatesResponse)(nil),         // 60: ateapi.ListActorTemplatesResponse
+	(*DeleteActorTemplateRequest)(nil),         // 61: ateapi.DeleteActorTemplateRequest
+	(*GetActorRequest)(nil),                    // 62: ateapi.GetActorRequest
+	(*CreateActorRequest)(nil),                 // 63: ateapi.CreateActorRequest
+	(*UpdateActorRequest)(nil),                 // 64: ateapi.UpdateActorRequest
+	(*SuspendActorRequest)(nil),                // 65: ateapi.SuspendActorRequest
+	(*SuspendActorResponse)(nil),               // 66: ateapi.SuspendActorResponse
+	(*PauseActorRequest)(nil),                  // 67: ateapi.PauseActorRequest
+	(*PauseActorResponse)(nil),                 // 68: ateapi.PauseActorResponse
+	(*ResumeActorRequest)(nil),                 // 69: ateapi.ResumeActorRequest
+	(*ResumeActorResponse)(nil),                // 70: ateapi.ResumeActorResponse
+	(*DeleteActorRequest)(nil),                 // 71: ateapi.DeleteActorRequest
+	(*GetActorEgressPolicyRequest)(nil),        // 72: ateapi.GetActorEgressPolicyRequest
+	(*CreateActorEgressPolicyRequest)(nil),     // 73: ateapi.CreateActorEgressPolicyRequest
+	(*UpdateActorEgressPolicyRequest)(nil),     // 74: ateapi.UpdateActorEgressPolicyRequest
+	(*DeleteActorEgressPolicyRequest)(nil),     // 75: ateapi.DeleteActorEgressPolicyRequest
+	(*GetActorSnapshotRequest)(nil),            // 76: ateapi.GetActorSnapshotRequest
+	(*GetActorSnapshotTagRequest)(nil),         // 77: ateapi.GetActorSnapshotTagRequest
+	(*ListActorSnapshotsRequest)(nil),          // 78: ateapi.ListActorSnapshotsRequest
+	(*ListActorSnapshotsResponse)(nil),         // 79: ateapi.ListActorSnapshotsResponse
+	(*CreateActorSnapshotTagRequest)(nil),      // 80: ateapi.CreateActorSnapshotTagRequest
+	(*UpdateActorSnapshotTagRequest)(nil),      // 81: ateapi.UpdateActorSnapshotTagRequest
+	(*DeleteActorSnapshotTagRequest)(nil),      // 82: ateapi.DeleteActorSnapshotTagRequest
+	(*DeleteOptions)(nil),                      // 83: ateapi.DeleteOptions
+	(*ListWorkerActorAssignmentsRequest)(nil),  // 84: ateapi.ListWorkerActorAssignmentsRequest
+	(*ListWorkerActorAssignmentsResponse)(nil), // 85: ateapi.ListWorkerActorAssignmentsResponse
+	(*ListWorkersRequest)(nil),                 // 86: ateapi.ListWorkersRequest
+	(*ListWorkersResponse)(nil),                // 87: ateapi.ListWorkersResponse
+	(*GetWorkerRequest)(nil),                   // 88: ateapi.GetWorkerRequest
+	(*CreateWorkerRequest)(nil),                // 89: ateapi.CreateWorkerRequest
+	(*UpdateWorkerRequest)(nil),                // 90: ateapi.UpdateWorkerRequest
+	(*DeleteWorkerRequest)(nil),                // 91: ateapi.DeleteWorkerRequest
+	(*DrainWorkerRequest)(nil),                 // 92: ateapi.DrainWorkerRequest
+	(*ListActorsRequest)(nil),                  // 93: ateapi.ListActorsRequest
+	(*ListActorsResponse)(nil),                 // 94: ateapi.ListActorsResponse
+	(*Worker)(nil),                             // 95: ateapi.Worker
+	(*WorkerStatus)(nil),                       // 96: ateapi.WorkerStatus
+	(*WorkerAllocation)(nil),                   // 97: ateapi.WorkerAllocation
+	(*WorkerResources)(nil),                    // 98: ateapi.WorkerResources
+	(*ActorAssignment)(nil),                    // 99: ateapi.ActorAssignment
+	(*SetWorkerCapacityRequest)(nil),           // 100: ateapi.SetWorkerCapacityRequest
+	(*SetWorkerCapacityResponse)(nil),          // 101: ateapi.SetWorkerCapacityResponse
+	(*MintJWTRequest)(nil),                     // 102: ateapi.MintJWTRequest
+	(*MintJWTResponse)(nil),                    // 103: ateapi.MintJWTResponse
+	(*MintCertRequest)(nil),                    // 104: ateapi.MintCertRequest
+	(*MintCertResponse)(nil),                   // 105: ateapi.MintCertResponse
+	nil,                                        // 106: ateapi.Selector.MatchLabelsEntry
+	nil,                                        // 107: ateapi.ExternalVolume.VolumeContextEntry
+	nil,                                        // 108: ateapi.Worker.LabelsEntry
+	(*timestamppb.Timestamp)(nil),              // 109: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),                      // 110: google.protobuf.Empty
 }
 var file_ateapi_proto_depIdxs = []int32{
 	0,   // 0: ateapi.LocalSnapshotInfo.content_scope:type_name -> ateapi.SnapshotContentScope
-	104, // 1: ateapi.Selector.match_labels:type_name -> ateapi.Selector.MatchLabelsEntry
-	107, // 2: ateapi.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
-	107, // 3: ateapi.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
+	106, // 1: ateapi.Selector.match_labels:type_name -> ateapi.Selector.MatchLabelsEntry
+	109, // 2: ateapi.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
+	109, // 3: ateapi.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
 	8,   // 4: ateapi.ExternalVolume.status:type_name -> ateapi.ExternalVolume.Status
-	105, // 5: ateapi.ExternalVolume.volume_context:type_name -> ateapi.ExternalVolume.VolumeContextEntry
+	107, // 5: ateapi.ExternalVolume.volume_context:type_name -> ateapi.ExternalVolume.VolumeContextEntry
 	11,  // 6: ateapi.Actor.metadata:type_name -> ateapi.ResourceMetadata
 	27,  // 7: ateapi.Actor.actor_template:type_name -> ateapi.ObjectRef
 	10,  // 8: ateapi.Actor.worker_selector:type_name -> ateapi.Selector
@@ -6913,7 +7475,7 @@ var file_ateapi_proto_depIdxs = []int32{
 	15,  // 12: ateapi.EgressPolicy.rules:type_name -> ateapi.EgressRule
 	16,  // 13: ateapi.EgressRule.hostnames:type_name -> ateapi.HostnameRule
 	17,  // 14: ateapi.EgressRule.ip_blocks:type_name -> ateapi.IPBlockRule
-	108, // 15: ateapi.EgressRule.all:type_name -> google.protobuf.Empty
+	110, // 15: ateapi.EgressRule.all:type_name -> google.protobuf.Empty
 	18,  // 16: ateapi.HostnameRule.effects:type_name -> ateapi.EgressRuleEffects
 	19,  // 17: ateapi.EgressRuleEffects.inject_static_headers:type_name -> ateapi.CredentialHeaderInjection
 	2,   // 18: ateapi.ActorStatus.state:type_name -> ateapi.ActorState
@@ -6922,174 +7484,185 @@ var file_ateapi_proto_depIdxs = []int32{
 	9,   // 21: ateapi.ActorStatus.local_snapshot_info:type_name -> ateapi.LocalSnapshotInfo
 	12,  // 22: ateapi.ActorStatus.actor_volumes:type_name -> ateapi.ExternalVolume
 	21,  // 23: ateapi.ActorStatus.source_snapshot:type_name -> ateapi.ActorSourceSnapshotStatus
-	27,  // 24: ateapi.ActorSourceSnapshotStatus.snapshot:type_name -> ateapi.ObjectRef
-	27,  // 25: ateapi.WorkerAssignment.worker:type_name -> ateapi.ObjectRef
-	11,  // 26: ateapi.ActorSnapshot.metadata:type_name -> ateapi.ResourceMetadata
-	24,  // 27: ateapi.ActorSnapshot.status:type_name -> ateapi.ActorSnapshotStatus
-	27,  // 28: ateapi.ActorSnapshotStatus.source_actor:type_name -> ateapi.ObjectRef
-	0,   // 29: ateapi.ActorSnapshotStatus.content_scope:type_name -> ateapi.SnapshotContentScope
-	27,  // 30: ateapi.ActorSnapshotStatus.actor_template:type_name -> ateapi.ObjectRef
-	11,  // 31: ateapi.ActorSnapshotTag.metadata:type_name -> ateapi.ResourceMetadata
-	27,  // 32: ateapi.ActorSnapshotTag.snapshot:type_name -> ateapi.ObjectRef
-	1,   // 33: ateapi.ActorSnapshotTag.scope:type_name -> ateapi.ActorSnapshotTagScope
-	11,  // 34: ateapi.Atespace.metadata:type_name -> ateapi.ResourceMetadata
-	11,  // 35: ateapi.ActorTemplate.metadata:type_name -> ateapi.ResourceMetadata
-	10,  // 36: ateapi.ActorTemplate.worker_selector:type_name -> ateapi.Selector
-	36,  // 37: ateapi.ActorTemplate.containers:type_name -> ateapi.Container
-	42,  // 38: ateapi.ActorTemplate.volumes:type_name -> ateapi.Volume
-	34,  // 39: ateapi.ActorTemplate.snapshots_config:type_name -> ateapi.SnapshotsConfig
-	33,  // 40: ateapi.ActorTemplate.sandbox_config:type_name -> ateapi.SandboxConfig
-	29,  // 41: ateapi.ActorTemplate.resources:type_name -> ateapi.Resources
-	32,  // 42: ateapi.ActorTemplate.status:type_name -> ateapi.ActorTemplateStatus
-	30,  // 43: ateapi.Resources.limits:type_name -> ateapi.Limits
-	27,  // 44: ateapi.GoldenSnapshotStatus.golden_snapshot:type_name -> ateapi.ObjectRef
-	107, // 45: ateapi.GoldenSnapshotStatus.take_golden_snapshot_at:type_name -> google.protobuf.Timestamp
-	31,  // 46: ateapi.ActorTemplateStatus.golden_snapshot_status:type_name -> ateapi.GoldenSnapshotStatus
-	3,   // 47: ateapi.SandboxConfig.sandbox_class:type_name -> ateapi.SandboxClass
-	0,   // 48: ateapi.SnapshotsConfig.on_pause:type_name -> ateapi.SnapshotContentScope
-	0,   // 49: ateapi.SnapshotsConfig.on_commit:type_name -> ateapi.SnapshotContentScope
-	35,  // 50: ateapi.SnapshotsConfig.on_resume:type_name -> ateapi.OnResumeConfig
-	4,   // 51: ateapi.OnResumeConfig.from_data:type_name -> ateapi.ResumeSource
-	39,  // 52: ateapi.Container.env:type_name -> ateapi.EnvVar
-	40,  // 53: ateapi.Container.readyz:type_name -> ateapi.ContainerReadyz
-	51,  // 54: ateapi.Container.volume_mounts:type_name -> ateapi.VolumeMount
-	37,  // 55: ateapi.Container.security_context:type_name -> ateapi.SecurityContext
-	29,  // 56: ateapi.Container.resources:type_name -> ateapi.Resources
-	38,  // 57: ateapi.SecurityContext.capabilities:type_name -> ateapi.Capabilities
-	41,  // 58: ateapi.ContainerReadyz.http_get:type_name -> ateapi.HTTPGetAction
-	44,  // 59: ateapi.Volume.durable_dir:type_name -> ateapi.DurableDirVolumeSource
-	45,  // 60: ateapi.Volume.external_volume_template:type_name -> ateapi.ExternalVolumeTemplate
-	46,  // 61: ateapi.Volume.system_info:type_name -> ateapi.SystemInfoVolumeSource
-	43,  // 62: ateapi.Volume.image:type_name -> ateapi.ImageVolumeSource
-	47,  // 63: ateapi.SystemInfoVolumeSource.data_sources:type_name -> ateapi.SystemInfoDataSource
-	48,  // 64: ateapi.SystemInfoDataSource.actor_metadata:type_name -> ateapi.ActorMetadataDataSource
-	50,  // 65: ateapi.SystemInfoDataSource.trust_bundle:type_name -> ateapi.TrustBundleDataSource
-	49,  // 66: ateapi.ActorMetadataDataSource.items:type_name -> ateapi.ActorMetadataItem
-	5,   // 67: ateapi.ActorMetadataItem.field:type_name -> ateapi.ActorMetadataField
-	26,  // 68: ateapi.CreateAtespaceRequest.atespace:type_name -> ateapi.Atespace
-	27,  // 69: ateapi.GetAtespaceRequest.atespace:type_name -> ateapi.ObjectRef
-	26,  // 70: ateapi.ListAtespacesResponse.atespaces:type_name -> ateapi.Atespace
-	27,  // 71: ateapi.DeleteAtespaceRequest.atespace:type_name -> ateapi.ObjectRef
-	28,  // 72: ateapi.CreateActorTemplateRequest.actor_template:type_name -> ateapi.ActorTemplate
-	27,  // 73: ateapi.GetActorTemplateRequest.actor_template:type_name -> ateapi.ObjectRef
-	28,  // 74: ateapi.ListActorTemplatesResponse.actor_templates:type_name -> ateapi.ActorTemplate
-	27,  // 75: ateapi.DeleteActorTemplateRequest.actor_template:type_name -> ateapi.ObjectRef
-	27,  // 76: ateapi.GetActorRequest.actor:type_name -> ateapi.ObjectRef
-	13,  // 77: ateapi.CreateActorRequest.actor:type_name -> ateapi.Actor
-	13,  // 78: ateapi.UpdateActorRequest.actor:type_name -> ateapi.Actor
-	27,  // 79: ateapi.SuspendActorRequest.actor:type_name -> ateapi.ObjectRef
-	13,  // 80: ateapi.SuspendActorResponse.actor:type_name -> ateapi.Actor
-	27,  // 81: ateapi.PauseActorRequest.actor:type_name -> ateapi.ObjectRef
-	13,  // 82: ateapi.PauseActorResponse.actor:type_name -> ateapi.Actor
-	27,  // 83: ateapi.ResumeActorRequest.actor:type_name -> ateapi.ObjectRef
-	13,  // 84: ateapi.ResumeActorResponse.actor:type_name -> ateapi.Actor
-	27,  // 85: ateapi.DeleteActorRequest.actor:type_name -> ateapi.ObjectRef
-	27,  // 86: ateapi.GetActorEgressPolicyRequest.actor:type_name -> ateapi.ObjectRef
-	27,  // 87: ateapi.CreateActorEgressPolicyRequest.actor:type_name -> ateapi.ObjectRef
-	14,  // 88: ateapi.CreateActorEgressPolicyRequest.egress_policy:type_name -> ateapi.EgressPolicy
-	27,  // 89: ateapi.UpdateActorEgressPolicyRequest.actor:type_name -> ateapi.ObjectRef
-	14,  // 90: ateapi.UpdateActorEgressPolicyRequest.egress_policy:type_name -> ateapi.EgressPolicy
-	27,  // 91: ateapi.DeleteActorEgressPolicyRequest.actor:type_name -> ateapi.ObjectRef
-	27,  // 92: ateapi.GetActorSnapshotRequest.actor_snapshot:type_name -> ateapi.ObjectRef
-	27,  // 93: ateapi.GetActorSnapshotTagRequest.actor_snapshot_tag:type_name -> ateapi.ObjectRef
-	23,  // 94: ateapi.ListActorSnapshotsResponse.actor_snapshots:type_name -> ateapi.ActorSnapshot
-	25,  // 95: ateapi.CreateActorSnapshotTagRequest.actor_snapshot_tag:type_name -> ateapi.ActorSnapshotTag
-	25,  // 96: ateapi.UpdateActorSnapshotTagRequest.actor_snapshot_tag:type_name -> ateapi.ActorSnapshotTag
-	27,  // 97: ateapi.DeleteActorSnapshotTagRequest.actor_snapshot_tag:type_name -> ateapi.ObjectRef
-	93,  // 98: ateapi.ListWorkersResponse.workers:type_name -> ateapi.Worker
-	27,  // 99: ateapi.GetWorkerRequest.worker:type_name -> ateapi.ObjectRef
-	93,  // 100: ateapi.CreateWorkerRequest.worker:type_name -> ateapi.Worker
-	93,  // 101: ateapi.UpdateWorkerRequest.worker:type_name -> ateapi.Worker
-	27,  // 102: ateapi.DeleteWorkerRequest.worker:type_name -> ateapi.ObjectRef
-	83,  // 103: ateapi.DeleteWorkerRequest.options:type_name -> ateapi.DeleteOptions
-	27,  // 104: ateapi.DrainWorkerRequest.worker:type_name -> ateapi.ObjectRef
-	13,  // 105: ateapi.ListActorsResponse.actors:type_name -> ateapi.Actor
-	11,  // 106: ateapi.Worker.metadata:type_name -> ateapi.ResourceMetadata
-	106, // 107: ateapi.Worker.labels:type_name -> ateapi.Worker.LabelsEntry
-	95,  // 108: ateapi.Worker.capacity:type_name -> ateapi.WorkerCapacity
-	94,  // 109: ateapi.Worker.status:type_name -> ateapi.WorkerStatus
-	6,   // 110: ateapi.WorkerStatus.state:type_name -> ateapi.WorkerState
-	96,  // 111: ateapi.WorkerStatus.assignment:type_name -> ateapi.ActorAssignment
-	97,  // 112: ateapi.ActorAssignment.actor_template:type_name -> ateapi.KubeNamespacedObjectRef
-	27,  // 113: ateapi.ActorAssignment.actor:type_name -> ateapi.ObjectRef
-	27,  // 114: ateapi.ActorAssignment.actor_template_ref:type_name -> ateapi.ObjectRef
-	27,  // 115: ateapi.MintCertRequest.worker:type_name -> ateapi.ObjectRef
-	7,   // 116: ateapi.MintCertRequest.purpose:type_name -> ateapi.ActorCertificatePurpose
-	62,  // 117: ateapi.Control.GetActor:input_type -> ateapi.GetActorRequest
-	63,  // 118: ateapi.Control.CreateActor:input_type -> ateapi.CreateActorRequest
-	64,  // 119: ateapi.Control.UpdateActor:input_type -> ateapi.UpdateActorRequest
-	65,  // 120: ateapi.Control.SuspendActor:input_type -> ateapi.SuspendActorRequest
-	67,  // 121: ateapi.Control.PauseActor:input_type -> ateapi.PauseActorRequest
-	69,  // 122: ateapi.Control.ResumeActor:input_type -> ateapi.ResumeActorRequest
-	71,  // 123: ateapi.Control.DeleteActor:input_type -> ateapi.DeleteActorRequest
-	72,  // 124: ateapi.Control.GetActorEgressPolicy:input_type -> ateapi.GetActorEgressPolicyRequest
-	73,  // 125: ateapi.Control.CreateActorEgressPolicy:input_type -> ateapi.CreateActorEgressPolicyRequest
-	74,  // 126: ateapi.Control.UpdateActorEgressPolicy:input_type -> ateapi.UpdateActorEgressPolicyRequest
-	75,  // 127: ateapi.Control.DeleteActorEgressPolicy:input_type -> ateapi.DeleteActorEgressPolicyRequest
-	76,  // 128: ateapi.Control.GetActorSnapshot:input_type -> ateapi.GetActorSnapshotRequest
-	77,  // 129: ateapi.Control.GetActorSnapshotTag:input_type -> ateapi.GetActorSnapshotTagRequest
-	78,  // 130: ateapi.Control.ListActorSnapshots:input_type -> ateapi.ListActorSnapshotsRequest
-	80,  // 131: ateapi.Control.CreateActorSnapshotTag:input_type -> ateapi.CreateActorSnapshotTagRequest
-	81,  // 132: ateapi.Control.UpdateActorSnapshotTag:input_type -> ateapi.UpdateActorSnapshotTagRequest
-	82,  // 133: ateapi.Control.DeleteActorSnapshotTag:input_type -> ateapi.DeleteActorSnapshotTagRequest
-	84,  // 134: ateapi.Control.ListWorkers:input_type -> ateapi.ListWorkersRequest
-	86,  // 135: ateapi.Control.GetWorker:input_type -> ateapi.GetWorkerRequest
-	87,  // 136: ateapi.Control.CreateWorker:input_type -> ateapi.CreateWorkerRequest
-	88,  // 137: ateapi.Control.UpdateWorker:input_type -> ateapi.UpdateWorkerRequest
-	89,  // 138: ateapi.Control.DeleteWorker:input_type -> ateapi.DeleteWorkerRequest
-	90,  // 139: ateapi.Control.DrainWorker:input_type -> ateapi.DrainWorkerRequest
-	91,  // 140: ateapi.Control.ListActors:input_type -> ateapi.ListActorsRequest
-	52,  // 141: ateapi.Control.CreateAtespace:input_type -> ateapi.CreateAtespaceRequest
-	53,  // 142: ateapi.Control.GetAtespace:input_type -> ateapi.GetAtespaceRequest
-	54,  // 143: ateapi.Control.ListAtespaces:input_type -> ateapi.ListAtespacesRequest
-	56,  // 144: ateapi.Control.DeleteAtespace:input_type -> ateapi.DeleteAtespaceRequest
-	57,  // 145: ateapi.Control.CreateActorTemplate:input_type -> ateapi.CreateActorTemplateRequest
-	58,  // 146: ateapi.Control.GetActorTemplate:input_type -> ateapi.GetActorTemplateRequest
-	59,  // 147: ateapi.Control.ListActorTemplates:input_type -> ateapi.ListActorTemplatesRequest
-	61,  // 148: ateapi.Control.DeleteActorTemplate:input_type -> ateapi.DeleteActorTemplateRequest
-	98,  // 149: ateapi.Debug.DebugClear:input_type -> ateapi.DebugClearRequest
-	100, // 150: ateapi.ActorIdentity.MintJWT:input_type -> ateapi.MintJWTRequest
-	102, // 151: ateapi.ActorIdentity.MintCert:input_type -> ateapi.MintCertRequest
-	13,  // 152: ateapi.Control.GetActor:output_type -> ateapi.Actor
-	13,  // 153: ateapi.Control.CreateActor:output_type -> ateapi.Actor
-	13,  // 154: ateapi.Control.UpdateActor:output_type -> ateapi.Actor
-	66,  // 155: ateapi.Control.SuspendActor:output_type -> ateapi.SuspendActorResponse
-	68,  // 156: ateapi.Control.PauseActor:output_type -> ateapi.PauseActorResponse
-	70,  // 157: ateapi.Control.ResumeActor:output_type -> ateapi.ResumeActorResponse
-	13,  // 158: ateapi.Control.DeleteActor:output_type -> ateapi.Actor
-	14,  // 159: ateapi.Control.GetActorEgressPolicy:output_type -> ateapi.EgressPolicy
-	14,  // 160: ateapi.Control.CreateActorEgressPolicy:output_type -> ateapi.EgressPolicy
-	14,  // 161: ateapi.Control.UpdateActorEgressPolicy:output_type -> ateapi.EgressPolicy
-	14,  // 162: ateapi.Control.DeleteActorEgressPolicy:output_type -> ateapi.EgressPolicy
-	23,  // 163: ateapi.Control.GetActorSnapshot:output_type -> ateapi.ActorSnapshot
-	25,  // 164: ateapi.Control.GetActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
-	79,  // 165: ateapi.Control.ListActorSnapshots:output_type -> ateapi.ListActorSnapshotsResponse
-	25,  // 166: ateapi.Control.CreateActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
-	25,  // 167: ateapi.Control.UpdateActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
-	25,  // 168: ateapi.Control.DeleteActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
-	85,  // 169: ateapi.Control.ListWorkers:output_type -> ateapi.ListWorkersResponse
-	93,  // 170: ateapi.Control.GetWorker:output_type -> ateapi.Worker
-	93,  // 171: ateapi.Control.CreateWorker:output_type -> ateapi.Worker
-	93,  // 172: ateapi.Control.UpdateWorker:output_type -> ateapi.Worker
-	93,  // 173: ateapi.Control.DeleteWorker:output_type -> ateapi.Worker
-	93,  // 174: ateapi.Control.DrainWorker:output_type -> ateapi.Worker
-	92,  // 175: ateapi.Control.ListActors:output_type -> ateapi.ListActorsResponse
-	26,  // 176: ateapi.Control.CreateAtespace:output_type -> ateapi.Atespace
-	26,  // 177: ateapi.Control.GetAtespace:output_type -> ateapi.Atespace
-	55,  // 178: ateapi.Control.ListAtespaces:output_type -> ateapi.ListAtespacesResponse
-	26,  // 179: ateapi.Control.DeleteAtespace:output_type -> ateapi.Atespace
-	28,  // 180: ateapi.Control.CreateActorTemplate:output_type -> ateapi.ActorTemplate
-	28,  // 181: ateapi.Control.GetActorTemplate:output_type -> ateapi.ActorTemplate
-	60,  // 182: ateapi.Control.ListActorTemplates:output_type -> ateapi.ListActorTemplatesResponse
-	28,  // 183: ateapi.Control.DeleteActorTemplate:output_type -> ateapi.ActorTemplate
-	99,  // 184: ateapi.Debug.DebugClear:output_type -> ateapi.DebugClearResponse
-	101, // 185: ateapi.ActorIdentity.MintJWT:output_type -> ateapi.MintJWTResponse
-	103, // 186: ateapi.ActorIdentity.MintCert:output_type -> ateapi.MintCertResponse
-	152, // [152:187] is the sub-list for method output_type
-	117, // [117:152] is the sub-list for method input_type
-	117, // [117:117] is the sub-list for extension type_name
-	117, // [117:117] is the sub-list for extension extendee
-	0,   // [0:117] is the sub-list for field type_name
+	27,  // 24: ateapi.ActorStatus.current_actor_template:type_name -> ateapi.ObjectRef
+	27,  // 25: ateapi.ActorSourceSnapshotStatus.snapshot:type_name -> ateapi.ObjectRef
+	27,  // 26: ateapi.WorkerAssignment.worker:type_name -> ateapi.ObjectRef
+	11,  // 27: ateapi.ActorSnapshot.metadata:type_name -> ateapi.ResourceMetadata
+	24,  // 28: ateapi.ActorSnapshot.status:type_name -> ateapi.ActorSnapshotStatus
+	27,  // 29: ateapi.ActorSnapshotStatus.source_actor:type_name -> ateapi.ObjectRef
+	0,   // 30: ateapi.ActorSnapshotStatus.content_scope:type_name -> ateapi.SnapshotContentScope
+	27,  // 31: ateapi.ActorSnapshotStatus.actor_template:type_name -> ateapi.ObjectRef
+	11,  // 32: ateapi.ActorSnapshotTag.metadata:type_name -> ateapi.ResourceMetadata
+	27,  // 33: ateapi.ActorSnapshotTag.snapshot:type_name -> ateapi.ObjectRef
+	1,   // 34: ateapi.ActorSnapshotTag.scope:type_name -> ateapi.ActorSnapshotTagScope
+	11,  // 35: ateapi.Atespace.metadata:type_name -> ateapi.ResourceMetadata
+	11,  // 36: ateapi.ActorTemplate.metadata:type_name -> ateapi.ResourceMetadata
+	10,  // 37: ateapi.ActorTemplate.worker_selector:type_name -> ateapi.Selector
+	36,  // 38: ateapi.ActorTemplate.containers:type_name -> ateapi.Container
+	42,  // 39: ateapi.ActorTemplate.volumes:type_name -> ateapi.Volume
+	34,  // 40: ateapi.ActorTemplate.snapshots_config:type_name -> ateapi.SnapshotsConfig
+	33,  // 41: ateapi.ActorTemplate.sandbox_config:type_name -> ateapi.SandboxConfig
+	29,  // 42: ateapi.ActorTemplate.resources:type_name -> ateapi.Resources
+	32,  // 43: ateapi.ActorTemplate.status:type_name -> ateapi.ActorTemplateStatus
+	30,  // 44: ateapi.Resources.limits:type_name -> ateapi.Limits
+	27,  // 45: ateapi.GoldenSnapshotStatus.golden_snapshot:type_name -> ateapi.ObjectRef
+	109, // 46: ateapi.GoldenSnapshotStatus.take_golden_snapshot_at:type_name -> google.protobuf.Timestamp
+	31,  // 47: ateapi.ActorTemplateStatus.golden_snapshot_status:type_name -> ateapi.GoldenSnapshotStatus
+	3,   // 48: ateapi.SandboxConfig.sandbox_class:type_name -> ateapi.SandboxClass
+	0,   // 49: ateapi.SnapshotsConfig.on_pause:type_name -> ateapi.SnapshotContentScope
+	0,   // 50: ateapi.SnapshotsConfig.on_commit:type_name -> ateapi.SnapshotContentScope
+	35,  // 51: ateapi.SnapshotsConfig.on_resume:type_name -> ateapi.OnResumeConfig
+	4,   // 52: ateapi.OnResumeConfig.from_data:type_name -> ateapi.ResumeSource
+	39,  // 53: ateapi.Container.env:type_name -> ateapi.EnvVar
+	40,  // 54: ateapi.Container.readyz:type_name -> ateapi.ContainerReadyz
+	51,  // 55: ateapi.Container.volume_mounts:type_name -> ateapi.VolumeMount
+	37,  // 56: ateapi.Container.security_context:type_name -> ateapi.SecurityContext
+	29,  // 57: ateapi.Container.resources:type_name -> ateapi.Resources
+	38,  // 58: ateapi.SecurityContext.capabilities:type_name -> ateapi.Capabilities
+	41,  // 59: ateapi.ContainerReadyz.http_get:type_name -> ateapi.HTTPGetAction
+	44,  // 60: ateapi.Volume.durable_dir:type_name -> ateapi.DurableDirVolumeSource
+	45,  // 61: ateapi.Volume.external_volume_template:type_name -> ateapi.ExternalVolumeTemplate
+	46,  // 62: ateapi.Volume.system_info:type_name -> ateapi.SystemInfoVolumeSource
+	43,  // 63: ateapi.Volume.image:type_name -> ateapi.ImageVolumeSource
+	47,  // 64: ateapi.SystemInfoVolumeSource.data_sources:type_name -> ateapi.SystemInfoDataSource
+	48,  // 65: ateapi.SystemInfoDataSource.actor_metadata:type_name -> ateapi.ActorMetadataDataSource
+	50,  // 66: ateapi.SystemInfoDataSource.trust_bundle:type_name -> ateapi.TrustBundleDataSource
+	49,  // 67: ateapi.ActorMetadataDataSource.items:type_name -> ateapi.ActorMetadataItem
+	5,   // 68: ateapi.ActorMetadataItem.field:type_name -> ateapi.ActorMetadataField
+	26,  // 69: ateapi.CreateAtespaceRequest.atespace:type_name -> ateapi.Atespace
+	27,  // 70: ateapi.GetAtespaceRequest.atespace:type_name -> ateapi.ObjectRef
+	26,  // 71: ateapi.ListAtespacesResponse.atespaces:type_name -> ateapi.Atespace
+	27,  // 72: ateapi.DeleteAtespaceRequest.atespace:type_name -> ateapi.ObjectRef
+	28,  // 73: ateapi.CreateActorTemplateRequest.actor_template:type_name -> ateapi.ActorTemplate
+	27,  // 74: ateapi.GetActorTemplateRequest.actor_template:type_name -> ateapi.ObjectRef
+	28,  // 75: ateapi.ListActorTemplatesResponse.actor_templates:type_name -> ateapi.ActorTemplate
+	27,  // 76: ateapi.DeleteActorTemplateRequest.actor_template:type_name -> ateapi.ObjectRef
+	27,  // 77: ateapi.GetActorRequest.actor:type_name -> ateapi.ObjectRef
+	13,  // 78: ateapi.CreateActorRequest.actor:type_name -> ateapi.Actor
+	13,  // 79: ateapi.UpdateActorRequest.actor:type_name -> ateapi.Actor
+	27,  // 80: ateapi.SuspendActorRequest.actor:type_name -> ateapi.ObjectRef
+	13,  // 81: ateapi.SuspendActorResponse.actor:type_name -> ateapi.Actor
+	27,  // 82: ateapi.PauseActorRequest.actor:type_name -> ateapi.ObjectRef
+	13,  // 83: ateapi.PauseActorResponse.actor:type_name -> ateapi.Actor
+	27,  // 84: ateapi.ResumeActorRequest.actor:type_name -> ateapi.ObjectRef
+	13,  // 85: ateapi.ResumeActorResponse.actor:type_name -> ateapi.Actor
+	27,  // 86: ateapi.DeleteActorRequest.actor:type_name -> ateapi.ObjectRef
+	27,  // 87: ateapi.GetActorEgressPolicyRequest.actor:type_name -> ateapi.ObjectRef
+	27,  // 88: ateapi.CreateActorEgressPolicyRequest.actor:type_name -> ateapi.ObjectRef
+	14,  // 89: ateapi.CreateActorEgressPolicyRequest.egress_policy:type_name -> ateapi.EgressPolicy
+	27,  // 90: ateapi.UpdateActorEgressPolicyRequest.actor:type_name -> ateapi.ObjectRef
+	14,  // 91: ateapi.UpdateActorEgressPolicyRequest.egress_policy:type_name -> ateapi.EgressPolicy
+	27,  // 92: ateapi.DeleteActorEgressPolicyRequest.actor:type_name -> ateapi.ObjectRef
+	27,  // 93: ateapi.GetActorSnapshotRequest.actor_snapshot:type_name -> ateapi.ObjectRef
+	27,  // 94: ateapi.GetActorSnapshotTagRequest.actor_snapshot_tag:type_name -> ateapi.ObjectRef
+	23,  // 95: ateapi.ListActorSnapshotsResponse.actor_snapshots:type_name -> ateapi.ActorSnapshot
+	25,  // 96: ateapi.CreateActorSnapshotTagRequest.actor_snapshot_tag:type_name -> ateapi.ActorSnapshotTag
+	25,  // 97: ateapi.UpdateActorSnapshotTagRequest.actor_snapshot_tag:type_name -> ateapi.ActorSnapshotTag
+	27,  // 98: ateapi.DeleteActorSnapshotTagRequest.actor_snapshot_tag:type_name -> ateapi.ObjectRef
+	27,  // 99: ateapi.ListWorkerActorAssignmentsRequest.worker:type_name -> ateapi.ObjectRef
+	99,  // 100: ateapi.ListWorkerActorAssignmentsResponse.actor_assignments:type_name -> ateapi.ActorAssignment
+	95,  // 101: ateapi.ListWorkersResponse.workers:type_name -> ateapi.Worker
+	27,  // 102: ateapi.GetWorkerRequest.worker:type_name -> ateapi.ObjectRef
+	95,  // 103: ateapi.CreateWorkerRequest.worker:type_name -> ateapi.Worker
+	95,  // 104: ateapi.UpdateWorkerRequest.worker:type_name -> ateapi.Worker
+	27,  // 105: ateapi.DeleteWorkerRequest.worker:type_name -> ateapi.ObjectRef
+	83,  // 106: ateapi.DeleteWorkerRequest.options:type_name -> ateapi.DeleteOptions
+	27,  // 107: ateapi.DrainWorkerRequest.worker:type_name -> ateapi.ObjectRef
+	13,  // 108: ateapi.ListActorsResponse.actors:type_name -> ateapi.Actor
+	11,  // 109: ateapi.Worker.metadata:type_name -> ateapi.ResourceMetadata
+	108, // 110: ateapi.Worker.labels:type_name -> ateapi.Worker.LabelsEntry
+	96,  // 111: ateapi.Worker.status:type_name -> ateapi.WorkerStatus
+	6,   // 112: ateapi.WorkerStatus.state:type_name -> ateapi.WorkerState
+	97,  // 113: ateapi.WorkerStatus.allocation:type_name -> ateapi.WorkerAllocation
+	98,  // 114: ateapi.WorkerAllocation.capacity:type_name -> ateapi.WorkerResources
+	98,  // 115: ateapi.WorkerAllocation.allocated:type_name -> ateapi.WorkerResources
+	29,  // 116: ateapi.WorkerResources.resources:type_name -> ateapi.Resources
+	11,  // 117: ateapi.ActorAssignment.metadata:type_name -> ateapi.ResourceMetadata
+	27,  // 118: ateapi.ActorAssignment.actor:type_name -> ateapi.ObjectRef
+	27,  // 119: ateapi.ActorAssignment.actor_template_ref:type_name -> ateapi.ObjectRef
+	29,  // 120: ateapi.ActorAssignment.resources:type_name -> ateapi.Resources
+	27,  // 121: ateapi.SetWorkerCapacityRequest.worker:type_name -> ateapi.ObjectRef
+	98,  // 122: ateapi.SetWorkerCapacityRequest.capacity:type_name -> ateapi.WorkerResources
+	95,  // 123: ateapi.SetWorkerCapacityResponse.worker:type_name -> ateapi.Worker
+	27,  // 124: ateapi.MintCertRequest.worker:type_name -> ateapi.ObjectRef
+	7,   // 125: ateapi.MintCertRequest.purpose:type_name -> ateapi.ActorCertificatePurpose
+	62,  // 126: ateapi.Control.GetActor:input_type -> ateapi.GetActorRequest
+	63,  // 127: ateapi.Control.CreateActor:input_type -> ateapi.CreateActorRequest
+	64,  // 128: ateapi.Control.UpdateActor:input_type -> ateapi.UpdateActorRequest
+	65,  // 129: ateapi.Control.SuspendActor:input_type -> ateapi.SuspendActorRequest
+	67,  // 130: ateapi.Control.PauseActor:input_type -> ateapi.PauseActorRequest
+	69,  // 131: ateapi.Control.ResumeActor:input_type -> ateapi.ResumeActorRequest
+	71,  // 132: ateapi.Control.DeleteActor:input_type -> ateapi.DeleteActorRequest
+	72,  // 133: ateapi.Control.GetActorEgressPolicy:input_type -> ateapi.GetActorEgressPolicyRequest
+	73,  // 134: ateapi.Control.CreateActorEgressPolicy:input_type -> ateapi.CreateActorEgressPolicyRequest
+	74,  // 135: ateapi.Control.UpdateActorEgressPolicy:input_type -> ateapi.UpdateActorEgressPolicyRequest
+	75,  // 136: ateapi.Control.DeleteActorEgressPolicy:input_type -> ateapi.DeleteActorEgressPolicyRequest
+	76,  // 137: ateapi.Control.GetActorSnapshot:input_type -> ateapi.GetActorSnapshotRequest
+	77,  // 138: ateapi.Control.GetActorSnapshotTag:input_type -> ateapi.GetActorSnapshotTagRequest
+	78,  // 139: ateapi.Control.ListActorSnapshots:input_type -> ateapi.ListActorSnapshotsRequest
+	80,  // 140: ateapi.Control.CreateActorSnapshotTag:input_type -> ateapi.CreateActorSnapshotTagRequest
+	81,  // 141: ateapi.Control.UpdateActorSnapshotTag:input_type -> ateapi.UpdateActorSnapshotTagRequest
+	82,  // 142: ateapi.Control.DeleteActorSnapshotTag:input_type -> ateapi.DeleteActorSnapshotTagRequest
+	86,  // 143: ateapi.Control.ListWorkers:input_type -> ateapi.ListWorkersRequest
+	88,  // 144: ateapi.Control.GetWorker:input_type -> ateapi.GetWorkerRequest
+	89,  // 145: ateapi.Control.CreateWorker:input_type -> ateapi.CreateWorkerRequest
+	90,  // 146: ateapi.Control.UpdateWorker:input_type -> ateapi.UpdateWorkerRequest
+	91,  // 147: ateapi.Control.DeleteWorker:input_type -> ateapi.DeleteWorkerRequest
+	92,  // 148: ateapi.Control.DrainWorker:input_type -> ateapi.DrainWorkerRequest
+	84,  // 149: ateapi.Control.ListWorkerActorAssignments:input_type -> ateapi.ListWorkerActorAssignmentsRequest
+	93,  // 150: ateapi.Control.ListActors:input_type -> ateapi.ListActorsRequest
+	52,  // 151: ateapi.Control.CreateAtespace:input_type -> ateapi.CreateAtespaceRequest
+	53,  // 152: ateapi.Control.GetAtespace:input_type -> ateapi.GetAtespaceRequest
+	54,  // 153: ateapi.Control.ListAtespaces:input_type -> ateapi.ListAtespacesRequest
+	56,  // 154: ateapi.Control.DeleteAtespace:input_type -> ateapi.DeleteAtespaceRequest
+	57,  // 155: ateapi.Control.CreateActorTemplate:input_type -> ateapi.CreateActorTemplateRequest
+	58,  // 156: ateapi.Control.GetActorTemplate:input_type -> ateapi.GetActorTemplateRequest
+	59,  // 157: ateapi.Control.ListActorTemplates:input_type -> ateapi.ListActorTemplatesRequest
+	61,  // 158: ateapi.Control.DeleteActorTemplate:input_type -> ateapi.DeleteActorTemplateRequest
+	102, // 159: ateapi.ActorIdentity.MintJWT:input_type -> ateapi.MintJWTRequest
+	104, // 160: ateapi.ActorIdentity.MintCert:input_type -> ateapi.MintCertRequest
+	100, // 161: ateapi.WorkerService.SetWorkerCapacity:input_type -> ateapi.SetWorkerCapacityRequest
+	13,  // 162: ateapi.Control.GetActor:output_type -> ateapi.Actor
+	13,  // 163: ateapi.Control.CreateActor:output_type -> ateapi.Actor
+	13,  // 164: ateapi.Control.UpdateActor:output_type -> ateapi.Actor
+	66,  // 165: ateapi.Control.SuspendActor:output_type -> ateapi.SuspendActorResponse
+	68,  // 166: ateapi.Control.PauseActor:output_type -> ateapi.PauseActorResponse
+	70,  // 167: ateapi.Control.ResumeActor:output_type -> ateapi.ResumeActorResponse
+	13,  // 168: ateapi.Control.DeleteActor:output_type -> ateapi.Actor
+	14,  // 169: ateapi.Control.GetActorEgressPolicy:output_type -> ateapi.EgressPolicy
+	14,  // 170: ateapi.Control.CreateActorEgressPolicy:output_type -> ateapi.EgressPolicy
+	14,  // 171: ateapi.Control.UpdateActorEgressPolicy:output_type -> ateapi.EgressPolicy
+	14,  // 172: ateapi.Control.DeleteActorEgressPolicy:output_type -> ateapi.EgressPolicy
+	23,  // 173: ateapi.Control.GetActorSnapshot:output_type -> ateapi.ActorSnapshot
+	25,  // 174: ateapi.Control.GetActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
+	79,  // 175: ateapi.Control.ListActorSnapshots:output_type -> ateapi.ListActorSnapshotsResponse
+	25,  // 176: ateapi.Control.CreateActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
+	25,  // 177: ateapi.Control.UpdateActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
+	25,  // 178: ateapi.Control.DeleteActorSnapshotTag:output_type -> ateapi.ActorSnapshotTag
+	87,  // 179: ateapi.Control.ListWorkers:output_type -> ateapi.ListWorkersResponse
+	95,  // 180: ateapi.Control.GetWorker:output_type -> ateapi.Worker
+	95,  // 181: ateapi.Control.CreateWorker:output_type -> ateapi.Worker
+	95,  // 182: ateapi.Control.UpdateWorker:output_type -> ateapi.Worker
+	95,  // 183: ateapi.Control.DeleteWorker:output_type -> ateapi.Worker
+	95,  // 184: ateapi.Control.DrainWorker:output_type -> ateapi.Worker
+	85,  // 185: ateapi.Control.ListWorkerActorAssignments:output_type -> ateapi.ListWorkerActorAssignmentsResponse
+	94,  // 186: ateapi.Control.ListActors:output_type -> ateapi.ListActorsResponse
+	26,  // 187: ateapi.Control.CreateAtespace:output_type -> ateapi.Atespace
+	26,  // 188: ateapi.Control.GetAtespace:output_type -> ateapi.Atespace
+	55,  // 189: ateapi.Control.ListAtespaces:output_type -> ateapi.ListAtespacesResponse
+	26,  // 190: ateapi.Control.DeleteAtespace:output_type -> ateapi.Atespace
+	28,  // 191: ateapi.Control.CreateActorTemplate:output_type -> ateapi.ActorTemplate
+	28,  // 192: ateapi.Control.GetActorTemplate:output_type -> ateapi.ActorTemplate
+	60,  // 193: ateapi.Control.ListActorTemplates:output_type -> ateapi.ListActorTemplatesResponse
+	28,  // 194: ateapi.Control.DeleteActorTemplate:output_type -> ateapi.ActorTemplate
+	103, // 195: ateapi.ActorIdentity.MintJWT:output_type -> ateapi.MintJWTResponse
+	105, // 196: ateapi.ActorIdentity.MintCert:output_type -> ateapi.MintCertResponse
+	101, // 197: ateapi.WorkerService.SetWorkerCapacity:output_type -> ateapi.SetWorkerCapacityResponse
+	162, // [162:198] is the sub-list for method output_type
+	126, // [126:162] is the sub-list for method input_type
+	126, // [126:126] is the sub-list for extension type_name
+	126, // [126:126] is the sub-list for extension extendee
+	0,   // [0:126] is the sub-list for field type_name
 }
 
 func init() { file_ateapi_proto_init() }
@@ -7103,7 +7676,7 @@ func file_ateapi_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ateapi_proto_rawDesc), len(file_ateapi_proto_rawDesc)),
 			NumEnums:      9,
-			NumMessages:   98,
+			NumMessages:   100,
 			NumExtensions: 0,
 			NumServices:   3,
 		},
