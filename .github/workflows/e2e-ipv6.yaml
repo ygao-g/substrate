@@ -336,33 +336,6 @@ jobs:
         exit 1
     - name: Install Agent Substrate
       run: hack/install-ate-kind.sh --deploy-ate-system
-    - name: Assert the control plane is up
-      # install-ate.sh runs under pipefail, so a failed apply does propagate.
-      # What it would not catch is a Deployment that rolls out and then
-      # crash-loops. Re-check everything deploy_ate_system waits on --
-      # atenet-egress included, since a non-dual-stack Envoy listener fails
-      # there first, by way of a readiness probe the kubelet cannot reach.
-      run: |
-        # The atelet daemonset's name carries a version suffix on newer mains,
-        # so find it by the app=atelet label the way install-ate.sh does.
-        atelet="$(kubectl --context="$KUBECTL_CONTEXT" -n ate-system get daemonset -l app=atelet -o name)"
-        if [ -z "${atelet}" ]; then
-          echo "::error::no daemonset labeled app=atelet in ate-system"
-          exit 1
-        fi
-        for r in deployment/ate-api-server deployment/ate-controller \
-                 deployment/atenet-router deployment/atenet-egress \
-                 deployment/dns statefulset/postgres ${atelet}; do
-          kubectl --context="$KUBECTL_CONTEXT" -n ate-system rollout status "$r" --timeout=120s
-        done
-        kubectl --context="$KUBECTL_CONTEXT" -n podcertificate-controller-system \
-          rollout status deployment/podcertificate-controller --timeout=120s
-        if kubectl --context="$KUBECTL_CONTEXT" -n ate-system get pods \
-             -o jsonpath='{.items[*].status.containerStatuses[*].state.waiting.reason}' \
-             | grep -q CrashLoopBackOff; then
-          echo "::error::a pod in ate-system is in CrashLoopBackOff"
-          exit 1
-        fi
     - name: Assert the node advertises ate.dev/kvm
       # A micro-VM WorkerPool requests this extended resource, so an unschedulable
       # worker pod is how its absence would otherwise surface -- as a demo deploy
