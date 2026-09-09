@@ -29,30 +29,54 @@ name: e2e-ipv6
 # lane that ran gVisor alone could not tell a working micro-VM guest from one
 # that never got an address.
 #
-# Two ways in. A pull request that edits this file runs it: the paths filter is
-# evaluated before the job, so no unrelated request pays for a v6 cluster, and
-# the lane can demonstrate itself without a label someone has to create first.
-# Dispatch it with a list of pull requests and it merges them onto main in that
-# order and runs the result: the IPv6 work is a set of changes that do nothing
-# apart, so a per-request run cannot show the feature working, only that it did
-# no harm. The stack exists for the length of the run and is never pushed,
-# which is what lets this branch carry the workflow file alone instead of a
-# copy of every change it wants to exercise.
+# Two ways in. A pull request that touches IPv6-critical code runs it as an
+# optional presubmit: the paths below are where address-family behavior is
+# decided -- the kind bring-up and its NAT64 translator, the actor netns and
+# atunnel plumbing, the micro-VM guest side, the egress gateway and its Envoy
+# config, the networking suite that asserts on all of it, and this file. The
+# filter is evaluated before the job, so no other request pays for a v6
+# cluster. Dispatch it with a list of pull requests and it merges them onto
+# main in that order and runs the result: the IPv6 work is a set of changes
+# that do nothing apart, so a per-request run cannot show the feature working,
+# only that it did no harm. The stack exists for the length of the run and is
+# never pushed, which is what lets this branch carry the workflow file alone
+# instead of a copy of every change it wants to exercise.
 #
-# Stacking is dispatch-only, so the pull_request path runs main plus this file
-# and nothing else. That exercises the lane, not the IPv6 work, and it stays
-# red until the changes this gates are on main.
+# Stacking is dispatch-only, so the pull_request path runs main plus the one
+# request and nothing else. Until the changes this lane gates are on main,
+# that combination stays red -- expected, and not a verdict on the request.
 #
 # Either way this job stays out of the `e2e-test` gate, so it never blocks a PR.
 on:
   pull_request:
-    paths: ['.github/workflows/e2e-ipv6.yaml']
+    # Ordered the way a packet would meet them: cluster bring-up, install
+    # manifests, the components between an actor and the network, the tests.
+    paths:
+      - '.github/workflows/e2e-ipv6.yaml'
+      - 'hack/create-kind-cluster.sh'
+      - 'hack/third_party/nat64/**'
+      - 'hack/update/nat64.sh'
+      - 'hack/microvm-assets/**'
+      - 'manifests/ate-install/atenet-*.yaml'
+      - 'manifests/ate-install/kind/**'
+      - 'cmd/atenet/**'
+      - 'cmd/ateom-microvm/**'
+      - 'internal/ateomnet/**'
+      - 'internal/atunnel/**'
+      - 'internal/e2e/suites/networking/**'
   workflow_dispatch:
     inputs:
       prs:
         description: 'Pull requests to merge onto main, in order, e.g. "958 938 1083". Blank runs main alone.'
         required: false
         type: string
+# A push to a pull request obsoletes the previous run's answer, so cancel that
+# run rather than queue behind it -- each one holds a runner for over an hour.
+# Dispatch runs group by run id and are never cancelled: two stacks may
+# legitimately run at once, and a cancelled stack run answers nothing.
+concurrency:
+  group: e2e-ipv6-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
 jobs:
