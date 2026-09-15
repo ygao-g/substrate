@@ -242,6 +242,7 @@ An actor has at most one egress policy.
 # Get an actor's egress policy.
 kubectl ate get egress-policy <actor-name> -a <atespace>
 kubectl ate get egress-policy <actor-name> -a <atespace> -o yaml
+kubectl ate get egress-policy <actor-a> <actor-b> -a <atespace> -o yaml
 
 # Create an egress policy.
 kubectl ate create egress-policy <actor-name> -a <atespace> -f policy.yaml
@@ -255,8 +256,22 @@ The manifest is one `EgressPolicy` in YAML or JSON; `metadata` may be omitted
 and server-managed fields are ignored, so the output of `get -o yaml` is a valid
 manifest as is.
 
-`get` exits 1 when the actor does not exist; an actor without a policy prints a
-note on stderr and exits 0.
+An actor without a policy prints a note on stderr and exits 0. An actor that
+does not exist is reported on stderr and makes the command exit 1 after
+printing the policies of the actors that do exist.
+
+With several actors, `-o yaml` and `-o json` print an `egressPolicies` list
+whose entries pair each policy with its `actor`, because an `EgressPolicy`
+carries no actor and its name is always `default`. Actors with no policy are
+skipped, so the list holds only the policies that exist. Recover one actor's
+bare document with
+`jq '.egressPolicies[] | select(.actor.name=="<actor>") | .egressPolicy'`.
+To cover a whole atespace:
+
+```bash
+kubectl ate get actors -a <atespace> -o json | jq -r '.actors[]?.metadata.name' \
+  | xargs kubectl ate get egress-policy -a <atespace>
+```
 
 #### `kubectl ate get egress-policy` output columns
 
