@@ -88,8 +88,9 @@ rejects that option with agentgateway rather than silently omitting it.
   atelet `Run`/`Restore`, which turns on tunneled egress cluster-wide.
 - **Egress policy** — the gateway denies by default, so the demo Actor needs an `EgressPolicy`
   (created through the `CreateActorEgressPolicy` API against the Actor) before its fetches
-  succeed. `kubectl ate` has no verb for it yet; the e2e suites create theirs with
-  `e2e.EnsureEgressPolicy`, and an `all` rule reproduces the pre-policy behavior.
+  succeed. `kubectl ate get egress-policy` reads one but cannot create it yet; the e2e suites
+  create theirs with `e2e.EnsureEgressPolicy`, and an `all` rule reproduces the pre-policy
+  behavior.
 - **Actor-identity trust** — the gateway mounts the `actor-id-ca-certs` Secret, a cert-only copy of
   the actor-identity CA root that `hack/install-ate.sh` derives from `actor-id-ca-pool` (which also
   holds the CA signing key and is deliberately *not* mounted here).
