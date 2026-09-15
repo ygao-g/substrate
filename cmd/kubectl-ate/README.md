@@ -243,6 +243,21 @@ actors does not stop at the first one without a policy.
 # Show an actor's egress policy, or dump it as a document.
 kubectl ate get egress-policy <actor-name> -a <atespace>
 kubectl ate get egress-policy <actor-name> -a <atespace> -o yaml
+
+# Create an actor's egress policy from a manifest, or clone another actor's.
+kubectl ate create egress-policy <actor-name> -a <atespace> -f policy.yaml
+kubectl ate get egress-policy <src-actor> -a <atespace> -o yaml | kubectl ate create egress-policy <actor-name> -a <atespace> -f -
+```
+
+The manifest is one `EgressPolicy` in protojson form; `metadata` may be omitted
+and server-managed fields are ignored, so the output of `get -o yaml` is a valid
+manifest as is.
+
+```yaml
+# policy.yaml: rules are evaluated in order; the first match wins.
+rules:
+- hostnames: {patterns: ["api.example.com"]}
+- cidrs: {cidrs: ["10.64.0.0/16"]}
 ```
 
 #### `kubectl ate get egress-policy` output columns
