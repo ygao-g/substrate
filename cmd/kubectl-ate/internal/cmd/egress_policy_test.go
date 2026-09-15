@@ -345,6 +345,9 @@ func TestEgressPolicyCommandArgs(t *testing.T) {
 		{name: "create", command: createEgressPolicyCmd, args: []string{"c1"}},
 		{name: "create requires actor", command: createEgressPolicyCmd, wantErr: true},
 		{name: "create rejects multiple", command: createEgressPolicyCmd, args: []string{"c1", "c2"}, wantErr: true},
+		{name: "delete", command: deleteEgressPolicyCmd, args: []string{"c1"}},
+		{name: "delete requires actor", command: deleteEgressPolicyCmd, wantErr: true},
+		{name: "delete rejects multiple", command: deleteEgressPolicyCmd, args: []string{"c1", "c2"}, wantErr: true},
 	})
 }
 
@@ -569,6 +572,82 @@ rules:
 				t.Errorf("request mismatch (-want +got):\n%s", diff)
 			}
 			if diff := cmp.Diff(test.wantOut, stdout.String()); diff != "" {
+				t.Errorf("stdout mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// fakeEgressPolicyDeleter records the request it received and answers with a
+// configured policy or error.
+type fakeEgressPolicyDeleter struct {
+	req    *ateapipb.DeleteActorEgressPolicyRequest
+	policy *ateapipb.EgressPolicy
+	err    error
+}
+
+func (f *fakeEgressPolicyDeleter) DeleteActorEgressPolicy(ctx context.Context, req *ateapipb.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
+	f.req = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.policy, nil
+}
+
+func TestDeleteEgressPolicyRunner_Run(t *testing.T) {
+	t.Parallel()
+
+	actor := &ateapipb.ObjectRef{Atespace: "team-a", Name: "c1"}
+	deleted := &ateapipb.EgressPolicy{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "default", Version: 1},
+		Rules:    []*ateapipb.EgressRule{{Hostnames: &ateapipb.HostnameRule{Patterns: []string{"api.example.com"}}}},
+	}
+	wantReq := &ateapipb.DeleteActorEgressPolicyRequest{Actor: actor}
+
+	tests := []struct {
+		name    string
+		deleter *fakeEgressPolicyDeleter
+		wantOut string
+		wantErr string
+	}{
+		{
+			name:    "sends actor ref and prints confirmation",
+			deleter: &fakeEgressPolicyDeleter{policy: deleted},
+			wantOut: "egress policy for actor \"c1\" in atespace \"team-a\" deleted\n",
+		},
+		{
+			name:    "not found wraps",
+			deleter: &fakeEgressPolicyDeleter{err: status.Error(codes.NotFound, "EgressPolicy not found")},
+			wantErr: `failed to delete egress policy for actor "c1" in atespace "team-a": rpc error: code = NotFound desc = EgressPolicy not found`,
+		},
+		{
+			name:    "unavailable wraps",
+			deleter: &fakeEgressPolicyDeleter{err: status.Error(codes.Unavailable, "api-server down")},
+			wantErr: `failed to delete egress policy for actor "c1" in atespace "team-a": rpc error: code = Unavailable desc = api-server down`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			runner := &DeleteEgressPolicyRunner{
+				deleter: test.deleter,
+				actor:   actor,
+				out:     &out,
+			}
+			err := runner.Run(context.Background())
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if gotErr != test.wantErr {
+				t.Fatalf("Run() error = %q, want %q", gotErr, test.wantErr)
+			}
+			if diff := cmp.Diff(wantReq, test.deleter.req, protocmp.Transform()); diff != "" {
+				t.Errorf("request mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(test.wantOut, out.String()); diff != "" {
 				t.Errorf("stdout mismatch (-want +got):\n%s", diff)
 			}
 		})
