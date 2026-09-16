@@ -345,6 +345,9 @@ func TestEgressPolicyCommandArgs(t *testing.T) {
 		{name: "create", command: createEgressPolicyCmd, args: []string{"c1"}},
 		{name: "create requires actor", command: createEgressPolicyCmd, wantErr: true},
 		{name: "create rejects multiple", command: createEgressPolicyCmd, args: []string{"c1", "c2"}, wantErr: true},
+		{name: "update", command: updateEgressPolicyCmd, args: []string{"c1"}},
+		{name: "update requires actor", command: updateEgressPolicyCmd, wantErr: true},
+		{name: "update rejects multiple", command: updateEgressPolicyCmd, args: []string{"c1", "c2"}, wantErr: true},
 	})
 }
 
@@ -570,6 +573,166 @@ rules:
 			}
 			if diff := cmp.Diff(test.wantOut, stdout.String()); diff != "" {
 				t.Errorf("stdout mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// fakeEgressPolicyUpdater records the request it received and answers with a
+// configured policy or error.
+type fakeEgressPolicyUpdater struct {
+	req    *ateapipb.UpdateActorEgressPolicyRequest
+	policy *ateapipb.EgressPolicy
+	err    error
+}
+
+func (f *fakeEgressPolicyUpdater) UpdateActorEgressPolicy(ctx context.Context, req *ateapipb.UpdateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
+	f.req = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.policy, nil
+}
+
+func TestUpdateEgressPolicyRunner_Run(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	pinTime(t, now)
+
+	actor := &ateapipb.ObjectRef{Atespace: "team-a", Name: "c1"}
+	const uid = "3f2b1c0e-8d5a-4b6e-9c1d-2a7e4f6b8c0d"
+	rules := []*ateapipb.EgressRule{
+		{Hostnames: &ateapipb.HostnameRule{Patterns: []string{"api.example.com"}}},
+		{Cidrs: &ateapipb.CIDRRule{Cidrs: []string{"10.64.0.0/16"}}},
+	}
+	// The manifest is what `get -o yaml` printed, edited: it still carries the
+	// uid, version, and timestamps of the policy being replaced.
+	manifest := &ateapipb.EgressPolicy{
+		Metadata: &ateapipb.ResourceMetadata{
+			Atespace:   "team-a",
+			Name:       "default",
+			Uid:        uid,
+			Version:    1,
+			CreateTime: timestamppb.New(now.Add(-time.Minute)),
+		},
+		Rules: rules,
+	}
+	updated := &ateapipb.EgressPolicy{
+		Metadata: &ateapipb.ResourceMetadata{
+			Atespace:   "team-a",
+			Name:       "default",
+			Uid:        uid,
+			Version:    2,
+			CreateTime: timestamppb.New(now.Add(-time.Minute)),
+			UpdateTime: timestamppb.New(now),
+		},
+		Rules: rules,
+	}
+	wantReq := &ateapipb.UpdateActorEgressPolicyRequest{Actor: actor, EgressPolicy: manifest}
+
+	tests := []struct {
+		name      string
+		outputFmt string
+		updater   *fakeEgressPolicyUpdater
+		wantOut   string
+		wantErr   string
+	}{
+		{
+			name:      "table by default",
+			outputFmt: "table",
+			updater:   &fakeEgressPolicyUpdater{policy: updated},
+			wantOut: `ATESPACE   ACTOR   RULES   VERSION   AGE
+team-a     c1      2       2         60s
+`,
+		},
+		{
+			name:      "yaml prints the updated policy",
+			outputFmt: "yaml",
+			updater:   &fakeEgressPolicyUpdater{policy: updated},
+			wantOut: `metadata:
+  atespace: team-a
+  createTime: "2026-01-01T11:59:00Z"
+  name: default
+  uid: 3f2b1c0e-8d5a-4b6e-9c1d-2a7e4f6b8c0d
+  updateTime: "2026-01-01T12:00:00Z"
+  version: "2"
+rules:
+- hostnames:
+    patterns:
+    - api.example.com
+- cidrs:
+    cidrs:
+    - 10.64.0.0/16
+`,
+		},
+		{
+			name:      "stale version wraps",
+			outputFmt: "table",
+			updater:   &fakeEgressPolicyUpdater{err: status.Error(codes.Aborted, "EgressPolicy version conflict")},
+			wantErr:   `failed to update egress policy for actor "c1" in atespace "team-a": rpc error: code = Aborted desc = EgressPolicy version conflict`,
+		},
+		{
+			name:      "missing policy wraps",
+			outputFmt: "table",
+			updater:   &fakeEgressPolicyUpdater{err: status.Error(codes.NotFound, "EgressPolicy not found")},
+			wantErr:   `failed to update egress policy for actor "c1" in atespace "team-a": rpc error: code = NotFound desc = EgressPolicy not found`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var out bytes.Buffer
+			runner := &UpdateEgressPolicyRunner{
+				updater:   test.updater,
+				actor:     actor,
+				policy:    manifest,
+				outputFmt: test.outputFmt,
+				out:       &out,
+			}
+			err := runner.Run(context.Background())
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if gotErr != test.wantErr {
+				t.Fatalf("Run() error = %q, want %q", gotErr, test.wantErr)
+			}
+			if diff := cmp.Diff(wantReq, test.updater.req, protocmp.Transform()); diff != "" {
+				t.Errorf("request mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(test.wantOut, out.String()); diff != "" {
+				t.Errorf("stdout mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestCheckEgressPolicyPreconditions(t *testing.T) {
+	t.Parallel()
+
+	actor := &ateapipb.ObjectRef{Atespace: "team-a", Name: "c1"}
+	const wantErr = `manifest metadata.uid and metadata.version are required for update; start from "kubectl ate get egress-policy c1 -a team-a -o yaml"`
+
+	tests := []struct {
+		name     string
+		metadata *ateapipb.ResourceMetadata
+		wantErr  string
+	}{
+		{name: "uid and version present", metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "default", Uid: "u", Version: 1}},
+		{name: "uid missing", metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "default", Version: 1}, wantErr: wantErr},
+		{name: "version missing", metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "default", Uid: "u"}, wantErr: wantErr},
+		{name: "both missing", metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "default"}, wantErr: wantErr},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkEgressPolicyPreconditions(&ateapipb.EgressPolicy{Metadata: test.metadata}, actor)
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if gotErr != test.wantErr {
+				t.Errorf("checkEgressPolicyPreconditions() error = %q, want %q", gotErr, test.wantErr)
 			}
 		})
 	}
