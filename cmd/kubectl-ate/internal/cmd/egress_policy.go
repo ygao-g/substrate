@@ -21,11 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/agent-substrate/substrate/cmd/kubectl-ate/internal/printer"
 	"github.com/agent-substrate/substrate/internal/ateclient"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/spf13/cobra"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -154,13 +156,17 @@ type getEgressPolicyRunner struct {
 
 func (r *getEgressPolicyRunner) Run(ctx context.Context) error {
 	found := make([]printer.ActorEgressPolicy, 0, len(r.actors))
+	var missing []string
 	for _, actor := range r.actors {
 		policy, err := r.getter.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: actor})
 		if status.Code(err) == codes.NotFound {
+			if actorIsMissing(err) {
+				fmt.Fprintf(r.stderr, "actor %q in atespace %q not found\n", actor.GetName(), actor.GetAtespace())
+				missing = append(missing, actor.GetAtespace()+"/"+actor.GetName())
+				continue
+			}
 			// No policy is a valid state, not a failure: the gateway denies all egress.
-			// TODO(#1703): the server answers NotFound for a missing actor too, so this
-			// note cannot tell a mistyped name from an actor without a policy.
-			fmt.Fprintf(r.stderr, "actor %q in atespace %q has no egress policy or does not exist; an actor without a policy has all egress denied\n", actor.GetName(), actor.GetAtespace())
+			fmt.Fprintf(r.stderr, "actor %q in atespace %q has no egress policy; all egress is denied\n", actor.GetName(), actor.GetAtespace())
 			continue
 		}
 		if err != nil {
@@ -170,6 +176,17 @@ func (r *getEgressPolicyRunner) Run(ctx context.Context) error {
 	}
 	// The output shape follows the command line, not what was found: one name
 	// prints the bare document, several always print the list.
+	if err := r.print(found); err != nil {
+		return err
+	}
+	// The actors that do exist still print; the exit status reports the rest.
+	if len(missing) > 0 {
+		return fmt.Errorf("no such actor: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func (r *getEgressPolicyRunner) print(found []printer.ActorEgressPolicy) error {
 	if len(r.actors) == 1 {
 		if len(found) == 0 {
 			return nil
@@ -177,6 +194,17 @@ func (r *getEgressPolicyRunner) Run(ctx context.Context) error {
 		return printer.PrintEgressPolicyTo(r.stdout, found[0].Actor.GetName(), found[0].Policy, r.outputFmt)
 	}
 	return printer.PrintEgressPoliciesTo(r.stdout, found, r.outputFmt)
+}
+
+// actorIsMissing reports whether a NotFound blames the Actor rather than its
+// policy. An ateapi too old to send the detail reports neither.
+func actorIsMissing(err error) bool {
+	for _, detail := range status.Convert(err).Details() {
+		if info, ok := detail.(*errdetails.ResourceInfo); ok && info.GetResourceType() == "Actor" {
+			return true
+		}
+	}
+	return false
 }
 
 func runGetEgressPolicy(cmd *cobra.Command, args []string) error {
