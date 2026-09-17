@@ -137,6 +137,23 @@ func overrideEgressPolicyMetadata(policy *ateapipb.EgressPolicy, atespace string
 	return nil
 }
 
+// loadEgressPolicyManifest reads a manifest from filename, or from in when
+// filename is "-", and fills the metadata the command line fixes.
+func loadEgressPolicyManifest(in io.Reader, filename, atespace string) (*ateapipb.EgressPolicy, error) {
+	data, err := readFileOrStdin(in, filename)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := egressPolicyFromManifest(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse egress policy manifest %q: %w", filename, err)
+	}
+	if err := overrideEgressPolicyMetadata(policy, atespace); err != nil {
+		return nil, err
+	}
+	return policy, nil
+}
+
 // egressPolicyGetter abstracts GetActorEgressPolicy RPC calls.
 type egressPolicyGetter interface {
 	GetActorEgressPolicy(ctx context.Context, req *ateapipb.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error)
@@ -208,15 +225,8 @@ func (r *createEgressPolicyRunner) Run(ctx context.Context) error {
 }
 
 func runCreateEgressPolicy(cmd *cobra.Command, args []string) error {
-	data, err := readFileOrStdin(cmd.InOrStdin(), createEgressPolicyFilenameFlag)
+	policy, err := loadEgressPolicyManifest(cmd.InOrStdin(), createEgressPolicyFilenameFlag, createEgressPolicyAtespaceFlag)
 	if err != nil {
-		return err
-	}
-	policy, err := egressPolicyFromManifest(data)
-	if err != nil {
-		return fmt.Errorf("failed to parse egress policy manifest %q: %w", createEgressPolicyFilenameFlag, err)
-	}
-	if err := overrideEgressPolicyMetadata(policy, createEgressPolicyAtespaceFlag); err != nil {
 		return err
 	}
 
