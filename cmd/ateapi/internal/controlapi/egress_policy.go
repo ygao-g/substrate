@@ -67,7 +67,7 @@ func (s *RPCService) GetActorEgressPolicy(ctx context.Context, req *ateapipb.Get
 
 func (s *ServiceImpl) GetEgressPolicy(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.EgressPolicy, error) {
 	policy, err := s.store.GetEgressPolicy(ctx, actorRef)
-	if errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrParentNotFound) {
 		return nil, status.Error(codes.NotFound, "EgressPolicy not found")
 	}
 	if err != nil {
@@ -306,7 +306,7 @@ func mapEgressPolicyWrite(policy *ateapipb.EgressPolicy, err error) (*ateapipb.E
 	switch {
 	case err == nil:
 		return policy, nil
-	case errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrParentNotFound):
 		return nil, status.Error(codes.NotFound, "EgressPolicy not found")
 	case errors.Is(err, store.ErrAlreadyExists):
 		return nil, status.Error(codes.AlreadyExists, "EgressPolicy already exists")

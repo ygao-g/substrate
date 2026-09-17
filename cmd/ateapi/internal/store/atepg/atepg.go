@@ -948,18 +948,14 @@ func (p *Persistence) CreateEgressPolicy(ctx context.Context, actorRef resources
 }
 
 func (p *Persistence) GetEgressPolicy(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.EgressPolicy, error) {
-	return getEgressPolicyRow(ctx, p.pool, `
-		SELECT uid, version, proto FROM actor_egress_policies
-		WHERE atespace = $1 AND actor_name = $2`, actorRef.Atespace, actorRef.Name)
+	return getActorEgressPolicyRow(ctx, p.pool, actorRef)
 }
 
 func (p *Persistence) UpdateEgressPolicy(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(*ateapipb.EgressPolicy) error) (*ateapipb.EgressPolicy, error) {
 	if err := precondition.Validate(); err != nil {
 		return nil, err
 	}
-	dbPolicy, err := getEgressPolicyRow(ctx, p.pool, `
-		SELECT uid, version, proto FROM actor_egress_policies
-		WHERE atespace = $1 AND actor_name = $2`, actorRef.Atespace, actorRef.Name)
+	dbPolicy, err := getActorEgressPolicyRow(ctx, p.pool, actorRef)
 	if err != nil {
 		return nil, err
 	}
@@ -1007,6 +1003,11 @@ func (p *Persistence) DeleteEgressPolicy(ctx context.Context, actorRef resources
 		SELECT uid, version, proto FROM actor_egress_policies
 		WHERE atespace = $1 AND actor_name = $2
 		FOR UPDATE`, actorRef.Atespace, actorRef.Name)
+	if errors.Is(err, store.ErrNotFound) {
+		// FOR UPDATE cannot lock the nullable side of an outer join, so the
+		// missing actor is told from the missing policy with a second read.
+		return nil, classifyMissingEgressPolicy(ctx, tx, actorRef)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1024,6 +1025,42 @@ func (p *Persistence) DeleteEgressPolicy(ctx context.Context, actorRef resources
 		return nil, fmt.Errorf("committing egress policy delete: %w", err)
 	}
 	return current, nil
+}
+
+// getActorEgressPolicyRow reads an actor's policy in one query so a missing
+// actor and a missing policy are told apart under one snapshot.
+func getActorEgressPolicyRow(ctx context.Context, q querier, actorRef resources.ActorRef) (*ateapipb.EgressPolicy, error) {
+	var uid *string
+	var version *int64
+	var protoBytes []byte
+	err := q.QueryRow(ctx, `
+		SELECT p.uid, p.version, p.proto
+		FROM actors a
+		LEFT JOIN actor_egress_policies p ON p.atespace = a.atespace AND p.actor_name = a.name
+		WHERE a.atespace = $1 AND a.name = $2`, actorRef.Atespace, actorRef.Name).Scan(&uid, &version, &protoBytes)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, store.ErrParentNotFound
+		}
+		return nil, fmt.Errorf("getting egress policy: %w", err)
+	}
+	if uid == nil {
+		return nil, store.ErrNotFound
+	}
+	return unmarshalEgressPolicy(*uid, *version, protoBytes)
+}
+
+// classifyMissingEgressPolicy reports whether an absent policy row means the
+// actor is gone or merely has no policy.
+func classifyMissingEgressPolicy(ctx context.Context, q querier, actorRef resources.ActorRef) error {
+	var actorExists bool
+	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM actors WHERE atespace = $1 AND name = $2)`, actorRef.Atespace, actorRef.Name).Scan(&actorExists); err != nil {
+		return fmt.Errorf("checking Actor %s exists: %w", actorRef, err)
+	}
+	if !actorExists {
+		return store.ErrParentNotFound
+	}
+	return store.ErrNotFound
 }
 
 func getEgressPolicyRow(ctx context.Context, q querier, query string, args ...any) (*ateapipb.EgressPolicy, error) {
