@@ -23,12 +23,15 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
+
+const testForeignEgressPolicyUID = "9a2b1c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"
 
 func validEgressPolicy() *ateapipb.EgressPolicy {
 	return &ateapipb.EgressPolicy{
@@ -767,16 +770,14 @@ func TestActorEgressPolicy(t *testing.T) {
 	}
 	actorRef := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "egress-actor"}
 
-	if _, err := service.GetActorEgressPolicy(t.Context(), &ateapipb.GetActorEgressPolicyRequest{
+	_, err = service.GetActorEgressPolicy(t.Context(), &ateapipb.GetActorEgressPolicyRequest{
 		Actor: actorRef,
-	}); status.Code(err) != codes.NotFound {
-		t.Fatalf("policy before create status = %v, want NotFound", status.Code(err))
-	}
-	if _, err := service.GetActorEgressPolicy(t.Context(), &ateapipb.GetActorEgressPolicyRequest{
+	})
+	assertNotFoundResource(t, err, "EgressPolicy not found", "EgressPolicy", testAtespace+"/egress-actor")
+	_, err = service.GetActorEgressPolicy(t.Context(), &ateapipb.GetActorEgressPolicyRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "missing-actor"},
-	}); status.Code(err) != codes.NotFound {
-		t.Fatalf("missing parent status = %v, want NotFound", status.Code(err))
-	}
+	})
+	assertNotFoundResource(t, err, "Actor "+testAtespace+"/missing-actor not found", "Actor", testAtespace+"/missing-actor")
 	created, err := service.CreateActorEgressPolicy(t.Context(), &ateapipb.CreateActorEgressPolicyRequest{
 		Actor: actorRef,
 		EgressPolicy: &ateapipb.EgressPolicy{
@@ -865,10 +866,93 @@ func TestActorEgressPolicy(t *testing.T) {
 	if err != nil || !proto.Equal(deleted, updated) {
 		t.Fatalf("deleted policy = %v, %v; want %v", deleted, err, updated)
 	}
-	if _, err := service.GetActorEgressPolicy(t.Context(), &ateapipb.GetActorEgressPolicyRequest{
+	_, err = service.GetActorEgressPolicy(t.Context(), &ateapipb.GetActorEgressPolicyRequest{
 		Actor: actorRef,
-	}); status.Code(err) != codes.NotFound {
-		t.Fatalf("policy after delete status = %v, want NotFound", status.Code(err))
+	})
+	assertNotFoundResource(t, err, "EgressPolicy not found", "EgressPolicy", testAtespace+"/egress-actor")
+}
+
+// assertNotFoundResource checks a NotFound status names the missing resource
+// both in its message and in its google.rpc.ResourceInfo detail.
+func assertNotFoundResource(t *testing.T, err error, wantMsg, wantType, wantName string) {
+	t.Helper()
+	st := status.Convert(err)
+	if st.Code() != codes.NotFound || st.Message() != wantMsg {
+		t.Fatalf("error = %v %q, want %v %q", st.Code(), st.Message(), codes.NotFound, wantMsg)
+	}
+	for _, detail := range st.Details() {
+		info, ok := detail.(*errdetails.ResourceInfo)
+		if !ok {
+			continue
+		}
+		if info.GetResourceType() != wantType || info.GetResourceName() != wantName {
+			t.Errorf("ResourceInfo = (%q, %q), want (%q, %q)", info.GetResourceType(), info.GetResourceName(), wantType, wantName)
+		}
+		return
+	}
+	t.Errorf("details = %v, want a ResourceInfo naming %s %q", st.Details(), wantType, wantName)
+}
+
+func TestActorEgressPolicy_NotFoundNamesResource(t *testing.T) {
+	ctx := context.Background()
+	persistence, cleanup := storetest.SetupTestStore(t)
+	defer cleanup()
+	service := &RPCService{impl: &ServiceImpl{store: persistence}}
+	if _, err := persistence.CreateAtespace(ctx, &ateapipb.Atespace{
+		Metadata: &ateapipb.ResourceMetadata{Name: testAtespace},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistence.CreateActor(ctx, &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "egress-actor"},
+		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	present := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "egress-actor"}
+	missing := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "missing-actor"}
+	// An update needs both guards or it is rejected before the store read.
+	guarded := func(actor *ateapipb.ObjectRef) *ateapipb.EgressPolicy {
+		policy := validEgressPolicy()
+		policy.Metadata.Atespace = actor.GetAtespace()
+		policy.Metadata.Uid = testForeignEgressPolicyUID
+		policy.Metadata.Version = 1
+		return policy
+	}
+	call := map[string]func(actor *ateapipb.ObjectRef) error{
+		"get": func(actor *ateapipb.ObjectRef) error {
+			_, err := service.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: actor})
+			return err
+		},
+		"update": func(actor *ateapipb.ObjectRef) error {
+			_, err := service.UpdateActorEgressPolicy(ctx, &ateapipb.UpdateActorEgressPolicyRequest{Actor: actor, EgressPolicy: guarded(actor)})
+			return err
+		},
+		"delete": func(actor *ateapipb.ObjectRef) error {
+			_, err := service.DeleteActorEgressPolicy(ctx, &ateapipb.DeleteActorEgressPolicyRequest{Actor: actor})
+			return err
+		},
+	}
+
+	tests := []struct {
+		name     string
+		verb     string
+		actor    *ateapipb.ObjectRef
+		wantMsg  string
+		wantType string
+	}{
+		{name: "get without a policy", verb: "get", actor: present, wantMsg: "EgressPolicy not found", wantType: "EgressPolicy"},
+		{name: "get without an Actor", verb: "get", actor: missing, wantMsg: "Actor " + testAtespace + "/missing-actor not found", wantType: "Actor"},
+		{name: "update without a policy", verb: "update", actor: present, wantMsg: "EgressPolicy not found", wantType: "EgressPolicy"},
+		{name: "update without an Actor", verb: "update", actor: missing, wantMsg: "Actor " + testAtespace + "/missing-actor not found", wantType: "Actor"},
+		{name: "delete without a policy", verb: "delete", actor: present, wantMsg: "EgressPolicy not found", wantType: "EgressPolicy"},
+		{name: "delete without an Actor", verb: "delete", actor: missing, wantMsg: "Actor " + testAtespace + "/missing-actor not found", wantType: "Actor"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := call[test.verb](test.actor)
+			assertNotFoundResource(t, err, test.wantMsg, test.wantType, test.actor.GetAtespace()+"/"+test.actor.GetName())
+		})
 	}
 }
 
