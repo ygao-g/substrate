@@ -462,7 +462,7 @@ func Validate_ActorStatus(
 		errs = append(errs, fn(fldPath.Child("worker_assignment"), obj.WorkerAssignment, oldVal, oldObj != nil)...)
 	}
 
-	{ // field ateapipb.ActorStatus.InProgressSnapshotName
+	{ // field ateapipb.ActorStatus.InProgressSnapshotUri
 		fn := func(
 			fldPath *field.Path,
 			obj, oldObj *string,
@@ -481,16 +481,16 @@ func Validate_ActorStatus(
 			if earlyReturn {
 				return // do not proceed
 			}
-			if e := validate.ShortName(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
+			if e := validate.MaxLength(ctx, op, fldPath, obj, oldObj, 2048); len(e) != 0 {
 				errs = append(errs, e...)
 			}
 			return
 		}
 		oldVal := safe.Field(oldObj,
 			func(oldObj *ateapipb.ActorStatus) *string {
-				return &oldObj.InProgressSnapshotName
+				return &oldObj.InProgressSnapshotUri
 			})
-		errs = append(errs, fn(fldPath.Child("in_progress_snapshot_name"), &obj.InProgressSnapshotName, oldVal, oldObj != nil)...)
+		errs = append(errs, fn(fldPath.Child("in_progress_snapshot_uri"), &obj.InProgressSnapshotUri, oldVal, oldObj != nil)...)
 	}
 
 	{ // field ateapipb.ActorStatus.ExternalSnapshot
@@ -2077,6 +2077,36 @@ func Validate_DeleteActorEgressPolicyRequest(
 				return oldObj.Actor
 			})
 		errs = append(errs, fn(fldPath.Child("actor"), obj.Actor, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateapipb.DeleteActorEgressPolicyRequest.Options
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *ateapipb.DeleteOptions,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.OptionalPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// call the type's validation function
+			errs = append(errs, Validate_DeleteOptions(ctx, op, fldPath, obj, oldObj)...)
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.DeleteActorEgressPolicyRequest) *ateapipb.DeleteOptions {
+				return oldObj.Options
+			})
+		errs = append(errs, fn(fldPath.Child("options"), obj.Options, oldVal, oldObj != nil)...)
 	}
 
 	return errs

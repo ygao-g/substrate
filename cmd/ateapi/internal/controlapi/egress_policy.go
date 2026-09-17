@@ -127,11 +127,14 @@ func (s *RPCService) DeleteActorEgressPolicy(ctx context.Context, req *ateapipb.
 		return nil, toGRPCStatusError(errs)
 	}
 
-	return s.impl.DeleteEgressPolicy(ctx, resources.ActorRefFromObjectRef(req.GetActor()))
+	return s.impl.DeleteEgressPolicy(ctx, resources.ActorRefFromObjectRef(req.GetActor()), store.DeletePreconditions{
+		UID:     req.GetOptions().GetUid(),
+		Version: req.GetOptions().GetVersion(),
+	})
 }
 
-func (s *ServiceImpl) DeleteEgressPolicy(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.EgressPolicy, error) {
-	deleted, err := s.store.DeleteEgressPolicy(ctx, actorRef)
+func (s *ServiceImpl) DeleteEgressPolicy(ctx context.Context, actorRef resources.ActorRef, pre store.DeletePreconditions) (*ateapipb.EgressPolicy, error) {
+	deleted, err := s.store.DeleteEgressPolicy(ctx, actorRef, pre)
 	return mapEgressPolicyWrite(deleted, err)
 }
 
@@ -251,7 +254,7 @@ func ValidateCustom_CredentialHeaderInjection_Prefix(_ context.Context, _ operat
 func ValidateCustom_CredentialHeaderInjection_CredentialUri(_ context.Context, _ operation.Operation, p *field.Path, uri, _ *string) field.ErrorList {
 	if !validCredentialURI(*uri) {
 		return field.ErrorList{
-			field.Invalid(p, *uri, "must be substrate-secret://<provider-class>/<provider-name>/<provider-specific-tail>"),
+			field.Invalid(p, *uri, "must be ate-secret://<provider-class>/<provider-name>/<provider-specific-tail>"),
 		}
 	}
 	return nil
@@ -259,7 +262,7 @@ func ValidateCustom_CredentialHeaderInjection_CredentialUri(_ context.Context, _
 
 func validCredentialURI(raw string) bool {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "substrate-secret" || u.Host == "" || u.Host != u.Hostname() || u.User != nil || u.RawQuery != "" || u.Fragment != "" || len(validation.IsDNS1123Subdomain(u.Host)) != 0 {
+	if err != nil || u.Scheme != "ate-secret" || u.Host == "" || u.Host != u.Hostname() || u.User != nil || u.RawQuery != "" || u.Fragment != "" || len(validation.IsDNS1123Subdomain(u.Host)) != 0 {
 		return false
 	}
 	escapedPath := u.EscapedPath()

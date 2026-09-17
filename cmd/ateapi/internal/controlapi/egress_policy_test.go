@@ -30,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
+const testForeignEgressPolicyUID = "9a2b1c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"
+
 func validEgressPolicy() *ateapipb.EgressPolicy {
 	return &ateapipb.EgressPolicy{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "default"},
@@ -40,7 +42,7 @@ func validEgressPolicy() *ateapipb.EgressPolicy {
 					InjectStaticHeaders: []*ateapipb.CredentialHeaderInjection{{
 						Header:        "Authorization",
 						Prefix:        "Bearer ",
-						CredentialUri: "substrate-secret://kubernetes.io/provider/ns/name",
+						CredentialUri: "ate-secret://kubernetes.io/provider/ns/name",
 					}},
 				},
 			},
@@ -370,6 +372,40 @@ func TestValidateDeleteActorEgressPolicyRequest(t *testing.T) {
 		want: field.ErrorList{
 			field.Invalid(field.NewPath("actor", "name"), nil, "").WithOrigin("format=k8s-short-name"),
 		},
+	}, {
+		name: "negative options.version",
+		req: func() *ateapipb.DeleteActorEgressPolicyRequest {
+			r := validReq()
+			r.Options = &ateapipb.DeleteOptions{Version: -1}
+			return r
+		}(),
+		want: field.ErrorList{
+			field.Invalid(field.NewPath("options", "version"), nil, "").WithOrigin("minimum"),
+		},
+	}, {
+		name: "invalid options.uid",
+		req: func() *ateapipb.DeleteActorEgressPolicyRequest {
+			r := validReq()
+			r.Options = &ateapipb.DeleteOptions{Uid: "not-a-uuid"}
+			return r
+		}(),
+		want: field.ErrorList{
+			field.Invalid(field.NewPath("options", "uid"), nil, "").WithOrigin("format=k8s-uuid"),
+		},
+	}, {
+		name: "zero options are waived, not validated",
+		req: func() *ateapipb.DeleteActorEgressPolicyRequest {
+			r := validReq()
+			r.Options = &ateapipb.DeleteOptions{}
+			return r
+		}(),
+	}, {
+		name: "valid, both guards",
+		req: func() *ateapipb.DeleteActorEgressPolicyRequest {
+			r := validReq()
+			r.Options = &ateapipb.DeleteOptions{Uid: testForeignEgressPolicyUID, Version: 3}
+			return r
+		}(),
 	}}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -667,7 +703,7 @@ func TestValidateEgressPolicyRules(t *testing.T) {
 		mutate: func(p *ateapipb.EgressPolicy) {
 			p.Rules[0].Hostnames.Effects.InjectStaticHeaders = append(
 				p.Rules[0].Hostnames.Effects.InjectStaticHeaders,
-				&ateapipb.CredentialHeaderInjection{Header: "authorization", CredentialUri: "substrate-secret://example.com/provider/secret"},
+				&ateapipb.CredentialHeaderInjection{Header: "authorization", CredentialUri: "ate-secret://example.com/provider/secret"},
 			)
 		},
 		want: field.ErrorList{
@@ -685,7 +721,7 @@ func TestValidateEgressPolicyRules(t *testing.T) {
 			for i := range 16 {
 				injections = append(injections, &ateapipb.CredentialHeaderInjection{
 					Header:        fmt.Sprintf("X-Header-%d", i),
-					CredentialUri: "substrate-secret://example.com/provider/secret",
+					CredentialUri: "ate-secret://example.com/provider/secret",
 				})
 			}
 			p.Rules[0].Hostnames.Effects.InjectStaticHeaders = injections
@@ -697,7 +733,7 @@ func TestValidateEgressPolicyRules(t *testing.T) {
 			for i := range 17 {
 				injections = append(injections, &ateapipb.CredentialHeaderInjection{
 					Header:        fmt.Sprintf("X-Header-%d", i),
-					CredentialUri: "substrate-secret://example.com/provider/secret",
+					CredentialUri: "ate-secret://example.com/provider/secret",
 				})
 			}
 			p.Rules[0].Hostnames.Effects.InjectStaticHeaders = injections
@@ -727,7 +763,7 @@ func TestValidateEgressPolicyRules(t *testing.T) {
 			p.Rules[0].Hostnames.Effects.InjectStaticHeaders[0].CredentialUri = "https://example.com/secret"
 		},
 		want: field.ErrorList{
-			field.Invalid(staticHeader.Child("credential_uri"), "https://example.com/secret", "must be substrate-secret://<provider-class>/<provider-name>/<provider-specific-tail>"),
+			field.Invalid(staticHeader.Child("credential_uri"), "https://example.com/secret", "must be ate-secret://<provider-class>/<provider-name>/<provider-specific-tail>"),
 		},
 	}, {
 		name: "empty effects",
@@ -792,7 +828,7 @@ func TestActorEgressPolicy(t *testing.T) {
 						InjectStaticHeaders: []*ateapipb.CredentialHeaderInjection{{
 							Header:        "Authorization",
 							Prefix:        "Bearer ",
-							CredentialUri: "substrate-secret://kubernetes.io/provider/ns/name",
+							CredentialUri: "ate-secret://kubernetes.io/provider/ns/name",
 						}},
 					},
 				},
@@ -872,10 +908,77 @@ func TestActorEgressPolicy(t *testing.T) {
 	}
 }
 
+func TestDeleteActorEgressPolicy_Preconditions(t *testing.T) {
+	ctx := context.Background()
+	persistence, cleanup := storetest.SetupTestStore(t)
+	defer cleanup()
+	service := &RPCService{impl: &ServiceImpl{store: persistence}}
+	if _, err := persistence.CreateAtespace(ctx, &ateapipb.Atespace{
+		Metadata: &ateapipb.ResourceMetadata{Name: testAtespace},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistence.CreateActor(ctx, &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "egress-actor"},
+		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	actorRef := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "egress-actor"}
+	created, err := service.CreateActorEgressPolicy(ctx, &ateapipb.CreateActorEgressPolicyRequest{
+		Actor: actorRef,
+		EgressPolicy: &ateapipb.EgressPolicy{
+			Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "default"},
+			Rules:    []*ateapipb.EgressRule{{All: &emptypb.Empty{}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("stale version", func(t *testing.T) {
+		_, err := service.DeleteActorEgressPolicy(ctx, &ateapipb.DeleteActorEgressPolicyRequest{
+			Actor:   actorRef,
+			Options: &ateapipb.DeleteOptions{Version: created.GetMetadata().GetVersion() + 7},
+		})
+		if got := status.Code(err); got != codes.Aborted {
+			t.Errorf("DeleteActorEgressPolicy() code = %v (err %v), want %v", got, err, codes.Aborted)
+		}
+	})
+
+	t.Run("foreign uid", func(t *testing.T) {
+		_, err := service.DeleteActorEgressPolicy(ctx, &ateapipb.DeleteActorEgressPolicyRequest{
+			Actor:   actorRef,
+			Options: &ateapipb.DeleteOptions{Uid: testForeignEgressPolicyUID},
+		})
+		if got := status.Code(err); got != codes.Aborted {
+			t.Errorf("DeleteActorEgressPolicy() code = %v (err %v), want %v", got, err, codes.Aborted)
+		}
+	})
+
+	// A refused delete must leave the policy where it was.
+	if _, err := persistence.GetEgressPolicy(ctx, resources.ActorRefFromObjectRef(actorRef)); err != nil {
+		t.Fatalf("policy gone after two refused deletes: %v", err)
+	}
+
+	t.Run("matching", func(t *testing.T) {
+		deleted, err := service.DeleteActorEgressPolicy(ctx, &ateapipb.DeleteActorEgressPolicyRequest{
+			Actor: actorRef,
+			Options: &ateapipb.DeleteOptions{
+				Uid:     created.GetMetadata().GetUid(),
+				Version: created.GetMetadata().GetVersion(),
+			},
+		})
+		if err != nil || !proto.Equal(deleted, created) {
+			t.Errorf("DeleteActorEgressPolicy() with matching preconditions = %v, %v; want %v", deleted, err, created)
+		}
+	})
+}
+
 func TestCredentialURIValidation(t *testing.T) {
 	for _, uri := range []string{
-		"substrate-secret://kubernetes.io/provider/ns/name",
-		"substrate-secret://vault.example/provider/secret",
+		"ate-secret://kubernetes.io/provider/ns/name",
+		"ate-secret://vault.example/provider/secret",
 	} {
 		if !validCredentialURI(uri) {
 			t.Errorf("validCredentialURI(%q) = false", uri)
@@ -883,10 +986,10 @@ func TestCredentialURIValidation(t *testing.T) {
 	}
 	for _, uri := range []string{
 		"https://kubernetes.io/provider/ns/name",
-		"substrate-secret://kubernetes.io/provider",
-		"substrate-secret://kubernetes.io//provider/secret",
-		"substrate-secret://kubernetes.io/provider/secret/",
-		"substrate-secret://kubernetes.io:443/provider/secret",
+		"ate-secret://kubernetes.io/provider",
+		"ate-secret://kubernetes.io//provider/secret",
+		"ate-secret://kubernetes.io/provider/secret/",
+		"ate-secret://kubernetes.io:443/provider/secret",
 	} {
 		if validCredentialURI(uri) {
 			t.Errorf("validCredentialURI(%q) = true", uri)
