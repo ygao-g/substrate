@@ -25,6 +25,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/egresspolicy"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -50,7 +51,7 @@ func (s *RPCService) CreateActorEgressPolicy(ctx context.Context, req *ateapipb.
 
 func (s *ServiceImpl) CreateEgressPolicy(ctx context.Context, actorRef resources.ActorRef, policy *ateapipb.EgressPolicy) (*ateapipb.EgressPolicy, error) {
 	created, err := s.store.CreateEgressPolicy(ctx, actorRef, policy)
-	return mapEgressPolicyWrite(created, err)
+	return mapEgressPolicyWrite(actorRef, created, err)
 }
 
 func validateCreateActorEgressPolicyRequest(ctx context.Context, req *ateapipb.CreateActorEgressPolicyRequest) field.ErrorList {
@@ -67,8 +68,8 @@ func (s *RPCService) GetActorEgressPolicy(ctx context.Context, req *ateapipb.Get
 
 func (s *ServiceImpl) GetEgressPolicy(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.EgressPolicy, error) {
 	policy, err := s.store.GetEgressPolicy(ctx, actorRef)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, status.Error(codes.NotFound, "EgressPolicy not found")
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrParentNotFound) {
+		return nil, egressPolicyNotFound(actorRef, err)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("while getting Actor egress policy: %w", err)
@@ -111,7 +112,7 @@ func (s *ServiceImpl) UpdateEgressPolicy(ctx context.Context, actorRef resources
 		// EgressPolicy has no status or other server-derived fields to verify.
 		return nil
 	})
-	return mapEgressPolicyWrite(updated, err)
+	return mapEgressPolicyWrite(actorRef, updated, err)
 }
 
 func validateUpdateActorEgressPolicyRequest(ctx context.Context, req *ateapipb.UpdateActorEgressPolicyRequest) field.ErrorList {
@@ -135,7 +136,7 @@ func (s *RPCService) DeleteActorEgressPolicy(ctx context.Context, req *ateapipb.
 
 func (s *ServiceImpl) DeleteEgressPolicy(ctx context.Context, actorRef resources.ActorRef, pre store.DeletePreconditions) (*ateapipb.EgressPolicy, error) {
 	deleted, err := s.store.DeleteEgressPolicy(ctx, actorRef, pre)
-	return mapEgressPolicyWrite(deleted, err)
+	return mapEgressPolicyWrite(actorRef, deleted, err)
 }
 
 func validateDeleteActorEgressPolicyRequest(ctx context.Context, req *ateapipb.DeleteActorEgressPolicyRequest) field.ErrorList {
@@ -302,12 +303,12 @@ func validHeaderValue(value string) bool {
 	return true
 }
 
-func mapEgressPolicyWrite(policy *ateapipb.EgressPolicy, err error) (*ateapipb.EgressPolicy, error) {
+func mapEgressPolicyWrite(actorRef resources.ActorRef, policy *ateapipb.EgressPolicy, err error) (*ateapipb.EgressPolicy, error) {
 	switch {
 	case err == nil:
 		return policy, nil
-	case errors.Is(err, store.ErrNotFound):
-		return nil, status.Error(codes.NotFound, "EgressPolicy not found")
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrParentNotFound):
+		return nil, egressPolicyNotFound(actorRef, err)
 	case errors.Is(err, store.ErrAlreadyExists):
 		return nil, status.Error(codes.AlreadyExists, "EgressPolicy already exists")
 	case errors.Is(err, store.ErrVersionConflict):
@@ -321,4 +322,22 @@ func mapEgressPolicyWrite(policy *ateapipb.EgressPolicy, err error) (*ateapipb.E
 	default:
 		return nil, fmt.Errorf("while writing EgressPolicy: %w", err)
 	}
+}
+
+// egressPolicyNotFound builds the NotFound status for an egress policy read
+// or write, naming which resource is missing in both the message and a
+// ResourceInfo detail so clients need not parse the message.
+func egressPolicyNotFound(actorRef resources.ActorRef, err error) error {
+	msg, resourceType := "EgressPolicy not found", "EgressPolicy"
+	if errors.Is(err, store.ErrParentNotFound) {
+		msg, resourceType = fmt.Sprintf("Actor %s not found", actorRef), "Actor"
+	}
+	st, derr := status.New(codes.NotFound, msg).WithDetails(&errdetails.ResourceInfo{
+		ResourceType: resourceType,
+		ResourceName: actorRef.String(),
+	})
+	if derr != nil {
+		return status.Error(codes.NotFound, msg)
+	}
+	return st.Err()
 }

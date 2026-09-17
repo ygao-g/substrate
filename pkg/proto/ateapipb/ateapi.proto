@@ -47,15 +47,25 @@ service Control {
   rpc DeleteActor(DeleteActorRequest) returns (Actor) {}
 
   // Get the egress policy resource nested under an Actor.
+  // NOT_FOUND names the missing resource in its message and in a
+  // google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+  // Actor exists without one.
   rpc GetActorEgressPolicy(GetActorEgressPolicyRequest) returns (EgressPolicy) {}
 
   // Create the egress policy resource nested under an Actor.
+  // FAILED_PRECONDITION reports a missing parent Actor; NOT_FOUND is not used.
   rpc CreateActorEgressPolicy(CreateActorEgressPolicyRequest) returns (EgressPolicy) {}
 
   // Replace the egress policy resource nested under an Actor.
+  // NOT_FOUND names the missing resource in its message and in a
+  // google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+  // Actor exists without one.
   rpc UpdateActorEgressPolicy(UpdateActorEgressPolicyRequest) returns (EgressPolicy) {}
 
   // Delete the egress policy resource nested under an Actor.
+  // NOT_FOUND names the missing resource in its message and in a
+  // google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+  // Actor exists without one.
   rpc DeleteActorEgressPolicy(DeleteActorEgressPolicyRequest) returns (EgressPolicy) {}
 
   // Create a Substrate-issued JWT asserting the actor identity.
