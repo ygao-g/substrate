@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/kubectl-ate/internal/printer"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -349,11 +351,24 @@ func TestEgressPolicyCommandArgs(t *testing.T) {
 }
 
 // fakeEgressPolicyGetter records the requests it received and answers each by
-// actor name: a configured error wins, then a configured policy, else NotFound.
+// actor name: a configured error wins, then a missing-actor name, then a
+// configured policy, else a NotFound blaming the policy.
 type fakeEgressPolicyGetter struct {
 	reqs     []*ateapipb.GetActorEgressPolicyRequest
 	policies map[string]*ateapipb.EgressPolicy
 	errs     map[string]error
+	missing  map[string]bool
+}
+
+// actorNotFound is the NotFound an ateapi sends when the Actor itself is gone.
+func actorNotFound(atespace, name string) error {
+	st, err := status.New(codes.NotFound, fmt.Sprintf("Actor %s/%s not found", atespace, name)).WithDetails(
+		&errdetails.ResourceInfo{ResourceType: "Actor", ResourceName: atespace + "/" + name},
+	)
+	if err != nil {
+		panic(err)
+	}
+	return st.Err()
 }
 
 func (f *fakeEgressPolicyGetter) GetActorEgressPolicy(ctx context.Context, req *ateapipb.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
@@ -361,6 +376,9 @@ func (f *fakeEgressPolicyGetter) GetActorEgressPolicy(ctx context.Context, req *
 	name := req.GetActor().GetName()
 	if err, ok := f.errs[name]; ok {
 		return nil, err
+	}
+	if f.missing[name] {
+		return nil, actorNotFound(req.GetActor().GetAtespace(), name)
 	}
 	if policy, ok := f.policies[name]; ok {
 		return policy, nil
@@ -441,7 +459,7 @@ rules:
 			actors:     []*ateapipb.ObjectRef{c1},
 			getter:     &fakeEgressPolicyGetter{},
 			wantReqs:   []*ateapipb.GetActorEgressPolicyRequest{req(c1)},
-			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy or does not exist; an actor without a policy has all egress denied\n",
+			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy; all egress is denied\n",
 		},
 		{
 			name:      "other error wraps",
@@ -553,7 +571,7 @@ team-a     c1      1       1         5m
 			wantOut: `ATESPACE   ACTOR   RULES   VERSION   AGE
 team-a     c1      1       1         5m
 `,
-			wantErrOut: "actor \"c2\" in atespace \"team-a\" has no egress policy or does not exist; an actor without a policy has all egress denied\n",
+			wantErrOut: "actor \"c2\" in atespace \"team-a\" has no egress policy; all egress is denied\n",
 		},
 		{
 			name:      "first of two without a policy keeps the second in position",
@@ -564,7 +582,7 @@ team-a     c1      1       1         5m
 			wantOut: `ATESPACE   ACTOR   RULES   VERSION   AGE
 team-a     c2      0       3         30s
 `,
-			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy or does not exist; an actor without a policy has all egress denied\n",
+			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy; all egress is denied\n",
 		},
 		{
 			name:      "one of two without a policy prints a one-entry yaml list",
@@ -588,7 +606,7 @@ team-a     c2      0       3         30s
         patterns:
         - api.example.com
 `,
-			wantErrOut: "actor \"c2\" in atespace \"team-a\" has no egress policy or does not exist; an actor without a policy has all egress denied\n",
+			wantErrOut: "actor \"c2\" in atespace \"team-a\" has no egress policy; all egress is denied\n",
 		},
 		{
 			name:      "none of two found prints an empty list",
@@ -597,8 +615,8 @@ team-a     c2      0       3         30s
 			getter:    &fakeEgressPolicyGetter{},
 			wantReqs:  []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
 			wantOut:   "egressPolicies: []\n",
-			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy or does not exist; an actor without a policy has all egress denied\n" +
-				"actor \"c2\" in atespace \"team-a\" has no egress policy or does not exist; an actor without a policy has all egress denied\n",
+			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy; all egress is denied\n" +
+				"actor \"c2\" in atespace \"team-a\" has no egress policy; all egress is denied\n",
 		},
 		{
 			name:      "none of two found prints an empty table",
@@ -607,8 +625,8 @@ team-a     c2      0       3         30s
 			getter:    &fakeEgressPolicyGetter{},
 			wantReqs:  []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
 			wantOut:   "ATESPACE   ACTOR   RULES   VERSION   AGE\n",
-			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy or does not exist; an actor without a policy has all egress denied\n" +
-				"actor \"c2\" in atespace \"team-a\" has no egress policy or does not exist; an actor without a policy has all egress denied\n",
+			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy; all egress is denied\n" +
+				"actor \"c2\" in atespace \"team-a\" has no egress policy; all egress is denied\n",
 		},
 		{
 			name:      "second name failing prints nothing",
@@ -620,6 +638,30 @@ team-a     c2      0       3         30s
 			},
 			wantReqs: []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
 			wantErr:  `failed to get egress policy for actor "c2" in atespace "team-a": rpc error: code = Unavailable desc = api-server down`,
+		},
+		{
+			name:       "missing actor is an error",
+			outputFmt:  "yaml",
+			actors:     []*ateapipb.ObjectRef{c1},
+			getter:     &fakeEgressPolicyGetter{missing: map[string]bool{"c1": true}},
+			wantReqs:   []*ateapipb.GetActorEgressPolicyRequest{req(c1)},
+			wantErrOut: "actor \"c1\" in atespace \"team-a\" not found\n",
+			wantErr:    "no such actor: team-a/c1",
+		},
+		{
+			name:      "one of two missing prints the other and fails",
+			outputFmt: "table",
+			actors:    []*ateapipb.ObjectRef{c1, c2},
+			getter: &fakeEgressPolicyGetter{
+				policies: map[string]*ateapipb.EgressPolicy{"c1": policy},
+				missing:  map[string]bool{"c2": true},
+			},
+			wantReqs: []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
+			wantOut: `ATESPACE   ACTOR   RULES   VERSION   AGE
+team-a     c1      1       1         5m
+`,
+			wantErrOut: "actor \"c2\" in atespace \"team-a\" not found\n",
+			wantErr:    "no such actor: team-a/c2",
 		},
 		{
 			name:      "same name twice fetches twice",
