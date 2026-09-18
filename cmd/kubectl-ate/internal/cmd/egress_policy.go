@@ -237,6 +237,55 @@ func runCreateEgressPolicy(cmd *cobra.Command, args []string) error {
 	return runner.Run(ctx)
 }
 
+var deleteEgressPolicyAtespaceFlag string
+
+var deleteEgressPolicyCmd = &cobra.Command{
+	Use:     "egress-policy <actor-name>",
+	Aliases: []string{"egress-policies"},
+	Short:   "Delete the egress policy of an actor",
+	Args:    cobra.ExactArgs(1),
+	RunE:    runDeleteEgressPolicy,
+}
+
+// EgressPolicyDeleter abstracts DeleteActorEgressPolicy RPC calls.
+type EgressPolicyDeleter interface {
+	DeleteActorEgressPolicy(ctx context.Context, req *ateapipb.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error)
+}
+
+// DeleteEgressPolicyRunner executes the delete egress-policy command logic.
+type DeleteEgressPolicyRunner struct {
+	deleter EgressPolicyDeleter
+	actor   *ateapipb.ObjectRef
+	out     io.Writer
+}
+
+func (r *DeleteEgressPolicyRunner) Run(ctx context.Context) error {
+	if _, err := r.deleter.DeleteActorEgressPolicy(ctx, &ateapipb.DeleteActorEgressPolicyRequest{Actor: r.actor}); err != nil {
+		// TODO(#1703): the server answers NotFound for a missing actor too, so a
+		// mistyped name fails the same way as an actor without a policy.
+		return fmt.Errorf("failed to delete egress policy for actor %q in atespace %q: %w", r.actor.GetName(), r.actor.GetAtespace(), err)
+	}
+	_, err := fmt.Fprintf(r.out, "egress policy for actor %q in atespace %q deleted\n", r.actor.GetName(), r.actor.GetAtespace())
+	return err
+}
+
+func runDeleteEgressPolicy(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+
+	apiClient, err := ateclient.NewClient(ctx, kubeconfig, k8sContext, endpoint, tokenFile, traceEnabled)
+	if err != nil {
+		return fmt.Errorf("failed to connect to ate-api-server: %w", err)
+	}
+	defer apiClient.Close()
+
+	runner := &DeleteEgressPolicyRunner{
+		deleter: apiClient,
+		actor:   &ateapipb.ObjectRef{Atespace: deleteEgressPolicyAtespaceFlag, Name: args[0]},
+		out:     cmd.OutOrStdout(),
+	}
+	return runner.Run(ctx)
+}
+
 func init() {
 	getEgressPolicyCmd.Flags().StringVarP(&getEgressPolicyAtespaceFlag, "atespace", "a", "", "Atespace the actor lives in (required)")
 	_ = getEgressPolicyCmd.MarkFlagRequired("atespace")
@@ -247,4 +296,8 @@ func init() {
 	_ = createEgressPolicyCmd.MarkFlagRequired("atespace")
 	_ = createEgressPolicyCmd.MarkFlagRequired("filename")
 	createCmd.AddCommand(createEgressPolicyCmd)
+
+	deleteEgressPolicyCmd.Flags().StringVarP(&deleteEgressPolicyAtespaceFlag, "atespace", "a", "", "Atespace the actor lives in (required)")
+	_ = deleteEgressPolicyCmd.MarkFlagRequired("atespace")
+	deleteCmd.AddCommand(deleteEgressPolicyCmd)
 }

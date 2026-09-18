@@ -249,6 +249,9 @@ kubectl ate create egress-policy <actor-name> -a <atespace> -f policy.yaml
 # Copy the egress policy of another actor.
 kubectl ate get egress-policy <src-actor> -a <atespace> -o yaml | \
   kubectl ate create egress-policy <actor-name> -a <atespace> -f -
+
+# Delete an actor's egress policy; the actor keeps running with all egress denied.
+kubectl ate delete egress-policy <actor-name> -a <atespace>
 ```
 
 The manifest is one `EgressPolicy` in YAML or JSON; `metadata` may be omitted
