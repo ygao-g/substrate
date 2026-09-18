@@ -237,7 +237,11 @@ func runCreateEgressPolicy(cmd *cobra.Command, args []string) error {
 	return runner.Run(ctx)
 }
 
-var deleteEgressPolicyAtespaceFlag string
+var (
+	deleteEgressPolicyAtespaceFlag string
+	deleteEgressPolicyUIDFlag      string
+	deleteEgressPolicyVersionFlag  int64
+)
 
 var deleteEgressPolicyCmd = &cobra.Command{
 	Use:     "egress-policy <actor-name>",
@@ -256,11 +260,13 @@ type EgressPolicyDeleter interface {
 type DeleteEgressPolicyRunner struct {
 	deleter EgressPolicyDeleter
 	actor   *ateapipb.ObjectRef
+	// options carries the uid/version guards; nil is an unguarded delete.
+	options *ateapipb.DeleteOptions
 	out     io.Writer
 }
 
 func (r *DeleteEgressPolicyRunner) Run(ctx context.Context) error {
-	if _, err := r.deleter.DeleteActorEgressPolicy(ctx, &ateapipb.DeleteActorEgressPolicyRequest{Actor: r.actor}); err != nil {
+	if _, err := r.deleter.DeleteActorEgressPolicy(ctx, &ateapipb.DeleteActorEgressPolicyRequest{Actor: r.actor, Options: r.options}); err != nil {
 		// TODO(#1703): the server answers NotFound for a missing actor too, so a
 		// mistyped name fails the same way as an actor without a policy.
 		return fmt.Errorf("failed to delete egress policy for actor %q in atespace %q: %w", r.actor.GetName(), r.actor.GetAtespace(), err)
@@ -283,6 +289,9 @@ func runDeleteEgressPolicy(cmd *cobra.Command, args []string) error {
 		actor:   &ateapipb.ObjectRef{Atespace: deleteEgressPolicyAtespaceFlag, Name: args[0]},
 		out:     cmd.OutOrStdout(),
 	}
+	if cmd.Flags().Changed("uid") || cmd.Flags().Changed("version") {
+		runner.options = &ateapipb.DeleteOptions{Uid: deleteEgressPolicyUIDFlag, Version: deleteEgressPolicyVersionFlag}
+	}
 	return runner.Run(ctx)
 }
 
@@ -299,5 +308,7 @@ func init() {
 
 	deleteEgressPolicyCmd.Flags().StringVarP(&deleteEgressPolicyAtespaceFlag, "atespace", "a", "", "Atespace the actor lives in (required)")
 	_ = deleteEgressPolicyCmd.MarkFlagRequired("atespace")
+	deleteEgressPolicyCmd.Flags().StringVar(&deleteEgressPolicyUIDFlag, "uid", "", "Delete only if the policy's metadata.uid matches; from get -o yaml")
+	deleteEgressPolicyCmd.Flags().Int64Var(&deleteEgressPolicyVersionFlag, "version", 0, "Delete only if the policy's metadata.version matches; from get -o yaml")
 	deleteCmd.AddCommand(deleteEgressPolicyCmd)
 }
