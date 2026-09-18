@@ -412,7 +412,11 @@ func printProto(out io.Writer, msg proto.Message, format string) error {
 	if err != nil {
 		return err
 	}
+	return printJSON(out, b, format)
+}
 
+// printJSON writes a JSON document as indented json or as yaml.
+func printJSON(out io.Writer, b []byte, format string) error {
 	// Normalize JSON output to ensure consistency across environments.
 	// This works around non-deterministic spacing in protojson.
 	// See: https://github.com/golang/protobuf/issues/1121
@@ -420,7 +424,7 @@ func printProto(out io.Writer, msg proto.Message, format string) error {
 	if err := json.Unmarshal(b, &obj); err != nil {
 		return fmt.Errorf("failed to unmarshal protojson: %w", err)
 	}
-	b, err = json.MarshalIndent(obj, "", "  ")
+	b, err := json.MarshalIndent(obj, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal indent: %w", err)
 	}

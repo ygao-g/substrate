@@ -41,11 +41,12 @@ var (
 )
 
 var getEgressPolicyCmd = &cobra.Command{
-	Use:     "egress-policy <actor-name>",
+	Use:     "egress-policy <actor-name ...>",
 	Aliases: []string{"egress-policies"},
-	Short:   "Get the egress policy of an actor",
-	// TODO(#1550): accept several actors and print a list document.
-	Args: cobra.ExactArgs(1),
+	Short:   "Get the egress policy of one or more actors",
+	Long: "Get the egress policy of one or more actors. With several actors the table prints one row " +
+		"each, and -o yaml/-o json print an egressPolicies list tagging each policy with its actor.",
+	Args: cobra.MinimumNArgs(1),
 	RunE: runGetEgressPolicy,
 }
 
@@ -145,25 +146,37 @@ type egressPolicyGetter interface {
 // getEgressPolicyRunner executes the get egress-policy command logic.
 type getEgressPolicyRunner struct {
 	getter    egressPolicyGetter
-	actor     *ateapipb.ObjectRef
+	actors    []*ateapipb.ObjectRef
 	outputFmt string
 	stdout    io.Writer
 	stderr    io.Writer
 }
 
 func (r *getEgressPolicyRunner) Run(ctx context.Context) error {
-	policy, err := r.getter.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: r.actor})
-	if status.Code(err) == codes.NotFound {
-		// No policy is a valid state, not a failure: the gateway denies all egress.
-		// TODO(#1703): the server answers NotFound for a missing actor too, so this
-		// note cannot tell a mistyped name from an actor without a policy.
-		fmt.Fprintf(r.stderr, "actor %q in atespace %q has no egress policy or does not exist; an actor without a policy has all egress denied\n", r.actor.GetName(), r.actor.GetAtespace())
-		return nil
+	found := make([]printer.ActorEgressPolicy, 0, len(r.actors))
+	for _, actor := range r.actors {
+		policy, err := r.getter.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: actor})
+		if status.Code(err) == codes.NotFound {
+			// No policy is a valid state, not a failure: the gateway denies all egress.
+			// TODO(#1703): the server answers NotFound for a missing actor too, so this
+			// note cannot tell a mistyped name from an actor without a policy.
+			fmt.Fprintf(r.stderr, "actor %q in atespace %q has no egress policy or does not exist; an actor without a policy has all egress denied\n", actor.GetName(), actor.GetAtespace())
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("failed to get egress policy for actor %q in atespace %q: %w", actor.GetName(), actor.GetAtespace(), err)
+		}
+		found = append(found, printer.ActorEgressPolicy{Actor: actor, Policy: policy})
 	}
-	if err != nil {
-		return fmt.Errorf("failed to get egress policy for actor %q in atespace %q: %w", r.actor.GetName(), r.actor.GetAtespace(), err)
+	// The output shape follows the command line, not what was found: one name
+	// prints the bare document, several always print the list.
+	if len(r.actors) == 1 {
+		if len(found) == 0 {
+			return nil
+		}
+		return printer.PrintEgressPolicyTo(r.stdout, found[0].Actor.GetName(), found[0].Policy, r.outputFmt)
 	}
-	return printer.PrintEgressPolicyTo(r.stdout, r.actor.GetName(), policy, r.outputFmt)
+	return printer.PrintEgressPoliciesTo(r.stdout, found, r.outputFmt)
 }
 
 func runGetEgressPolicy(cmd *cobra.Command, args []string) error {
@@ -175,9 +188,13 @@ func runGetEgressPolicy(cmd *cobra.Command, args []string) error {
 	}
 	defer apiClient.Close()
 
+	actors := make([]*ateapipb.ObjectRef, 0, len(args))
+	for _, name := range args {
+		actors = append(actors, &ateapipb.ObjectRef{Atespace: getEgressPolicyAtespaceFlag, Name: name})
+	}
 	runner := &getEgressPolicyRunner{
 		getter:    apiClient,
-		actor:     &ateapipb.ObjectRef{Atespace: getEgressPolicyAtespaceFlag, Name: args[0]},
+		actors:    actors,
 		outputFmt: outputFmt,
 		stdout:    cmd.OutOrStdout(),
 		stderr:    cmd.ErrOrStderr(),
