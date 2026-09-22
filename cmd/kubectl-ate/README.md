@@ -253,7 +253,8 @@ kubectl ate get egress-policy <src-actor> -a <atespace> -o yaml | \
 
 The manifest is one `EgressPolicy` in YAML or JSON; `metadata` may be omitted
 and server-managed fields are ignored, so the output of `get -o yaml` is a valid
-manifest as is.
+manifest as is. `hack/verify-egress-policy-cli.sh` exercises both verbs against a
+live cluster that has the egress demo installed.
 
 `get` exits 1 when the actor does not exist; an actor without a policy prints a
 note on stderr and exits 0.
