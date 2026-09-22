@@ -100,6 +100,16 @@ func (p *Persistence) DeleteEgressPolicy(ctx context.Context, actorRef resources
 		WHERE atespace = $1 AND actor_name = $2
 		RETURNING uid, version, proto`, actorRef.Atespace, actorRef.Name).Scan(&uid, &version, &protoBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// A DELETE that matches no row cannot tell a missing Actor from a
+		// missing policy the way getEgressPolicyRow's LEFT JOIN does, so check
+		// the Actor afterward.
+		exists, err := actorExists(ctx, p.pool, actorRef)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, store.ErrParentNotFound
+		}
 		return nil, store.ErrNotFound
 	}
 	if err != nil {
@@ -108,19 +118,41 @@ func (p *Persistence) DeleteEgressPolicy(ctx context.Context, actorRef resources
 	return unmarshalEgressPolicy(uid, version, protoBytes)
 }
 
+// actorExists reports whether the Actor row exists.
+func actorExists(ctx context.Context, q querier, actorRef resources.ActorRef) (bool, error) {
+	var exists bool
+	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM actors WHERE atespace = $1 AND name = $2)`, actorRef.Atespace, actorRef.Name).Scan(&exists); err != nil {
+		return false, fmt.Errorf("failed to check if Actor %s exists: %w", actorRef, err)
+	}
+	return exists, nil
+}
+
+// getEgressPolicyRow reads an actor's policy in one query so a missing
+// actor and a missing policy are told apart under one snapshot.
 func getEgressPolicyRow(ctx context.Context, q querier, actorRef resources.ActorRef) (*ateapipb.EgressPolicy, error) {
-	var uid string
-	var version int64
+	var uid *string
+	var version *int64
 	var protoBytes []byte
-	if err := q.QueryRow(ctx, `
-		SELECT uid, version, proto FROM actor_egress_policies
-		WHERE atespace = $1 AND actor_name = $2`, actorRef.Atespace, actorRef.Name).Scan(&uid, &version, &protoBytes); err != nil {
+	err := q.QueryRow(ctx, `
+		SELECT p.uid, p.version, p.proto
+		FROM actors a
+		LEFT JOIN actor_egress_policies p ON p.atespace = a.atespace AND p.actor_name = a.name
+		WHERE a.atespace = $1 AND a.name = $2`, actorRef.Atespace, actorRef.Name).Scan(&uid, &version, &protoBytes)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, store.ErrNotFound
+			return nil, store.ErrParentNotFound
 		}
 		return nil, fmt.Errorf("getting egress policy: %w", err)
 	}
-	return unmarshalEgressPolicy(uid, version, protoBytes)
+	// The policy columns are NOT NULL, so they are NULL together when the
+	// Actor has no policy, and a half-NULL row is corrupt.
+	switch {
+	case uid == nil && version == nil:
+		return nil, store.ErrNotFound
+	case uid == nil || version == nil:
+		return nil, fmt.Errorf("egress policy row for %s is half NULL", actorRef)
+	}
+	return unmarshalEgressPolicy(*uid, *version, protoBytes)
 }
 
 func unmarshalEgressPolicy(uid string, version int64, protoBytes []byte) (*ateapipb.EgressPolicy, error) {

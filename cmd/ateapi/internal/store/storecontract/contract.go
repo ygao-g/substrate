@@ -284,6 +284,15 @@ func runEgressPolicyContractTests(t *testing.T, setup func(t *testing.T) store.I
 		if _, err := s.CreateEgressPolicy(ctx, actorRef, policy); !errors.Is(err, store.ErrFailedPrecondition) {
 			t.Fatalf("policy without Actor error = %v, want ErrFailedPrecondition", err)
 		}
+		if _, err := s.GetEgressPolicy(ctx, actorRef); !errors.Is(err, store.ErrParentNotFound) {
+			t.Fatalf("Get without Actor error = %v, want ErrParentNotFound", err)
+		}
+		if _, err := s.UpdateEgressPolicy(ctx, actorRef, store.Precondition{UID: "some-uid", Version: 1}, func(*ateapipb.EgressPolicy) error { return nil }); !errors.Is(err, store.ErrParentNotFound) {
+			t.Fatalf("Update without Actor error = %v, want ErrParentNotFound", err)
+		}
+		if _, err := s.DeleteEgressPolicy(ctx, actorRef); !errors.Is(err, store.ErrParentNotFound) {
+			t.Fatalf("Delete without Actor error = %v, want ErrParentNotFound", err)
+		}
 		actor, err := s.CreateActor(ctx, &ateapipb.Actor{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: actorRef.Name},
 			Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_DELETING},
@@ -291,14 +300,18 @@ func runEgressPolicyContractTests(t *testing.T, setup func(t *testing.T) store.I
 		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err := s.DeleteEgressPolicy(ctx, actorRef); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("Delete of a missing policy error = %v, want ErrNotFound", err)
+		}
 		if _, err := s.CreateEgressPolicy(ctx, actorRef, policy); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.DeleteActor(ctx, actorRef); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.GetEgressPolicy(ctx, actorRef); !errors.Is(err, store.ErrNotFound) {
-			t.Fatalf("policy after Actor deletion error = %v, want ErrNotFound", err)
+		// The cascade removes the Actor as well as its policy.
+		if _, err := s.GetEgressPolicy(ctx, actorRef); !errors.Is(err, store.ErrParentNotFound) {
+			t.Fatalf("policy after Actor deletion error = %v, want ErrParentNotFound", err)
 		}
 		replacement, err := s.CreateActor(ctx, &ateapipb.Actor{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: actorRef.Name},
