@@ -388,36 +388,41 @@ func TestEgressPolicyCommandArgs(t *testing.T) {
 	runCommandArgsTests(t, []commandArgsTest{
 		{name: "get", command: getEgressPolicyCmd, args: []string{"c1"}},
 		{name: "get requires actor", command: getEgressPolicyCmd, wantErr: true},
-		{name: "get rejects multiple", command: getEgressPolicyCmd, args: []string{"c1", "c2"}, wantErr: true},
+		{name: "get multiple", command: getEgressPolicyCmd, args: []string{"c1", "c2"}},
 		{name: "create", command: createEgressPolicyCmd, args: []string{"c1"}},
 		{name: "create requires actor", command: createEgressPolicyCmd, wantErr: true},
 		{name: "create rejects multiple", command: createEgressPolicyCmd, args: []string{"c1", "c2"}, wantErr: true},
 	})
 }
 
-// fakeEgressPolicyGetter records the requests it received and answers with a
-// configured policy or error. actorReq stays nil unless the runner reads the
-// actor, which it only does after a NotFound.
+// fakeEgressPolicyGetter records the requests it received and answers each by
+// actor name: a configured error wins, then a configured policy, else NotFound.
+// actorReqs stays empty unless the runner reads an actor, which it only does
+// after a NotFound.
 type fakeEgressPolicyGetter struct {
-	req      *ateapipb.GetActorEgressPolicyRequest
-	policy   *ateapipb.EgressPolicy
-	err      error
-	actorReq *ateapipb.GetActorRequest
-	actorErr error
+	reqs      []*ateapipb.GetActorEgressPolicyRequest
+	policies  map[string]*ateapipb.EgressPolicy
+	errs      map[string]error
+	actorReqs []*ateapipb.GetActorRequest
+	actorErrs map[string]error
 }
 
 func (f *fakeEgressPolicyGetter) GetActorEgressPolicy(ctx context.Context, req *ateapipb.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
-	f.req = req
-	if f.err != nil {
-		return nil, f.err
+	f.reqs = append(f.reqs, req)
+	name := req.GetActor().GetName()
+	if err, ok := f.errs[name]; ok {
+		return nil, err
 	}
-	return f.policy, nil
+	if policy, ok := f.policies[name]; ok {
+		return policy, nil
+	}
+	return nil, status.Error(codes.NotFound, "EgressPolicy not found")
 }
 
 func (f *fakeEgressPolicyGetter) GetActor(ctx context.Context, req *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
-	f.actorReq = req
-	if f.actorErr != nil {
-		return nil, f.actorErr
+	f.actorReqs = append(f.actorReqs, req)
+	if err, ok := f.actorErrs[req.GetActor().GetName()]; ok {
+		return nil, err
 	}
 	return &ateapipb.Actor{}, nil
 }
@@ -426,7 +431,8 @@ func TestGetEgressPolicyRunner_Run(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	pinTime(t, now)
 
-	actor := &ateapipb.ObjectRef{Atespace: "team-a", Name: "c1"}
+	c1 := &ateapipb.ObjectRef{Atespace: "team-a", Name: "c1"}
+	c2 := &ateapipb.ObjectRef{Atespace: "team-a", Name: "c2"}
 	policy := &ateapipb.EgressPolicy{
 		Metadata: &ateapipb.ResourceMetadata{
 			Atespace:   "team-a",
@@ -437,31 +443,50 @@ func TestGetEgressPolicyRunner_Run(t *testing.T) {
 		},
 		Rules: []*ateapipb.EgressRule{{Hostnames: &ateapipb.HostnameRule{Patterns: []string{"api.example.com"}}}},
 	}
+	empty := &ateapipb.EgressPolicy{
+		Metadata: &ateapipb.ResourceMetadata{
+			Atespace:   "team-a",
+			Name:       "default",
+			Version:    3,
+			CreateTime: timestamppb.New(now.Add(-30 * time.Second)),
+		},
+	}
+	both := map[string]*ateapipb.EgressPolicy{"c1": policy, "c2": empty}
+	req := func(actor *ateapipb.ObjectRef) *ateapipb.GetActorEgressPolicyRequest {
+		return &ateapipb.GetActorEgressPolicyRequest{Actor: actor}
+	}
+	actorReq := func(actor *ateapipb.ObjectRef) *ateapipb.GetActorRequest {
+		return &ateapipb.GetActorRequest{Actor: actor}
+	}
+	notFound := status.Error(codes.NotFound, "Actor not found")
 
 	tests := []struct {
-		name         string
-		outputFmt    string
-		getter       *fakeEgressPolicyGetter
-		wantReq      *ateapipb.GetActorEgressPolicyRequest
-		wantActorReq *ateapipb.GetActorRequest
-		wantOut      string
-		wantErrOut   string
-		wantErr      string
+		name          string
+		outputFmt     string
+		actors        []*ateapipb.ObjectRef
+		getter        *fakeEgressPolicyGetter
+		wantReqs      []*ateapipb.GetActorEgressPolicyRequest
+		wantActorReqs []*ateapipb.GetActorRequest
+		wantOut       string
+		wantErrOut    string
+		wantErr       string
 	}{
 		{
 			name:      "table by default",
 			outputFmt: "table",
-			getter:    &fakeEgressPolicyGetter{policy: policy},
-			wantReq:   &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
+			actors:    []*ateapipb.ObjectRef{c1},
+			getter:    &fakeEgressPolicyGetter{policies: both},
+			wantReqs:  []*ateapipb.GetActorEgressPolicyRequest{req(c1)},
 			wantOut: `ATESPACE   ACTOR   RULES   VERSION   AGE
 team-a     c1      1       1         5m
 `,
 		},
 		{
-			name:      "yaml",
+			name:      "one name stays a bare document",
 			outputFmt: "yaml",
-			getter:    &fakeEgressPolicyGetter{policy: policy},
-			wantReq:   &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
+			actors:    []*ateapipb.ObjectRef{c1},
+			getter:    &fakeEgressPolicyGetter{policies: both},
+			wantReqs:  []*ateapipb.GetActorEgressPolicyRequest{req(c1)},
 			wantOut: `metadata:
   atespace: team-a
   createTime: "2026-01-01T11:55:00Z"
@@ -475,35 +500,239 @@ rules:
 `,
 		},
 		{
-			name:         "no policy on an existing actor writes a note and succeeds",
-			outputFmt:    "yaml",
-			getter:       &fakeEgressPolicyGetter{err: status.Error(codes.NotFound, "EgressPolicy not found")},
-			wantReq:      &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
-			wantActorReq: &ateapipb.GetActorRequest{Actor: actor},
-			wantErrOut:   "actor \"c1\" in atespace \"team-a\" has no egress policy\n",
+			name:          "no policy on an existing actor writes a note and succeeds",
+			outputFmt:     "yaml",
+			actors:        []*ateapipb.ObjectRef{c1},
+			getter:        &fakeEgressPolicyGetter{},
+			wantReqs:      []*ateapipb.GetActorEgressPolicyRequest{req(c1)},
+			wantActorReqs: []*ateapipb.GetActorRequest{actorReq(c1)},
+			wantErrOut:    "actor \"c1\" in atespace \"team-a\" has no egress policy\n",
 		},
 		{
-			name:         "missing actor fails",
-			outputFmt:    "yaml",
-			getter:       &fakeEgressPolicyGetter{err: status.Error(codes.NotFound, "EgressPolicy not found"), actorErr: status.Error(codes.NotFound, "Actor team-a/c1 not found")},
-			wantReq:      &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
-			wantActorReq: &ateapipb.GetActorRequest{Actor: actor},
-			wantErr:      `actor "c1" in atespace "team-a" not found`,
+			name:          "missing actor fails",
+			outputFmt:     "yaml",
+			actors:        []*ateapipb.ObjectRef{c1},
+			getter:        &fakeEgressPolicyGetter{actorErrs: map[string]error{"c1": notFound}},
+			wantReqs:      []*ateapipb.GetActorEgressPolicyRequest{req(c1)},
+			wantActorReqs: []*ateapipb.GetActorRequest{actorReq(c1)},
+			wantErrOut:    "actor \"c1\" in atespace \"team-a\" not found\n",
+			wantErr:       `no such actor: team-a/c1`,
 		},
 		{
-			name:         "actor lookup error wraps",
-			outputFmt:    "yaml",
-			getter:       &fakeEgressPolicyGetter{err: status.Error(codes.NotFound, "EgressPolicy not found"), actorErr: status.Error(codes.PermissionDenied, "denied")},
-			wantReq:      &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
-			wantActorReq: &ateapipb.GetActorRequest{Actor: actor},
-			wantErr:      `failed to get actor "c1" in atespace "team-a": rpc error: code = PermissionDenied desc = denied`,
+			name:          "actor lookup error wraps",
+			outputFmt:     "yaml",
+			actors:        []*ateapipb.ObjectRef{c1},
+			getter:        &fakeEgressPolicyGetter{actorErrs: map[string]error{"c1": status.Error(codes.PermissionDenied, "denied")}},
+			wantReqs:      []*ateapipb.GetActorEgressPolicyRequest{req(c1)},
+			wantActorReqs: []*ateapipb.GetActorRequest{actorReq(c1)},
+			wantErr:       `failed to get actor "c1" in atespace "team-a": rpc error: code = PermissionDenied desc = denied`,
+		},
+		{
+			name:          "one missing among several prints the rest then fails",
+			outputFmt:     "table",
+			actors:        []*ateapipb.ObjectRef{c1, c2},
+			getter:        &fakeEgressPolicyGetter{policies: map[string]*ateapipb.EgressPolicy{"c1": policy}, actorErrs: map[string]error{"c2": notFound}},
+			wantReqs:      []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
+			wantActorReqs: []*ateapipb.GetActorRequest{actorReq(c2)},
+			wantOut: `ATESPACE   ACTOR   RULES   VERSION   AGE
+team-a     c1      1       1         5m
+`,
+			wantErrOut: "actor \"c2\" in atespace \"team-a\" not found\n",
+			wantErr:    `no such actor: team-a/c2`,
 		},
 		{
 			name:      "other error wraps",
 			outputFmt: "table",
-			getter:    &fakeEgressPolicyGetter{err: status.Error(codes.Unavailable, "api-server down")},
-			wantReq:   &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
+			actors:    []*ateapipb.ObjectRef{c1},
+			getter:    &fakeEgressPolicyGetter{errs: map[string]error{"c1": status.Error(codes.Unavailable, "api-server down")}},
+			wantReqs:  []*ateapipb.GetActorEgressPolicyRequest{req(c1)},
 			wantErr:   `failed to get egress policy for actor "c1" in atespace "team-a": rpc error: code = Unavailable desc = api-server down`,
+		},
+		{
+			name:      "two names table in argument order",
+			outputFmt: "table",
+			actors:    []*ateapipb.ObjectRef{c2, c1},
+			getter:    &fakeEgressPolicyGetter{policies: both},
+			wantReqs:  []*ateapipb.GetActorEgressPolicyRequest{req(c2), req(c1)},
+			wantOut: `ATESPACE   ACTOR   RULES   VERSION   AGE
+team-a     c2      0       3         30s
+team-a     c1      1       1         5m
+`,
+		},
+		{
+			name:      "two names yaml wrapped",
+			outputFmt: "yaml",
+			actors:    []*ateapipb.ObjectRef{c1, c2},
+			getter:    &fakeEgressPolicyGetter{policies: both},
+			wantReqs:  []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
+			wantOut: `egressPolicies:
+- actor:
+    atespace: team-a
+    name: c1
+  egressPolicy:
+    metadata:
+      atespace: team-a
+      createTime: "2026-01-01T11:55:00Z"
+      name: default
+      uid: 3f2b1c0e-8d5a-4b6e-9c1d-2a7e4f6b8c0d
+      version: "1"
+    rules:
+    - hostnames:
+        patterns:
+        - api.example.com
+- actor:
+    atespace: team-a
+    name: c2
+  egressPolicy:
+    metadata:
+      atespace: team-a
+      createTime: "2026-01-01T11:59:30Z"
+      name: default
+      version: "3"
+`,
+		},
+		{
+			name:      "two names json wrapped",
+			outputFmt: "json",
+			actors:    []*ateapipb.ObjectRef{c1, c2},
+			getter:    &fakeEgressPolicyGetter{policies: both},
+			wantReqs:  []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
+			wantOut: `{
+  "egressPolicies": [
+    {
+      "actor": {
+        "atespace": "team-a",
+        "name": "c1"
+      },
+      "egressPolicy": {
+        "metadata": {
+          "atespace": "team-a",
+          "createTime": "2026-01-01T11:55:00Z",
+          "name": "default",
+          "uid": "3f2b1c0e-8d5a-4b6e-9c1d-2a7e4f6b8c0d",
+          "version": "1"
+        },
+        "rules": [
+          {
+            "hostnames": {
+              "patterns": [
+                "api.example.com"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "actor": {
+        "atespace": "team-a",
+        "name": "c2"
+      },
+      "egressPolicy": {
+        "metadata": {
+          "atespace": "team-a",
+          "createTime": "2026-01-01T11:59:30Z",
+          "name": "default",
+          "version": "3"
+        }
+      }
+    }
+  ]
+}
+`,
+		},
+		{
+			name:          "one of two not found keeps the other",
+			outputFmt:     "table",
+			actors:        []*ateapipb.ObjectRef{c1, c2},
+			getter:        &fakeEgressPolicyGetter{policies: map[string]*ateapipb.EgressPolicy{"c1": policy}},
+			wantReqs:      []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
+			wantActorReqs: []*ateapipb.GetActorRequest{actorReq(c2)},
+			wantOut: `ATESPACE   ACTOR   RULES   VERSION   AGE
+team-a     c1      1       1         5m
+`,
+			wantErrOut: "actor \"c2\" in atespace \"team-a\" has no egress policy\n",
+		},
+		{
+			name:          "first of two without a policy keeps the second in position",
+			outputFmt:     "table",
+			actors:        []*ateapipb.ObjectRef{c1, c2},
+			getter:        &fakeEgressPolicyGetter{policies: map[string]*ateapipb.EgressPolicy{"c2": empty}},
+			wantReqs:      []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
+			wantActorReqs: []*ateapipb.GetActorRequest{actorReq(c1)},
+			wantOut: `ATESPACE   ACTOR   RULES   VERSION   AGE
+team-a     c2      0       3         30s
+`,
+			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy\n",
+		},
+		{
+			name:          "one of two without a policy prints a one-entry yaml list",
+			outputFmt:     "yaml",
+			actors:        []*ateapipb.ObjectRef{c1, c2},
+			getter:        &fakeEgressPolicyGetter{policies: map[string]*ateapipb.EgressPolicy{"c1": policy}},
+			wantReqs:      []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
+			wantActorReqs: []*ateapipb.GetActorRequest{actorReq(c2)},
+			wantOut: `egressPolicies:
+- actor:
+    atespace: team-a
+    name: c1
+  egressPolicy:
+    metadata:
+      atespace: team-a
+      createTime: "2026-01-01T11:55:00Z"
+      name: default
+      uid: 3f2b1c0e-8d5a-4b6e-9c1d-2a7e4f6b8c0d
+      version: "1"
+    rules:
+    - hostnames:
+        patterns:
+        - api.example.com
+`,
+			wantErrOut: "actor \"c2\" in atespace \"team-a\" has no egress policy\n",
+		},
+		{
+			name:          "none of two found prints an empty list",
+			outputFmt:     "yaml",
+			actors:        []*ateapipb.ObjectRef{c1, c2},
+			getter:        &fakeEgressPolicyGetter{},
+			wantReqs:      []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
+			wantActorReqs: []*ateapipb.GetActorRequest{actorReq(c1), actorReq(c2)},
+			wantOut:       "egressPolicies: []\n",
+			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy\n" +
+				"actor \"c2\" in atespace \"team-a\" has no egress policy\n",
+		},
+		{
+			name:          "none of two found prints an empty table",
+			outputFmt:     "table",
+			actors:        []*ateapipb.ObjectRef{c1, c2},
+			getter:        &fakeEgressPolicyGetter{},
+			wantReqs:      []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
+			wantActorReqs: []*ateapipb.GetActorRequest{actorReq(c1), actorReq(c2)},
+			wantOut:       "ATESPACE   ACTOR   RULES   VERSION   AGE\n",
+			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy\n" +
+				"actor \"c2\" in atespace \"team-a\" has no egress policy\n",
+		},
+		{
+			name:      "second name failing prints nothing",
+			outputFmt: "yaml",
+			actors:    []*ateapipb.ObjectRef{c1, c2},
+			getter: &fakeEgressPolicyGetter{
+				policies: both,
+				errs:     map[string]error{"c2": status.Error(codes.Unavailable, "api-server down")},
+			},
+			wantReqs: []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c2)},
+			wantErr:  `failed to get egress policy for actor "c2" in atespace "team-a": rpc error: code = Unavailable desc = api-server down`,
+		},
+		{
+			name:      "same name twice fetches twice",
+			outputFmt: "table",
+			actors:    []*ateapipb.ObjectRef{c1, c1},
+			getter:    &fakeEgressPolicyGetter{policies: both},
+			wantReqs:  []*ateapipb.GetActorEgressPolicyRequest{req(c1), req(c1)},
+			wantOut: `ATESPACE   ACTOR   RULES   VERSION   AGE
+team-a     c1      1       1         5m
+team-a     c1      1       1         5m
+`,
 		},
 	}
 
@@ -512,7 +741,7 @@ rules:
 			var stdout, stderr bytes.Buffer
 			runner := &getEgressPolicyRunner{
 				getter:    test.getter,
-				actor:     actor,
+				actors:    test.actors,
 				outputFmt: test.outputFmt,
 				stdout:    &stdout,
 				stderr:    &stderr,
@@ -525,11 +754,11 @@ rules:
 			if gotErr != test.wantErr {
 				t.Fatalf("Run() error = %q, want %q", gotErr, test.wantErr)
 			}
-			if diff := cmp.Diff(test.wantReq, test.getter.req, protocmp.Transform()); diff != "" {
-				t.Errorf("request mismatch (-want +got):\n%s", diff)
+			if diff := cmp.Diff(test.wantReqs, test.getter.reqs, protocmp.Transform()); diff != "" {
+				t.Errorf("requests mismatch (-want +got):\n%s", diff)
 			}
-			if diff := cmp.Diff(test.wantActorReq, test.getter.actorReq, protocmp.Transform()); diff != "" {
-				t.Errorf("actor request mismatch (-want +got):\n%s", diff)
+			if diff := cmp.Diff(test.wantActorReqs, test.getter.actorReqs, protocmp.Transform()); diff != "" {
+				t.Errorf("actor requests mismatch (-want +got):\n%s", diff)
 			}
 			if diff := cmp.Diff(test.wantOut, stdout.String()); diff != "" {
 				t.Errorf("stdout mismatch (-want +got):\n%s", diff)

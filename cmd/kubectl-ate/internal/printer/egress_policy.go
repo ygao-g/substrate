@@ -15,27 +15,82 @@
 package printer
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"text/tabwriter"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
-// PrintEgressPolicyTo prints one actor's egress policy. json and yaml emit the
-// bare EgressPolicy. The policy carries no actor name, so the caller passes it.
-func PrintEgressPolicyTo(out io.Writer, actor string, policy *ateapipb.EgressPolicy, format string) error {
+// ActorEgressPolicy pairs a policy with the actor it was fetched for. The
+// policy itself carries no actor name and is always named "default".
+type ActorEgressPolicy struct {
+	Actor  *ateapipb.ObjectRef
+	Policy *ateapipb.EgressPolicy
+}
+
+// egressPolicyEntry is one entry of the json/yaml egressPolicies list. Both
+// fields hold already protojson-marshaled messages.
+type egressPolicyEntry struct {
+	Actor        json.RawMessage `json:"actor"`
+	EgressPolicy json.RawMessage `json:"egressPolicy"`
+}
+
+// PrintEgressPoliciesTo prints several actors' egress policies. json and yaml
+// wrap them in an egressPolicies list whose entries tag each policy with its
+// actor, in the order given.
+func PrintEgressPoliciesTo(out io.Writer, entries []ActorEgressPolicy, format string) error {
 	switch format {
 	case "json", "yaml":
-		return printProto(out, policy, format)
+		list := struct {
+			EgressPolicies []json.RawMessage `json:"egressPolicies"`
+		}{EgressPolicies: make([]json.RawMessage, 0, len(entries))}
+		for _, entry := range entries {
+			actor, err := protojson.Marshal(entry.Actor)
+			if err != nil {
+				return err
+			}
+			policy, err := protojson.Marshal(entry.Policy)
+			if err != nil {
+				return err
+			}
+			b, err := json.Marshal(egressPolicyEntry{Actor: actor, EgressPolicy: policy})
+			if err != nil {
+				return err
+			}
+			list.EgressPolicies = append(list.EgressPolicies, b)
+		}
+		b, err := json.Marshal(list)
+		if err != nil {
+			return fmt.Errorf("failed to marshal egress policies: %w", err)
+		}
+		return printJSON(out, b, format)
 	case "table":
 		w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 		fmt.Fprintln(w, "ATESPACE\tACTOR\tRULES\tVERSION\tAGE")
-		fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%s\n",
-			policy.GetMetadata().GetAtespace(), actor, len(policy.GetRules()),
-			policy.GetMetadata().GetVersion(), formatAge(policy.GetMetadata().GetCreateTime()))
+		for _, entry := range entries {
+			egressPolicyRow(w, entry.Actor.GetName(), entry.Policy)
+		}
 		return w.Flush()
 	default:
 		return fmt.Errorf("unsupported format %q", format)
 	}
+}
+
+func egressPolicyRow(w io.Writer, actor string, policy *ateapipb.EgressPolicy) {
+	fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%s\n",
+		policy.GetMetadata().GetAtespace(), actor, len(policy.GetRules()),
+		policy.GetMetadata().GetVersion(), formatAge(policy.GetMetadata().GetCreateTime()))
+}
+
+// PrintEgressPolicyTo prints one actor's egress policy. json and yaml emit the
+// bare EgressPolicy. The policy carries no actor name, so the caller passes it.
+func PrintEgressPolicyTo(out io.Writer, actor string, policy *ateapipb.EgressPolicy, format string) error {
+	if format == "json" || format == "yaml" {
+		return printProto(out, policy, format)
+	}
+	// table has no singular/plural distinction, so reuse the list renderer.
+	return PrintEgressPoliciesTo(out, []ActorEgressPolicy{{Actor: &ateapipb.ObjectRef{Name: actor}, Policy: policy}}, format)
 }
