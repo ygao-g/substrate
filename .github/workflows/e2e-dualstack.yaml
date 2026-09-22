@@ -1,0 +1,295 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: e2e-dualstack
+# Dual-stack kind e2e, run against a pull request or on demand against main.
+#
+# There is not yet anything here that a single-family lane does not already
+# cover: atenet-router is SingleStack, so the actor zone publishes an A and no
+# AAAA and every client dials IPv4. It gates nothing and stays out of
+# `e2e-test`, while giving the changes that make IPv6 work a place to add
+# their assertions and a way to get a dual-stack result before they merge.
+#
+# TODO(246): gate this before merging. It runs on every PR today so the
+# dual-stack results are visible without a maintainer having to act first; the
+# intended steady state is a `ci/dual-stack` label, which needs the label
+# created upstream:
+#
+#     on: {pull_request: {types: [labeled, opened, synchronize, reopened]}}
+#     if: contains(github.event.pull_request.labels.*.name, 'ci/dual-stack')
+#
+# What dual-stack uniquely catches is truncation -- code reading one address
+# where the cluster has two, which neither single-family lane can see because
+# on each of them the single address is the right one -- and coexistence: a
+# change that makes IPv6 work must not break IPv4. It cannot show that IPv6
+# works. A broken IPv6 path falls back to IPv4 and reads as a pass; proving
+# IPv6 is the IPv6-only lane's job. So every assertion here names a family.
+#
+# IPv4 stays primary on a dual-stack cluster, so none of the NAT64, DNS64 or
+# v6-upstream-resolver scaffolding a v6-only run needs applies.
+# Two ways in, because a pending change needs both. Label a pull request
+# ci/dual-stack and it runs on that request and on every push to it, forks
+# included. Dispatch it with a list of pull requests and it merges them onto
+# main in that order and runs the result: the IPv6 work is a set of changes
+# that do nothing apart -- one publishes an AAAA, another gives the router an
+# address to publish -- so a per-request run cannot show the feature working,
+# only that it did no harm. The stack exists for the length of the run and is
+# never pushed, so there is no branch to rebase and no provenance to keep in
+# sync by hand; the run prints what it merged.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      prs:
+        description: 'Pull requests to merge onto main, in order, e.g. "911 1080 874 938 1082". Blank runs main alone.'
+        required: false
+        type: string
+permissions:
+  contents: read
+jobs:
+  e2e-test-dualstack:
+    # Never on an unlabelled pull request. The lane is opt-in until the router
+    # is dual-stack, so it must not appear on requests that have nothing to do
+    # with address families.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci/dual-stack')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      KIND_CLUSTER_NAME: ate-dual
+      KUBECTL_CONTEXT: kind-ate-dual
+    steps:
+    - name: Checkout
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        # gh pr checkout below needs to fetch a ref this clone does not have.
+        fetch-depth: 0
+    - name: Stack the pull requests under test
+      # Merge, not cherry-pick: a request that has been squash-merged since it
+      # was opened re-applies as a revert of what is already on main, and only
+      # a merge notices there is nothing to do. Order is the order given, so a
+      # conflict names the request that has to rebase rather than the stack.
+      #
+      # This builds and runs the requests' code. The token is read-only and no
+      # secrets reach it; a run happens only when someone asks for one.
+      if: github.event_name == 'workflow_dispatch' && inputs.prs != ''
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PRS: ${{ inputs.prs }}
+      run: |
+        git config user.name  'e2e-dualstack'
+        git config user.email 'e2e-dualstack@invalid'
+        {
+          echo "### Stack under test"
+          echo ""
+          echo "Merged onto \`main\` at \`$(git rev-parse --short HEAD)\`, in order:"
+          echo ""
+          echo "| pull request | head | title |"
+          echo "|---|---|---|"
+        } >> "$GITHUB_STEP_SUMMARY"
+        for pr in ${PRS//,/ }; do
+          case "${pr}" in
+            ''|*[!0-9]*) echo "::error::'${pr}' is not a pull request number"; exit 1 ;;
+          esac
+          git fetch -q origin "refs/pull/${pr}/head:pr-${pr}" \
+            || { echo "::error::no such pull request: #${pr}"; exit 1; }
+          if ! git merge --no-edit -q "pr-${pr}"; then
+            echo "::error::#${pr} does not merge onto the stack; it needs a rebase"
+            git merge --abort || true
+            exit 1
+          fi
+          title=$(gh pr view "${pr}" --json title -q .title 2>/dev/null || echo '?')
+          echo "| #${pr} | \`$(git rev-parse --short "pr-${pr}")\` | ${title} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "merged #${pr}: ${title}"
+        done
+    - name: Setup Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      with:
+        go-version-file: 'go.mod'
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        df -h /
+    - name: Enable IPv6 in the Docker daemon
+      # ubuntu-latest ships dockerd with IPv6 off, so kind would create its
+      # network v4-only and create-kind-cluster.sh would reject the cluster.
+      # Merge the two keys into whatever daemon.json the runner image ships
+      # rather than replacing the file.
+      run: |
+        sudo mkdir -p /etc/docker
+        [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
+        sudo cat /etc/docker/daemon.json \
+          | jq '. + {"ipv6": true, "ip6tables": true}' \
+          | sudo tee /etc/docker/daemon.json.new >/dev/null
+        sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json
+        sudo systemctl restart docker
+        docker network inspect bridge --format 'bridge EnableIPv6={{.EnableIPv6}}'
+    - name: Create cluster
+      env:
+        IP_FAMILY: dual
+      run: hack/create-kind-cluster.sh
+    - name: Wait for the node to be ready
+      # create-kind-cluster.sh returns as soon as kind does, which is before
+      # kube-controller-manager has allocated node.spec.podCIDRs. The next step
+      # reads that field, so without this it fails on a cluster that is fine --
+      # twice out of five runs on 2026-08-20, reporting "no IPv4 in podCIDRs=".
+      run: |
+        for _ in $(seq 1 60); do
+          cidrs=$(kubectl --context="$KUBECTL_CONTEXT" get nodes \
+            -o jsonpath='{.items[*].spec.podCIDRs[*]}' 2>/dev/null || true)
+          [ -n "${cidrs}" ] && break
+          sleep 2
+        done
+        kubectl --context="$KUBECTL_CONTEXT" wait --for=condition=Ready nodes --all --timeout=180s
+    - name: Assert the cluster is dual-stack
+      # The failure this job exists to catch is the silent one: dual is the
+      # only IP_FAMILY value whose cluster still comes up when it is ignored,
+      # so a regression that dropped the second family would leave a green run
+      # that is really just a second IPv4 lane. Assert both families are
+      # present rather than trusting the invocation.
+      #
+      # The obvious probe -- default/kubernetes -- does not work: that Service
+      # is SingleStack even on a dual-stack cluster. A throwaway
+      # PreferDualStack Service is the direct one, and it exercises the
+      # allocator the router Service will need rather than standing in for it.
+      run: |
+        k() { kubectl --context="$KUBECTL_CONTEXT" "$@"; }
+        k -n default delete svc ipfamily-probe --ignore-not-found >/dev/null
+        echo '{"apiVersion":"v1","kind":"Service","metadata":{"name":"ipfamily-probe"},
+               "spec":{"ipFamilyPolicy":"PreferDualStack","ports":[{"port":80}],
+                       "selector":{"ate.dev/matches-nothing":"true"}}}' \
+          | k -n default create -f - >/dev/null
+        probe_ips=$(k -n default get svc ipfamily-probe -o jsonpath='{.spec.clusterIPs[*]}')
+        k -n default delete svc ipfamily-probe >/dev/null
+        pod_cidrs=$(k get nodes -o jsonpath='{.items[*].spec.podCIDRs[*]}')
+        node_ips=$(k get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
+        for pair in "podCIDRs=${pod_cidrs}" "node.InternalIP=${node_ips}" "PreferDualStack.clusterIPs=${probe_ips}"; do
+          value=${pair#*=}
+          case "${value}" in
+            *.*) ;;
+            *) echo "::error::no IPv4 in ${pair}"; exit 1 ;;
+          esac
+          case "${value}" in
+            *:*) ;;
+            *) echo "::error::no IPv6 in ${pair}"; exit 1 ;;
+          esac
+          echo "  ${pair}"
+        done
+        echo "dual-stack confirmed"
+    - name: Install Agent Substrate
+      run: hack/install-ate-kind.sh --deploy-ate-system
+    - name: Report the Service IP families
+      # Not an assertion yet. atenet-router is still SingleStack on a
+      # dual-stack cluster -- it has no ipFamilyPolicy -- so the tests that
+      # compare families skip themselves, and the guard below prints that.
+      # Turning this into a hard check belongs with the change that makes the
+      # router dual-stack, so it fails as that change regressing.
+      run: |
+        kubectl --context="$KUBECTL_CONTEXT" -n ate-system get svc \
+          -o custom-columns=NAME:.metadata.name,POLICY:.spec.ipFamilyPolicy,IPS:.spec.clusterIPs
+    - name: Deploy gVisor counter demo
+      run: hack/install-ate-kind.sh --deploy-demo-counter
+    - name: Deploy egress demo
+      run: hack/install-ate-kind.sh --deploy-demo-egress
+    - name: Assert the demo fixtures exist
+      # A failed demo deploy exits 0: install-ate.sh dispatches demos through
+      # `if "${demo}_cmdline" "$1"`, which suspends errexit, and _cmdline ends
+      # in an unconditional `return 0`. Without this the suites fail later with
+      # "ActorTemplate not found", pointing at the tests instead of the install.
+      run: |
+        for ns_tmpl in ate-demo-counter/counter ate-demo-egress/egress; do
+          ns=${ns_tmpl%/*}; tmpl=${ns_tmpl#*/}
+          kubectl --context="$KUBECTL_CONTEXT" -n "${ns}" get actortemplate "${tmpl}" \
+            || { echo "::error::${ns_tmpl} was not created -- the demo deploy failed silently"; exit 1; }
+        done
+    - name: Run E2E tests (demo)
+      id: e2e-demo
+      run: |
+        set -o pipefail
+        hack/run-e2e-kind.sh ./internal/e2e/suites/demo -v -args --no-color 2>&1 \
+          | tee /tmp/e2e-demo.log
+    - name: Run E2E tests (networking)
+      if: always() && steps.e2e-demo.outcome != 'skipped'
+      run: |
+        set -o pipefail
+        hack/run-e2e-kind.sh ./internal/e2e/suites/networking -v -args --no-color 2>&1 \
+          | tee /tmp/e2e-networking.log
+    - name: Guard against a vacuously green run
+      # The bar is one real PASS per suite, not zero skips: demo legitimately
+      # skips the micro-VM-only tests on any family. Skips are printed because
+      # on this lane a growing list is the symptom -- a test that compares the
+      # two families skips itself rather than failing when a clusterIP is
+      # missing, so a lane that stopped being dual-stack would still be green.
+      if: always() && steps.e2e-demo.outcome != 'skipped'
+      run: |
+        for f in /tmp/e2e-demo.log /tmp/e2e-networking.log; do
+          [ -s "$f" ] || { echo "::error::${f} is missing or empty"; exit 1; }
+          passed=$(grep -c -- '--- PASS' "$f" || true)
+          echo "${f}: ${passed} passed, $(grep -c -- '--- SKIP' "$f" || true) skipped"
+          grep -h -- '--- SKIP' "$f" || true
+          if [ "${passed}" -eq 0 ]; then
+            echo "::error::${f} has no passing tests -- a suite that only skips proves nothing"
+            exit 1
+          fi
+        done
+    - name: Assert the family-critical tests were not skipped
+      # Counting passes does not catch the way this suite goes vacuously green.
+      # Every other test reaches an actor by port-forwarding the router and
+      # passing the actor name as a Host header, so none of them queries the
+      # actor DNS zone and none picks an address family: they pass whether the
+      # zone is right or not. These four are the ones that look.
+      #
+      # Absent is fine, they arrive with the changes that need them. Present
+      # and skipped is not -- each skips itself when the router has only one
+      # address, so a skip means the stack under test is missing whatever gives
+      # the router its second one and the run proves nothing. When these start
+      # running on an unstacked main, the router is dual-stack and this lane
+      # has earned a pull_request trigger.
+      if: always() && steps.e2e-demo.outcome != 'skipped'
+      run: |
+        log=/tmp/e2e-networking.log
+        [ -s "${log}" ] || { echo "::error::${log} is missing or empty"; exit 1; }
+        rc=0
+        for t in TestActorDNSZone TestActorDNSAAAA TestRouterListenerAddresses TestActorIngressPerFamily; do
+          if grep -q -- "--- SKIP: ${t}" "${log}"; then
+            echo "::error::${t} skipped on a dual-stack cluster -- it needs the router to have two ClusterIPs, so this run proves nothing about IPv6"
+            rc=1
+          elif grep -q -- "--- PASS: ${t}" "${log}"; then
+            echo "  ${t}: ran"
+          else
+            echo "  ${t}: not in this tree yet"
+          fi
+        done
+        exit "${rc}"
+    - name: Dump diagnostics on failure
+      if: failure()
+      run: |
+        kubectl --context="$KUBECTL_CONTEXT" get actortemplate,workerpool,pods -A -o wide || true
+        dump() {
+          echo "=== logs: $1/$2 ==="
+          kubectl --context="$KUBECTL_CONTEXT" logs -n "$1" "$2" --all-containers --tail=300 2>/dev/null || true
+        }
+        for p in $(kubectl --context="$KUBECTL_CONTEXT" get pods -n ate-system -o name 2>/dev/null); do
+          dump ate-system "$p"
+        done
+        kubectl --context="$KUBECTL_CONTEXT" get pods -A -l ate.dev/worker-pool \
+          -o 'custom-columns=:.metadata.namespace,:.metadata.name' --no-headers 2>/dev/null \
+          | while read -r ns name; do dump "$ns" "$name"; done
+        # Which family each Service actually got is the whole subject of this
+        # job, and the rendered zone is what the DNS assertions read.
+        kubectl --context="$KUBECTL_CONTEXT" get svc -A \
+          -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,POLICY:.spec.ipFamilyPolicy,IPS:.spec.clusterIPs || true
+        kubectl --context="$KUBECTL_CONTEXT" -n ate-system logs -l app=dns --all-containers --tail=100 || true
