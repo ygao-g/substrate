@@ -49,18 +49,14 @@ func (p *Persistence) CreateEgressPolicy(ctx context.Context, actorRef resources
 }
 
 func (p *Persistence) GetEgressPolicy(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.EgressPolicy, error) {
-	return getEgressPolicyRow(ctx, p.pool, `
-		SELECT uid, version, proto FROM actor_egress_policies
-		WHERE atespace = $1 AND actor_name = $2`, actorRef.Atespace, actorRef.Name)
+	return getEgressPolicyRow(ctx, p.pool, actorRef)
 }
 
 func (p *Persistence) UpdateEgressPolicy(ctx context.Context, actorRef resources.ActorRef, precondition store.Precondition, mutate func(*ateapipb.EgressPolicy) error) (*ateapipb.EgressPolicy, error) {
 	if err := precondition.Validate(); err != nil {
 		return nil, err
 	}
-	dbPolicy, err := getEgressPolicyRow(ctx, p.pool, `
-		SELECT uid, version, proto FROM actor_egress_policies
-		WHERE atespace = $1 AND actor_name = $2`, actorRef.Atespace, actorRef.Name)
+	dbPolicy, err := getEgressPolicyRow(ctx, p.pool, actorRef)
 	if err != nil {
 		return nil, err
 	}
@@ -112,11 +108,13 @@ func (p *Persistence) DeleteEgressPolicy(ctx context.Context, actorRef resources
 	return unmarshalEgressPolicy(uid, version, protoBytes)
 }
 
-func getEgressPolicyRow(ctx context.Context, q querier, query string, args ...any) (*ateapipb.EgressPolicy, error) {
+func getEgressPolicyRow(ctx context.Context, q querier, actorRef resources.ActorRef) (*ateapipb.EgressPolicy, error) {
 	var uid string
 	var version int64
 	var protoBytes []byte
-	if err := q.QueryRow(ctx, query, args...).Scan(&uid, &version, &protoBytes); err != nil {
+	if err := q.QueryRow(ctx, `
+		SELECT uid, version, proto FROM actor_egress_policies
+		WHERE atespace = $1 AND actor_name = $2`, actorRef.Atespace, actorRef.Name).Scan(&uid, &version, &protoBytes); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
