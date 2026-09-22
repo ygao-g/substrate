@@ -255,8 +255,8 @@ The manifest is one `EgressPolicy` in YAML or JSON; `metadata` may be omitted
 and server-managed fields are ignored, so the output of `get -o yaml` is a valid
 manifest as is.
 
-`get` exits 1 when the actor does not exist; an actor without a policy prints a
-note on stderr and exits 0.
+`get` exits 1 when the api-server reports that the actor does not exist; an
+actor without a policy prints a note on stderr and exits 0.
 
 #### `kubectl ate get egress-policy` output columns
 
