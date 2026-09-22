@@ -1035,7 +1035,7 @@ message EnvVar {
   //
   // +k8s:optional
   // +k8s:maxLength=32768 # guardrail;
-  string value = 2;
+  string value = 2 [ debug_redact = true ];
 }
 
 // ContainerReadyz configures the readiness signal for a container.
@@ -1479,6 +1479,11 @@ message DeleteActorEgressPolicyRequest {
   // +k8s:required
   // +k8s:subfield(atespace)=+k8s:required
   ObjectRef actor = 1;
+
+  // Optional per-delete preconditions.
+  //
+  // +k8s:optional
+  DeleteOptions options = 2;
 }
 
 message GetTagRequest {
@@ -1536,7 +1541,7 @@ message MintActorJWTResponse {
   // * `ate.dev`: Ate/Substrate Extension - JSON object
   //   * atespace: (string) The atespace the actor belongs to
   //   * actorName: (string) The actor's name, unique within its atespace
-  string actor_jwt = 1;
+  string actor_jwt = 1 [ debug_redact = true ];
 }
 
 // Request message for MintActorCertificate.
@@ -1678,8 +1683,7 @@ message DeleteTagRequest {
 // state the caller expects. Future delete-specific controls (e.g. dry-run)
 // should be added here.
 //
-// Intended to be reused across every Delete<Type>Request; only
-// DeleteWorkerRequest carries it so far.
+// Intended to be reused across every Delete<Type>Request.
 message DeleteOptions {
   // If non-zero, delete only if the server's current version matches.
   //
