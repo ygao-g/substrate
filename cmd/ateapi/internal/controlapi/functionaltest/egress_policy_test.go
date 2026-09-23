@@ -21,7 +21,9 @@ import (
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -123,8 +125,46 @@ func TestCreateActorEgressPolicy_Errors(t *testing.T) {
 
 func TestGetActorEgressPolicy_NotFound(t *testing.T) {
 	tc, actor := setupEgressPolicyActor(t, "ns-get-egress-policy-missing")
-	_, err := tc.client.GetActorEgressPolicy(context.Background(), &ateapipb.GetActorEgressPolicyRequest{Actor: actor})
-	assertGrpcError(t, err, codes.NotFound, "EgressPolicy not found")
+	missingActor := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "missing-actor"}
+
+	tests := []struct {
+		name         string
+		actor        *ateapipb.ObjectRef
+		wantMsg      string
+		wantType     string
+		wantResource string
+	}{
+		{
+			name:         "existing actor, no policy",
+			actor:        actor,
+			wantMsg:      "EgressPolicy not found",
+			wantType:     "EgressPolicy",
+			wantResource: testAtespace + "/egress-actor",
+		},
+		{
+			name:         "missing actor",
+			actor:        missingActor,
+			wantMsg:      "Actor " + testAtespace + "/missing-actor not found",
+			wantType:     "Actor",
+			wantResource: testAtespace + "/missing-actor",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := tc.client.GetActorEgressPolicy(context.Background(), &ateapipb.GetActorEgressPolicyRequest{Actor: test.actor})
+			assertGrpcError(t, err, codes.NotFound, test.wantMsg)
+			// The detail has to survive the wire, not just the handler.
+			gotType, gotResource := "", ""
+			for _, detail := range status.Convert(err).Details() {
+				if info, ok := detail.(*errdetails.ResourceInfo); ok {
+					gotType, gotResource = info.GetResourceType(), info.GetResourceName()
+				}
+			}
+			if gotType != test.wantType || gotResource != test.wantResource {
+				t.Errorf("ResourceInfo = (%q, %q), want (%q, %q)", gotType, gotResource, test.wantType, test.wantResource)
+			}
+		})
+	}
 }
 
 func TestUpdateActorEgressPolicy(t *testing.T) {
@@ -184,7 +224,7 @@ func TestUpdateActorEgressPolicy_Preconditions(t *testing.T) {
 
 	missingActor := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "missing-actor"}
 	_, err = tc.client.UpdateActorEgressPolicy(context.Background(), &ateapipb.UpdateActorEgressPolicyRequest{Actor: missingActor, EgressPolicy: created})
-	assertGrpcError(t, err, codes.NotFound, "EgressPolicy not found")
+	assertGrpcError(t, err, codes.NotFound, "Actor "+testAtespace+"/missing-actor not found")
 }
 
 func TestDeleteActorEgressPolicy(t *testing.T) {
@@ -200,6 +240,10 @@ func TestDeleteActorEgressPolicy(t *testing.T) {
 	}
 	_, err = tc.client.DeleteActorEgressPolicy(context.Background(), &ateapipb.DeleteActorEgressPolicyRequest{Actor: actor})
 	assertGrpcError(t, err, codes.NotFound, "EgressPolicy not found")
+
+	missingActor := &ateapipb.ObjectRef{Atespace: testAtespace, Name: "missing-actor"}
+	_, err = tc.client.DeleteActorEgressPolicy(context.Background(), &ateapipb.DeleteActorEgressPolicyRequest{Actor: missingActor})
+	assertGrpcError(t, err, codes.NotFound, "Actor "+testAtespace+"/missing-actor not found")
 }
 
 func TestDeleteActor_CascadesEgressPolicy(t *testing.T) {
@@ -209,8 +253,9 @@ func TestDeleteActor_CascadesEgressPolicy(t *testing.T) {
 	if _, err := tc.client.DeleteActor(context.Background(), &ateapipb.DeleteActorRequest{Actor: actor}); err != nil {
 		t.Fatalf("DeleteActor failed: %v", err)
 	}
+	// The cascade removes the Actor as well as its policy.
 	_, err := tc.client.GetActorEgressPolicy(context.Background(), &ateapipb.GetActorEgressPolicyRequest{Actor: actor})
-	assertGrpcError(t, err, codes.NotFound, "EgressPolicy not found")
+	assertGrpcError(t, err, codes.NotFound, "Actor "+testAtespace+"/egress-actor not found")
 }
 
 func TestValidation_ActorEgressPolicy(t *testing.T) {

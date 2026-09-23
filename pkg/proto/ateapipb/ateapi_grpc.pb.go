@@ -96,12 +96,22 @@ type ControlClient interface {
 	// Delete an actor. Only suspended actors can be deleted.
 	DeleteActor(ctx context.Context, in *DeleteActorRequest, opts ...grpc.CallOption) (*Actor, error)
 	// Get the egress policy resource nested under an Actor.
+	// NOT_FOUND names the missing resource in its message and in a
+	// google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+	// Actor exists without one.
 	GetActorEgressPolicy(ctx context.Context, in *GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*EgressPolicy, error)
 	// Create the egress policy resource nested under an Actor.
+	// FAILED_PRECONDITION reports a missing parent Actor.
 	CreateActorEgressPolicy(ctx context.Context, in *CreateActorEgressPolicyRequest, opts ...grpc.CallOption) (*EgressPolicy, error)
 	// Replace the egress policy resource nested under an Actor.
+	// NOT_FOUND names the missing resource in its message and in a
+	// google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+	// Actor exists without one.
 	UpdateActorEgressPolicy(ctx context.Context, in *UpdateActorEgressPolicyRequest, opts ...grpc.CallOption) (*EgressPolicy, error)
 	// Delete the egress policy resource nested under an Actor.
+	// NOT_FOUND names the missing resource in its message and in a
+	// google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+	// Actor exists without one.
 	DeleteActorEgressPolicy(ctx context.Context, in *DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*EgressPolicy, error)
 	// Create a Substrate-issued JWT asserting the actor identity.
 	//
@@ -549,12 +559,22 @@ type ControlServer interface {
 	// Delete an actor. Only suspended actors can be deleted.
 	DeleteActor(context.Context, *DeleteActorRequest) (*Actor, error)
 	// Get the egress policy resource nested under an Actor.
+	// NOT_FOUND names the missing resource in its message and in a
+	// google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+	// Actor exists without one.
 	GetActorEgressPolicy(context.Context, *GetActorEgressPolicyRequest) (*EgressPolicy, error)
 	// Create the egress policy resource nested under an Actor.
+	// FAILED_PRECONDITION reports a missing parent Actor.
 	CreateActorEgressPolicy(context.Context, *CreateActorEgressPolicyRequest) (*EgressPolicy, error)
 	// Replace the egress policy resource nested under an Actor.
+	// NOT_FOUND names the missing resource in its message and in a
+	// google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+	// Actor exists without one.
 	UpdateActorEgressPolicy(context.Context, *UpdateActorEgressPolicyRequest) (*EgressPolicy, error)
 	// Delete the egress policy resource nested under an Actor.
+	// NOT_FOUND names the missing resource in its message and in a
+	// google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+	// Actor exists without one.
 	DeleteActorEgressPolicy(context.Context, *DeleteActorEgressPolicyRequest) (*EgressPolicy, error)
 	// Create a Substrate-issued JWT asserting the actor identity.
 	//

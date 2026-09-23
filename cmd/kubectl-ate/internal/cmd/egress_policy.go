@@ -25,6 +25,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateclient"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/spf13/cobra"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -125,11 +126,9 @@ func overrideEgressPolicyMetadata(policy *ateapipb.EgressPolicy, atespace string
 	return nil
 }
 
-// egressPolicyGetter abstracts the RPCs get egress-policy makes: the policy
-// read, and the actor read that tells a missing actor from a missing policy.
+// egressPolicyGetter abstracts the GetActorEgressPolicy RPC.
 type egressPolicyGetter interface {
 	GetActorEgressPolicy(ctx context.Context, req *ateapipb.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error)
-	GetActor(ctx context.Context, req *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error)
 }
 
 // getEgressPolicyRunner executes the get egress-policy command logic.
@@ -144,13 +143,8 @@ type getEgressPolicyRunner struct {
 func (r *getEgressPolicyRunner) Run(ctx context.Context) error {
 	policy, err := r.getter.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: r.actor})
 	if status.Code(err) == codes.NotFound {
-		// The server answers NotFound for a missing actor too, so read the actor
-		// to tell the two apart.
-		if _, err := r.getter.GetActor(ctx, &ateapipb.GetActorRequest{Actor: r.actor}); err != nil {
-			if status.Code(err) == codes.NotFound {
-				return fmt.Errorf("actor %q in atespace %q not found", r.actor.GetName(), r.actor.GetAtespace())
-			}
-			return fmt.Errorf("failed to get actor %q in atespace %q: %w", r.actor.GetName(), r.actor.GetAtespace(), err)
+		if actorIsMissing(err) {
+			return fmt.Errorf("actor %q in atespace %q not found", r.actor.GetName(), r.actor.GetAtespace())
 		}
 		// No policy is a valid state, not a failure: the gateway denies all egress.
 		fmt.Fprintf(r.stderr, "actor %q in atespace %q has no egress policy\n", r.actor.GetName(), r.actor.GetAtespace())
@@ -160,6 +154,18 @@ func (r *getEgressPolicyRunner) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to get egress policy for actor %q in atespace %q: %w", r.actor.GetName(), r.actor.GetAtespace(), err)
 	}
 	return printer.PrintEgressPolicyTo(r.stdout, r.actor.GetName(), policy, r.outputFmt)
+}
+
+// actorIsMissing reports whether a NotFound blames the Actor rather than its
+// policy. An ateapi too old to send the detail reports neither.
+func actorIsMissing(err error) bool {
+	const actorResourceType = "Actor"
+	for _, detail := range status.Convert(err).Details() {
+		if info, ok := detail.(*errdetails.ResourceInfo); ok && info.GetResourceType() == actorResourceType {
+			return true
+		}
+	}
+	return false
 }
 
 func runGetEgressPolicy(cmd *cobra.Command, args []string) error {

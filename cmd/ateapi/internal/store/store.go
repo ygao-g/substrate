@@ -29,6 +29,10 @@ var (
 	// ErrNotFound indicates that the given object is not present in the DB.
 	ErrNotFound = errors.New("persistence: not found")
 
+	// ErrParentNotFound indicates the resource that owns the requested
+	// subresource does not exist.
+	ErrParentNotFound = errors.New("persistence: parent not found")
+
 	// ErrAlreadyExists indicates that the object already exists in the DB.
 	ErrAlreadyExists = errors.New("persistence: already exists")
 
@@ -106,12 +110,16 @@ type Interface interface {
 
 	// Creates the 1:1 policy subresource for an existing Actor.
 	CreateEgressPolicy(ctx context.Context, actorRef resources.ActorRef, policy *ateapipb.EgressPolicy) (*ateapipb.EgressPolicy, error)
-	// Fetches an Actor's policy subresource.
+	// Fetches an Actor's policy subresource. Returns ErrParentNotFound if the
+	// Actor does not exist, or ErrNotFound if it exists without a policy.
 	GetEgressPolicy(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.EgressPolicy, error)
 	// Transactionally updates an Actor's policy when its current UID and version
-	// match the precondition.
+	// match the precondition. Returns ErrParentNotFound if the Actor does not
+	// exist, or ErrNotFound if it exists without a policy.
 	UpdateEgressPolicy(ctx context.Context, actorRef resources.ActorRef, precondition Precondition, mutate func(*ateapipb.EgressPolicy) error) (*ateapipb.EgressPolicy, error)
-	// Deletes and returns an Actor's policy subresource.
+	// Deletes and returns an Actor's policy subresource. Returns
+	// ErrParentNotFound if the Actor does not exist, or ErrNotFound if it
+	// exists without a policy.
 	DeleteEgressPolicy(ctx context.Context, actorRef resources.ActorRef) (*ateapipb.EgressPolicy, error)
 
 	// CreateTag creates an immutable tag to an actor snapshot.

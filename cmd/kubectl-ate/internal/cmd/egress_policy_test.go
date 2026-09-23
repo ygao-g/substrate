@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/kubectl-ate/internal/printer"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -395,15 +397,35 @@ func TestEgressPolicyCommandArgs(t *testing.T) {
 	})
 }
 
-// fakeEgressPolicyGetter records the requests it received and answers with a
-// configured policy or error. actorReq stays nil unless the runner reads the
-// actor, which it only does after a NotFound.
+// fakeEgressPolicyGetter records the request it received and answers with a
+// configured policy or error.
 type fakeEgressPolicyGetter struct {
-	req      *ateapipb.GetActorEgressPolicyRequest
-	policy   *ateapipb.EgressPolicy
-	err      error
-	actorReq *ateapipb.GetActorRequest
-	actorErr error
+	req    *ateapipb.GetActorEgressPolicyRequest
+	policy *ateapipb.EgressPolicy
+	err    error
+}
+
+// actorNotFound is the NotFound the api-server sends for a missing Actor.
+func actorNotFound(atespace, name string) error {
+	st, err := status.New(codes.NotFound, fmt.Sprintf("Actor %s/%s not found", atespace, name)).WithDetails(
+		&errdetails.ResourceInfo{ResourceType: "Actor", ResourceName: atespace + "/" + name},
+	)
+	if err != nil {
+		panic(err)
+	}
+	return st.Err()
+}
+
+// policyNotFound is the NotFound the api-server sends for an Actor without a
+// policy.
+func policyNotFound(atespace, name string) error {
+	st, err := status.New(codes.NotFound, "EgressPolicy not found").WithDetails(
+		&errdetails.ResourceInfo{ResourceType: "EgressPolicy", ResourceName: atespace + "/" + name},
+	)
+	if err != nil {
+		panic(err)
+	}
+	return st.Err()
 }
 
 func (f *fakeEgressPolicyGetter) GetActorEgressPolicy(ctx context.Context, req *ateapipb.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
@@ -412,14 +434,6 @@ func (f *fakeEgressPolicyGetter) GetActorEgressPolicy(ctx context.Context, req *
 		return nil, f.err
 	}
 	return f.policy, nil
-}
-
-func (f *fakeEgressPolicyGetter) GetActor(ctx context.Context, req *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
-	f.actorReq = req
-	if f.actorErr != nil {
-		return nil, f.actorErr
-	}
-	return &ateapipb.Actor{}, nil
 }
 
 func TestGetEgressPolicyRunner_Run(t *testing.T) {
@@ -439,14 +453,13 @@ func TestGetEgressPolicyRunner_Run(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		outputFmt    string
-		getter       *fakeEgressPolicyGetter
-		wantReq      *ateapipb.GetActorEgressPolicyRequest
-		wantActorReq *ateapipb.GetActorRequest
-		wantOut      string
-		wantErrOut   string
-		wantErr      string
+		name       string
+		outputFmt  string
+		getter     *fakeEgressPolicyGetter
+		wantReq    *ateapipb.GetActorEgressPolicyRequest
+		wantOut    string
+		wantErrOut string
+		wantErr    string
 	}{
 		{
 			name:      "table by default",
@@ -475,28 +488,25 @@ rules:
 `,
 		},
 		{
-			name:         "no policy on an existing actor writes a note and succeeds",
-			outputFmt:    "yaml",
-			getter:       &fakeEgressPolicyGetter{err: status.Error(codes.NotFound, "EgressPolicy not found")},
-			wantReq:      &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
-			wantActorReq: &ateapipb.GetActorRequest{Actor: actor},
-			wantErrOut:   "actor \"c1\" in atespace \"team-a\" has no egress policy\n",
+			name:       "no policy on an existing actor writes a note and succeeds",
+			outputFmt:  "yaml",
+			getter:     &fakeEgressPolicyGetter{err: policyNotFound("team-a", "c1")},
+			wantReq:    &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
+			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy\n",
 		},
 		{
-			name:         "missing actor fails",
-			outputFmt:    "yaml",
-			getter:       &fakeEgressPolicyGetter{err: status.Error(codes.NotFound, "EgressPolicy not found"), actorErr: status.Error(codes.NotFound, "Actor team-a/c1 not found")},
-			wantReq:      &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
-			wantActorReq: &ateapipb.GetActorRequest{Actor: actor},
-			wantErr:      `actor "c1" in atespace "team-a" not found`,
+			name:      "missing actor fails",
+			outputFmt: "yaml",
+			getter:    &fakeEgressPolicyGetter{err: actorNotFound("team-a", "c1")},
+			wantReq:   &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
+			wantErr:   `actor "c1" in atespace "team-a" not found`,
 		},
 		{
-			name:         "actor lookup error wraps",
-			outputFmt:    "yaml",
-			getter:       &fakeEgressPolicyGetter{err: status.Error(codes.NotFound, "EgressPolicy not found"), actorErr: status.Error(codes.PermissionDenied, "denied")},
-			wantReq:      &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
-			wantActorReq: &ateapipb.GetActorRequest{Actor: actor},
-			wantErr:      `failed to get actor "c1" in atespace "team-a": rpc error: code = PermissionDenied desc = denied`,
+			name:       "NotFound without a detail keeps the note",
+			outputFmt:  "yaml",
+			getter:     &fakeEgressPolicyGetter{err: status.Error(codes.NotFound, "EgressPolicy not found")},
+			wantReq:    &ateapipb.GetActorEgressPolicyRequest{Actor: actor},
+			wantErrOut: "actor \"c1\" in atespace \"team-a\" has no egress policy\n",
 		},
 		{
 			name:      "other error wraps",
@@ -527,9 +537,6 @@ rules:
 			}
 			if diff := cmp.Diff(test.wantReq, test.getter.req, protocmp.Transform()); diff != "" {
 				t.Errorf("request mismatch (-want +got):\n%s", diff)
-			}
-			if diff := cmp.Diff(test.wantActorReq, test.getter.actorReq, protocmp.Transform()); diff != "" {
-				t.Errorf("actor request mismatch (-want +got):\n%s", diff)
 			}
 			if diff := cmp.Diff(test.wantOut, stdout.String()); diff != "" {
 				t.Errorf("stdout mismatch (-want +got):\n%s", diff)

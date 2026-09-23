@@ -291,6 +291,9 @@ class ControlServicer:
 
     def GetActorEgressPolicy(self, request, context):
         """Get the egress policy resource nested under an Actor.
+        NOT_FOUND names the missing resource in its message and in a
+        google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+        Actor exists without one.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -298,6 +301,7 @@ class ControlServicer:
 
     def CreateActorEgressPolicy(self, request, context):
         """Create the egress policy resource nested under an Actor.
+        FAILED_PRECONDITION reports a missing parent Actor.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -305,6 +309,9 @@ class ControlServicer:
 
     def UpdateActorEgressPolicy(self, request, context):
         """Replace the egress policy resource nested under an Actor.
+        NOT_FOUND names the missing resource in its message and in a
+        google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+        Actor exists without one.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -312,6 +319,9 @@ class ControlServicer:
 
     def DeleteActorEgressPolicy(self, request, context):
         """Delete the egress policy resource nested under an Actor.
+        NOT_FOUND names the missing resource in its message and in a
+        google.rpc.ResourceInfo detail: the Actor, or the EgressPolicy when the
+        Actor exists without one.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
