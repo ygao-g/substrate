@@ -19,6 +19,7 @@
 //
 //	testserver grpc  --listen=:50051   a cleartext HTTP/2 gRPC echo origin
 //	testserver http  --listen=:8080    a plain HTTP origin serving /healthz
+//	testserver https --listen=:8443 --cert=... --key=...  the same, over TLS
 //	testserver egressprobe --listen=:8080  a client that drives the egress gateway
 //	testserver websocket --listen=:8080  a websocket server that responds to PINGs
 //
@@ -38,13 +39,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func main() {
+func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "testserver",
 		Short: "Multi-mode helper server for the egress e2e suites.",
 	}
-	root.AddCommand(newGRPCCmd(), newHTTPCmd(), newEgressProbeCmd(), newWebsocketCmd())
-	if err := root.Execute(); err != nil {
+	root.AddCommand(newGRPCCmd(), newHTTPCmd(), newHTTPSCmd(), newEgressProbeCmd(), newWebsocketCmd())
+	return root
+}
+
+func main() {
+	if err := newRootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
