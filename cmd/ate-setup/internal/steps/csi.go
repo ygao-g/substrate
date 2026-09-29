@@ -31,12 +31,13 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kustomize"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
+	"github.com/agent-substrate/substrate/internal/nodepath"
 )
 
 // ateomHostDir is the host directory atelet mounts sandbox images under. Both
 // CSI drivers need it bind-mounted with bidirectional propagation so volumes
 // they mount inside it are visible to atelet.
-const ateomHostDir = "/var/lib/ateom-gvisor"
+const ateomHostDir = nodepath.BasePath
 
 // csiNFSStorageClass is the StorageClass the external volume demos provision
 // from.
@@ -179,16 +180,7 @@ func (e *Env) ensureCSIPrerequisites(ctx context.Context) error {
 	if err := e.EnsurePodCertificateCAs(ctx); err != nil {
 		return err
 	}
-	if err := e.ResolveAndApply(ctx, e.Cfg.Manifest("pod-certificate-controller.yaml")); err != nil {
-		return err
-	}
-	if err := e.applyPodcertWorkersOverride(ctx); err != nil {
-		return err
-	}
-	if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, NamespacePodCert, "podcertificate-controller", e.Cfg.WaitTimeout(BootstrapTimeout)); err != nil {
-		return err
-	}
-	return e.WaitForPodCertificateTrustBundles(ctx)
+	return e.DeployPodCertificateController(ctx)
 }
 
 func (e *Env) setupCSIHostpath(ctx context.Context) error {
