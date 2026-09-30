@@ -13,12 +13,14 @@
 # limitations under the License.
 
 """Stage windows, sample records, and per-stage rollups for the resource
-tools (fetch_run_resources.py).
+tools (fetch_run_resources.py, resource_sampler.py, envoy_stats.py).
 
 A sample is one reading of one container at one time. It covers the window
 (timestamp - window_s, timestamp]: for a Cloud Monitoring rate point that is
-the rate window, 60 s or 120 s. A sample counts toward every stage whose
-[start, end] that window overlaps.
+the rate window, 60 s or 120 s; for a cAdvisor sample it is the span between
+the two scrapes behind the counter delta, 10-20 s in practice because
+cAdvisor refreshes on its own schedule. A sample counts toward every stage
+whose [start, end] that window overlaps.
 """
 
 import json
