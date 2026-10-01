@@ -29,6 +29,7 @@ ACTORS=100
 TAIL_LATENCY_SLO_MS=25
 ATESPACE="ingress-benchmark"
 DEST=""
+SAMPLE_RESOURCES=0
 VENV="${HOME}/.venvs/substrate-bench"
 NAMESPACE="benchmarking"
 
@@ -40,6 +41,8 @@ Usage: $0 [options]
   --tail-latency-slo-ms N   SLO bound; 0 disables (default: ${TAIL_LATENCY_SLO_MS})
   --atespace NAME           actor namespace (default: ${ATESPACE})
   --dest gs://...           results root (default: gs://\$BUCKET_NAME/nighthawk-ingress-results)
+  --sample-resources        also record router/runner/worker CPU and memory
+                            (needs resource-sampler-rbac.yaml applied)
 EOF
   exit "${1:-1}"
 }
@@ -51,6 +54,7 @@ while [[ $# -gt 0 ]]; do
     --tail-latency-slo-ms) TAIL_LATENCY_SLO_MS="$2"; shift 2 ;;
     --atespace) ATESPACE="$2"; shift 2 ;;
     --dest) DEST="$2"; shift 2 ;;
+    --sample-resources) SAMPLE_RESOURCES=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "unknown flag: $1" >&2; usage ;;
   esac
@@ -102,6 +106,7 @@ echo "      workers running:      ${RUNNING_WORKERS}"
 echo "      tail_latency_slo_ms:  ${TAIL_LATENCY_SLO_MS}"
 echo "      atespace:             ${ATESPACE}"
 echo "      dest:                 ${DEST}"
+echo "      sample_resources:     ${SAMPLE_RESOURCES}"
 
 # venv: importing orchestrator.py (defaults/rendering/patch) needs PyYAML.
 # One package, no requirements.txt, so check it by import.
@@ -140,7 +145,7 @@ docker push "${IMAGE}"
 # --- render + submit the Job ---------------------------------------------------
 NAME="ingress_routercap_envoy_${ENVOY_CPU}cpu"
 JOB="runner-ingress-routercap-${ENVOY_CPU}cpu-quick-$(date +%H%M%S)"
-export IMAGE JOB NAME DEST TAG ENVOY_CPU ACTORS TAIL_LATENCY_SLO_MS ATESPACE
+export IMAGE JOB NAME DEST TAG ENVOY_CPU ACTORS TAIL_LATENCY_SLO_MS ATESPACE SAMPLE_RESOURCES
 "${PY}" - <<'EOF' | kubectl apply -f -
 import os
 import sys
@@ -172,7 +177,8 @@ subs = {
     **nighthawk_ingress.job_subs(test),
 }
 tmpl = nighthawk_ingress.job_tmpl("benchmarking/automation/manifests")
-print(orchestrator.render_template(tmpl, subs))
+extra = ["--sample-resources"] if os.environ["SAMPLE_RESOURCES"] == "1" else []
+print(orchestrator.render_template(tmpl, subs, extra))
 EOF
 
 # --- wait, streaming the runner's own log lines --------------------------------
