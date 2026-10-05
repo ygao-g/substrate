@@ -27,3 +27,7 @@ baseImageOverrides:
   # (to bind the image into the virtiofsd shared dir) — both in debian:13-slim but
   # not in the distroless static default.
   github.com/agent-substrate/substrate/cmd/ateom-microvm: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+  # nighthawk-actor spawns nighthawk_service and nighthawk_adaptive_load_client
+  # from /usr/local/bin. Same digest as benchmarking/nighthawk-ingress/Dockerfile.
+  # The base is a single linux/amd64 image, so ko builds only that platform.
+  github.com/agent-substrate/substrate/cmd/benchmarking/nighthawk-actor: envoyproxy/nighthawk-dev@sha256:7729902afea9d83f593b240690ba7d6e8fff04f6215ada538cfb4c1452b2553e
