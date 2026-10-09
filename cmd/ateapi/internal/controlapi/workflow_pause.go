@@ -32,8 +32,15 @@ import (
 
 // PauseActor executes the workflow to pause a running actor. Idempotent:
 // a re-entered workflow fast-forwards past the steps a previous attempt
-// completed, deriving progress from the persisted actor alone.
+// completed, deriving progress from the persisted actor alone. It runs to
+// completion even if the caller goes away.
 func (w *ActorWorkflow) PauseActor(ctx context.Context, actorRef resources.ActorRef) (_ *ateapipb.Actor, err error) {
+	ctx, cancel, err := detachFromCaller(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+
 	start := time.Now()
 	var actor *ateapipb.Actor
 	var actorTemplate *ateapipb.ActorTemplate

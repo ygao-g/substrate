@@ -19,6 +19,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
@@ -788,5 +789,61 @@ func TestSuspendActor_PausedWithoutLocalSnapshotCrashes(t *testing.T) {
 	}
 	if msg, want := got.GetStatus().GetCrash().GetMessage(), "suspend failed: "+crashMessageLocalSnapshotNodeUnknown; msg != want {
 		t.Errorf("crash message = %q, want %q", msg, want)
+	}
+}
+
+// A caller that is already gone starts no suspend or pause: the workflow
+// returns the caller's context error and leaves the actor untouched.
+func TestCheckpointWorkflows_CallerAlreadyGone(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	defer cancelExpired()
+
+	for _, op := range []struct {
+		name string
+		call func(w *ActorWorkflow, ctx context.Context, ref resources.ActorRef) error
+	}{
+		{name: "suspend", call: func(w *ActorWorkflow, ctx context.Context, ref resources.ActorRef) error {
+			_, err := w.SuspendActor(ctx, ref)
+			return err
+		}},
+		{name: "pause", call: func(w *ActorWorkflow, ctx context.Context, ref resources.ActorRef) error {
+			_, err := w.PauseActor(ctx, ref)
+			return err
+		}},
+	} {
+		for _, tc := range []struct {
+			name     string
+			ctx      context.Context
+			wantCode codes.Code
+		}{
+			{name: "canceled", ctx: canceled, wantCode: codes.Canceled},
+			{name: "deadline exceeded", ctx: expired, wantCode: codes.DeadlineExceeded},
+		} {
+			t.Run(op.name+"/"+tc.name, func(t *testing.T) {
+				st, cleanup := storetest.SetupTestStore(t)
+				defer cleanup()
+				w := newTestActorWorkflow(t, st, "ns", "tmpl1")
+				// Reaching atelet fails rather than panics, so a workflow that
+				// does start leaves the actor SUSPENDING or PAUSING.
+				w.dialer = newDanglingDialer()
+				ref := resources.ActorRef{Atespace: "team-a", Name: "id1"}
+				seedWorkflowActor(t, context.Background(), st, ref, "ns", "tmpl1", ateapipb.ActorState_ACTOR_STATE_RUNNING, func(a *ateapipb.Actor) {
+					a.Status.WorkerAssignment = &ateapipb.WorkerAssignment{WorkerPod: "pod-1", NodeName: "node-1"}
+				})
+
+				if got := apierror.Code(op.call(w, tc.ctx, ref)); got != tc.wantCode {
+					t.Errorf("apierror.Code(err) = %v, want %v", got, tc.wantCode)
+				}
+				got, err := st.GetActor(context.Background(), ref)
+				if err != nil {
+					t.Fatalf("GetActor failed: %v", err)
+				}
+				if got, want := got.GetStatus().GetState(), ateapipb.ActorState_ACTOR_STATE_RUNNING; got != want {
+					t.Errorf("stored state = %v, want %v", got, want)
+				}
+			})
+		}
 	}
 }

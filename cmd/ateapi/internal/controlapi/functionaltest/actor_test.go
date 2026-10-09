@@ -4062,6 +4062,97 @@ func TestPauseActor(t *testing.T) {
 	}
 }
 
+// A caller whose deadline passes while atelet is checkpointing does not end
+// the workflow: it keeps the actor's lease until the checkpoint finishes, so
+// an immediate retry is refused instead of checkpointing a second time.
+func TestCheckpointWorkflow_OutlivesCallerDeadline(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		call      func(ctx context.Context, tc *testContext, ref *ateapipb.ObjectRef) error
+		wantState ateapipb.ActorState
+	}{
+		{
+			name: "suspend",
+			call: func(ctx context.Context, tc *testContext, ref *ateapipb.ObjectRef) error {
+				_, err := tc.client.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: ref})
+				return err
+			},
+			wantState: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+		},
+		{
+			name: "pause",
+			call: func(ctx context.Context, tc *testContext, ref *ateapipb.ObjectRef) error {
+				_, err := tc.client.PauseActor(ctx, &ateapipb.PauseActorRequest{Actor: ref})
+				return err
+			},
+			wantState: ateapipb.ActorState_ACTOR_STATE_PAUSED,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := namespaceForTest("ns-checkpoint-deadline-" + tt.name)
+			tc := setupTest(t, ns)
+			defer tc.cleanup()
+
+			createTemplate(t, tc, ns)
+			createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+
+			name := "id1"
+			ref := &ateapipb.ObjectRef{Atespace: testAtespace, Name: name}
+			actorRef := resources.ActorRef{Atespace: testAtespace, Name: name}
+			if _, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+				Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: name},
+				ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+			}}); err != nil {
+				t.Fatalf("CreateActor failed: %v", err)
+			}
+			if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{Actor: ref}); err != nil {
+				t.Fatalf("ResumeActor failed: %v", err)
+			}
+
+			tc.fakeAtelet.Lock.Lock()
+			tc.fakeAtelet.CheckpointDelay = time.Second
+			tc.fakeAtelet.RejectRepeatCheckpoint = true
+			tc.fakeAtelet.Lock.Unlock()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			if got := status.Code(tt.call(ctx, tc, ref)); got != codes.DeadlineExceeded {
+				t.Fatalf("first %s status code = %v, want %v", tt.name, got, codes.DeadlineExceeded)
+			}
+
+			// Retry the way a client does: Aborted means the first workflow
+			// still holds the lease.
+			var err error
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+				err = tt.call(context.Background(), tc, ref)
+				if status.Code(err) != codes.Aborted {
+					break
+				}
+			}
+			if err != nil {
+				t.Fatalf("retried %s failed: %v", tt.name, err)
+			}
+
+			actor, err := tc.persistence.GetActor(context.Background(), actorRef)
+			if err != nil {
+				t.Fatalf("failed to get actor from store: %v", err)
+			}
+			if got := actor.GetStatus().GetState(); got != tt.wantState {
+				t.Errorf("state = %v, want %v", got, tt.wantState)
+			}
+			if crash := actor.GetStatus().GetCrash(); crash != nil {
+				t.Errorf("crash = %v, want none", crash)
+			}
+			tc.fakeAtelet.Lock.Lock()
+			gotCheckpoints := tc.fakeAtelet.CheckpointCount
+			tc.fakeAtelet.Lock.Unlock()
+			if gotCheckpoints != 1 {
+				t.Errorf("atelet Checkpoint calls = %d, want 1", gotCheckpoints)
+			}
+		})
+	}
+}
+
 // TestResumeActor_PausedLocalSnapshotMissing_Crashes tests that if the local checkpoint
 // files on the worker node are missing (e.g. node reboot, /tmp wipe) when resuming a PAUSED actor,
 // atelet returns a terminal file system error and ateapi marks the actor ACTOR_STATE_CRASHED
