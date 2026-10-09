@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
@@ -227,6 +228,17 @@ func acquireLease(ctx context.Context, holder leaseHolder, key, subject string) 
 	}
 
 	return lease.Context(), lease, nil
+}
+
+// checkpointWorkflowTimeout bounds a suspend or pause workflow, which runs
+// to completion even after its caller goes away.
+const checkpointWorkflowTimeout = 5 * time.Minute
+
+// detachFromCaller keeps ctx's values but drops its cancellation and deadline.
+// A checkpoint deletes the workload once saved, so the workflow holds the
+// actor's lease until atelet returns, and a retry meanwhile gets Aborted.
+func detachFromCaller(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), checkpointWorkflowTimeout)
 }
 
 // actorLeaseKey names the lease that serializes the operations on an Actor.

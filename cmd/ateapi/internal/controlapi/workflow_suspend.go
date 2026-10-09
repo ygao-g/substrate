@@ -34,8 +34,11 @@ import (
 // a running actor is checkpointed on its worker, a paused actor's node-local
 // snapshot is uploaded. Idempotent: a re-entered workflow fast-forwards past
 // the steps a previous attempt completed, deriving progress from the
-// persisted actor alone.
+// persisted actor alone. It runs to completion even if the caller goes away.
 func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.ActorRef) (_ *ateapipb.Actor, err error) {
+	ctx, cancel := detachFromCaller(ctx)
+	defer cancel()
+
 	start := time.Now()
 	var actor *ateapipb.Actor
 	var actorTemplate *ateapipb.ActorTemplate
