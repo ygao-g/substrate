@@ -30,6 +30,8 @@ import (
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	"github.com/agent-substrate/substrate/internal/testenv"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -122,6 +124,15 @@ type FakeAteletServer struct {
 	CheckpointCalled  bool
 	CheckpointRequest *ateletpb.CheckpointRequest
 	FailCheckpoint    error
+	// CheckpointCount counts Checkpoint calls.
+	CheckpointCount int
+	// CheckpointDelay is how long a checkpoint takes. The fake does not hold
+	// Lock while it waits, so concurrent calls proceed.
+	CheckpointDelay time.Duration
+	// RejectRepeatCheckpoint fails a second Checkpoint for the same actor UID,
+	// as atelet does once the first checkpoint has deleted the sandbox.
+	RejectRepeatCheckpoint bool
+	checkpointedActors     map[string]bool
 
 	RestoreCalled  bool
 	RestoreRequest *ateletpb.RestoreRequest
@@ -174,6 +185,10 @@ func (f *FakeAteletServer) Reset() {
 	f.CheckpointCalled = false
 	f.CheckpointRequest = nil
 	f.FailCheckpoint = nil
+	f.CheckpointCount = 0
+	f.CheckpointDelay = 0
+	f.RejectRepeatCheckpoint = false
+	f.checkpointedActors = nil
 
 	f.RestoreCalled = false
 	f.RestoreRequest = nil
@@ -221,10 +236,27 @@ func (f *FakeAteletServer) Run(ctx context.Context, req *ateletpb.RunRequest) (*
 
 func (f *FakeAteletServer) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest) (*ateletpb.CheckpointResponse, error) {
 	f.Lock.Lock()
-	defer f.Lock.Unlock()
-
 	f.CheckpointCalled = true
+	f.CheckpointCount++
 	f.CheckpointRequest = proto.Clone(req).(*ateletpb.CheckpointRequest)
+	repeat := f.checkpointedActors[req.GetActorUid()]
+	if f.checkpointedActors == nil {
+		f.checkpointedActors = map[string]bool{}
+	}
+	f.checkpointedActors[req.GetActorUid()] = true
+	reject := f.RejectRepeatCheckpoint && repeat
+	delay := f.CheckpointDelay
+	f.Lock.Unlock()
+
+	if reject {
+		return nil, status.Error(codes.Unknown, "while checkpointing pause: while running `runsc checkpoint`: exit status 128")
+	}
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+
+	f.Lock.Lock()
+	defer f.Lock.Unlock()
 	if f.FailCheckpoint != nil {
 		return nil, f.FailCheckpoint
 	}
