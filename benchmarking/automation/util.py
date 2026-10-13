@@ -14,6 +14,7 @@
 
 """Helpers shared by orchestrator.py and the per-test-type modules."""
 
+import json
 import re
 import shlex
 import subprocess
@@ -56,6 +57,37 @@ def build_and_push(image: str, dockerfile: str) -> str:
     )
     run(["docker", "push", image])
     return image
+
+
+def pin_deployment(
+    name: str, namespace: str, patch: dict, timeout: str = "300s"
+) -> None:
+    """Strategic-merge `patch` into a Deployment and block on its rollout.
+    The benchmark types use it to size the proxy under test."""
+    run(
+        [
+            "kubectl",
+            "-n",
+            namespace,
+            "patch",
+            "deployment",
+            name,
+            "--type=strategic",
+            "-p",
+            json.dumps(patch),
+        ]
+    )
+    run(
+        [
+            "kubectl",
+            "-n",
+            namespace,
+            "rollout",
+            "status",
+            f"deployment/{name}",
+            f"--timeout={timeout}",
+        ]
+    )
 
 
 def parse_duration_seconds(s: str) -> int:

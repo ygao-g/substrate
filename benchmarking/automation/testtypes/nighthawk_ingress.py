@@ -20,12 +20,11 @@ router to the size under test, and the runner Job drives Nighthawk's
 adaptive search against it.
 """
 
-import json
 import os
 import re
 from typing import Any
 
-from util import build_and_push, parse_duration_seconds, run
+from util import build_and_push, parse_duration_seconds, pin_deployment
 
 TEST_TYPE = "nighthawk-ingress"
 
@@ -152,30 +151,7 @@ def pre_test(test: dict[str, Any]) -> None:
             }
         }
     }
-    run(
-        [
-            "kubectl",
-            "-n",
-            "ate-system",
-            "patch",
-            "deployment",
-            "atenet-router",
-            "--type=strategic",
-            "-p",
-            json.dumps(patch),
-        ]
-    )
-    run(
-        [
-            "kubectl",
-            "-n",
-            "ate-system",
-            "rollout",
-            "status",
-            "deployment/atenet-router",
-            "--timeout=300s",
-        ]
-    )
+    pin_deployment("atenet-router", "ate-system", patch)
 
 
 def job_subs(test: dict[str, Any]) -> dict[str, Any]:

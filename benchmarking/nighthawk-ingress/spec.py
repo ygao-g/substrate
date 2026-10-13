@@ -86,8 +86,6 @@ def _binary_threshold(
 def build_spec_dict(
     *,
     uri: str,
-    actor_names: list[str],
-    atespace: str,
     client_concurrency: int,
     connections: int,
     max_pending_requests: int,
@@ -100,6 +98,10 @@ def build_spec_dict(
     send_rate_threshold: float | None = 0.9,
     tail_latency_slo_ms: float | None = None,
     benchmark_cooldown_s: int = 5,
+    actor_names: list[str] | None = None,
+    atespace: str | None = None,
+    request_variants: list[dict] | None = None,
+    max_active_requests: int | None = None,
 ) -> dict:
     """Assemble the AdaptiveLoadSessionSpec as a JSON-shaped dict.
 
@@ -107,22 +109,34 @@ def build_spec_dict(
     initial_value = initial_total_rps / client_concurrency. The template
     must not set duration (the controller rejects it); open_loop is forced
     true by the controller.
+
+    request_variants is the request-source options list as RequestOptions
+    dicts; None means one POST per actor in actor_names carrying that
+    actor's routing header, so actor_names and atespace are required only
+    then. max_active_requests (>= 1) caps in-flight requests per event loop
+    over HTTP/2 and HTTP/3; Nighthawk caps HTTP/1 by `connections` instead.
+    None leaves the field unset.
     """
-    request_variants = [
-        {
-            "request_method": "POST",
-            "request_headers": [
-                {
-                    "header": {
-                        "key": "ate-target-actor",
-                        "value": f"{atespace}/{actor_name}",
+    if request_variants is None:
+        if not actor_names or atespace is None:
+            raise ValueError(
+                "actor_names and atespace are required without request_variants"
+            )
+        request_variants = [
+            {
+                "request_method": "POST",
+                "request_headers": [
+                    {
+                        "header": {
+                            "key": "ate-target-actor",
+                            "value": f"{atespace}/{actor_name}",
+                        },
+                        "append_action": "OVERWRITE_IF_EXISTS_OR_ADD",
                     },
-                    "append_action": "OVERWRITE_IF_EXISTS_OR_ADD",
-                },
-            ],
-        }
-        for actor_name in actor_names
-    ]
+                ],
+            }
+            for actor_name in actor_names
+        ]
     # Threshold roles: tail latency (mean+2stdev, ~p95 proxy — no true
     # percentiles in the builtin adaptive metrics) is the SLO bound;
     # success-rate catches fast-error saturation (503/504) that latency and
@@ -143,26 +157,29 @@ def build_spec_dict(
                 upper_threshold=tail_latency_slo_ms * 1_000_000.0,
             )
         )
-    return {
-        "nighthawk_traffic_template": {
-            "uri": uri,
-            "concurrency": str(client_concurrency),
-            "connections": connections,
-            "max_pending_requests": max_pending_requests,
-            "open_loop": True,
-            "failure_predicates": dict(PERMISSIVE_FAILURE_PREDICATES),
-            # request_options shares a oneof with this field: method and
-            # headers must come from the per-variant RequestOptions.
-            "request_source_plugin_config": {
-                "name": REQUEST_SOURCE_PLUGIN,
-                "typed_config": {
-                    "@type": REQUEST_SOURCE_TYPE_URL,
-                    "options_list": {"options": request_variants},
-                    # 0 = cycle through options_list indefinitely.
-                    "num_requests": 0,
-                },
+    traffic_template = {
+        "uri": uri,
+        "concurrency": str(client_concurrency),
+        "connections": connections,
+        "max_pending_requests": max_pending_requests,
+        "open_loop": True,
+        "failure_predicates": dict(PERMISSIVE_FAILURE_PREDICATES),
+        # request_options shares a oneof with this field: method and
+        # headers must come from the per-variant RequestOptions.
+        "request_source_plugin_config": {
+            "name": REQUEST_SOURCE_PLUGIN,
+            "typed_config": {
+                "@type": REQUEST_SOURCE_TYPE_URL,
+                "options_list": {"options": request_variants},
+                # 0 = cycle through options_list indefinitely.
+                "num_requests": 0,
             },
         },
+    }
+    if max_active_requests is not None:
+        traffic_template["max_active_requests"] = max_active_requests
+    return {
+        "nighthawk_traffic_template": traffic_template,
         "metric_thresholds": thresholds,
         "informational_metric_specs": [
             _metric_spec(m) for m in INFORMATIONAL_METRICS

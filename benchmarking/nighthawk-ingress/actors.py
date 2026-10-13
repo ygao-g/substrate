@@ -22,6 +22,7 @@ best-effort suspend+delete.
 
 import concurrent.futures
 import time
+from collections.abc import Callable
 
 import grpc
 import requests
@@ -85,7 +86,13 @@ def ensure_atespace(stub, name: str = ATESPACE) -> None:
             raise
 
 
-def create_actor(stub, name: str, atespace: str = ATESPACE) -> None:
+def create_actor(
+    stub,
+    name: str,
+    atespace: str = ATESPACE,
+    template: tuple[str, str] = (TEMPLATE_ATESPACE, TEMPLATE_NAME),
+) -> None:
+    template_atespace, template_name = template
     try:
         stub.CreateActor(
             ateapi_pb2.CreateActorRequest(
@@ -94,8 +101,8 @@ def create_actor(stub, name: str, atespace: str = ATESPACE) -> None:
                         atespace=atespace, name=name
                     ),
                     actor_template=ateapi_pb2.ObjectRef(
-                        atespace=TEMPLATE_ATESPACE,
-                        name=TEMPLATE_NAME,
+                        atespace=template_atespace,
+                        name=template_name,
                     ),
                 )
             )
@@ -105,14 +112,45 @@ def create_actor(stub, name: str, atespace: str = ATESPACE) -> None:
             raise
 
 
+# A warm probe sends one request to the actor through the router and
+# returns None once the actor answers, or a short reason to retry.
+Probe = Callable[[requests.Session, str, str, str], str | None]
+
+
+def ping_probe(
+    session: requests.Session, router_url: str, atespace: str, name: str
+) -> str | None:
+    """POST /ping with the actor's routing header; warm on 200."""
+    try:
+        resp = session.post(
+            f"{router_url.rstrip('/')}/ping",
+            headers={
+                "ate-target-actor": f"{atespace}/{name}",
+            },
+            data=b"",
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        return f"POST /ping: {e}"
+    if resp.status_code == 200:
+        return None
+    return f"POST /ping -> {resp.status_code}"
+
+
 def _warm_actor(
-    stub, router_url: str, name: str, atespace: str, deadline: float, log
+    stub,
+    router_url: str,
+    name: str,
+    atespace: str,
+    deadline: float,
+    log,
+    probe: Probe = ping_probe,
 ) -> None:
     """Bring one created actor to serving, so the load ladder never
-    measures a cold start: resume the actor, then poll POST /ping through
-    the router until it answers
-    200 or the deadline expires. Resume errors are retried: ateapi
-    returns FailedPrecondition/Unavailable until a worker frees up."""
+    measures a cold start: resume the actor, then poll the probe through
+    the router until it answers or the deadline expires. Resume errors are
+    retried: ateapi returns FailedPrecondition/Unavailable until a worker
+    frees up."""
     ref = ateapi_pb2.ObjectRef(atespace=atespace, name=name)
     session = requests.Session()
     last_err: str = "not attempted"
@@ -121,20 +159,10 @@ def _warm_actor(
             stub.ResumeActor(ateapi_pb2.ResumeActorRequest(actor=ref))
         except grpc.RpcError as e:
             last_err = f"ResumeActor: {e.code().name}"
-        try:
-            resp = session.post(
-                f"{router_url.rstrip('/')}/ping",
-                headers={
-                    "ate-target-actor": f"{atespace}/{name}",
-                },
-                data=b"",
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                return
-            last_err = f"POST /ping -> {resp.status_code}"
-        except requests.RequestException as e:
-            last_err = f"POST /ping: {e}"
+        err = probe(session, router_url, atespace, name)
+        if err is None:
+            return
+        last_err = err
         time.sleep(2)
     raise RuntimeError(f"actor {name} not warm by deadline ({last_err})")
 
@@ -148,25 +176,36 @@ def create_and_warm(
     warm_deadline_s: int = 600,
     parallelism: int = 16,
     log=print,
+    template: tuple[str, str] = (TEMPLATE_ATESPACE, TEMPLATE_NAME),
+    name_prefix: str = "nh-",
+    probe: Probe = ping_probe,
 ) -> list[str]:
-    """Create `count` actors and warm them all; returns their names.
+    """Create `count` actors from `template` and warm them all with
+    `probe`; returns their names, `name_prefix` plus a zero-padded index.
 
     Appends each name to `created` at creation time so the caller can
     cleanup() a partial fleet when this raises.
     """
     ensure_atespace(stub, atespace)
-    names = [f"nh-{i:03d}" for i in range(count)]
+    names = [f"{name_prefix}{i:03d}" for i in range(count)]
     for name in names:
-        create_actor(stub, name, atespace)
+        create_actor(stub, name, atespace, template)
         created.append(name)
-    log(f"Created {count} actors from {TEMPLATE_ATESPACE}/{TEMPLATE_NAME}")
+    log(f"Created {count} actors from {template[0]}/{template[1]}")
 
     deadline = time.time() + warm_deadline_s
     failures: list[str] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as ex:
         futures = {
             ex.submit(
-                _warm_actor, stub, router_url, name, atespace, deadline, log
+                _warm_actor,
+                stub,
+                router_url,
+                name,
+                atespace,
+                deadline,
+                log,
+                probe,
             ): name
             for name in names
         }

@@ -186,6 +186,21 @@ def test_failed_thresholds_and_binding():
     assert summary["slo_max_rps"] == 800.0
 
 
+def test_optional_counters_only_when_present():
+    for row in output_mod.stage_rows(SESSION):
+        for name in output_mod.OPTIONAL_COUNTERS_OF_INTEREST:
+            assert name not in row
+    failing = benchmark_result(rps=125, http_2xx=5000)
+    failing["nighthawk_service_output"]["results"][0]["counters"] += [
+        {"name": "upstream_cx_connect_fail", "value": "7"},
+        {"name": "sequencer.failed_terminations", "value": "1"},
+    ]
+    session = {"session_status": {}, "adjusting_stage_results": [failing]}
+    row = output_mod.stage_rows(session)[0]
+    assert row["upstream_cx_connect_fail"] == 7
+    assert row["sequencer.failed_terminations"] == 1
+
+
 def test_capacity_summary_no_testing_stage():
     session = {
         "session_status": {"code": 4, "message": "convergence deadline"},
