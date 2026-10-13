@@ -1,0 +1,22 @@
+{
+  "envoy_cpu": 2,
+  "actors": 50,
+  "client_concurrency": 16,
+  "tail_latency_slo_ms": 25.0,
+  "binding_threshold": [
+    "latency-ns-mean-plus-2stdev",
+    "send-rate",
+    "success-rate"
+  ],
+  "slo_max_rps": 496.0,
+  "slo_max_stage": "adjusting_000",
+  "converged": true,
+  "adjusting_stages": 3,
+  "metric_nighthawk.builtin_attempted_rps": 10304.0,
+  "metric_nighthawk.builtin_achieved_rps": 10304.0,
+  "metric_nighthawk.builtin_send_rate": 1.0,
+  "metric_nighthawk.builtin_success_rate": 0.999906185300207,
+  "p50_ms": 9.504767000000001,
+  "p95_ms": 21.440510999999997,
+  "p99_ms": 61.063167
+}
