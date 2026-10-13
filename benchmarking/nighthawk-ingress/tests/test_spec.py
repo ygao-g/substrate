@@ -124,8 +124,40 @@ def test_tail_latency_slo_threshold():
     assert len(build(tail_latency_slo_ms=None)["metric_thresholds"]) == 2
 
 
+def test_request_variants_replace_actor_rotation():
+    variant = {
+        "request_method": "GET",
+        "request_headers": [
+            {"header": {"key": "host", "value": "origin.example"}},
+        ],
+    }
+    spec = build(request_variants=[variant])
+    plugin = spec["nighthawk_traffic_template"]["request_source_plugin_config"]
+    assert plugin["typed_config"]["options_list"]["options"] == [variant]
 
 
+def test_request_variants_need_no_fleet():
+    variant = {"request_method": "GET"}
+    spec = build(request_variants=[variant], actor_names=None, atespace=None)
+    plugin = spec["nighthawk_traffic_template"]["request_source_plugin_config"]
+    assert plugin["typed_config"]["options_list"]["options"] == [variant]
+
+
+def test_actor_rotation_needs_a_fleet():
+    no_fleet = ({"actor_names": None}, {"actor_names": []}, {"atespace": None})
+    for overrides in no_fleet:
+        try:
+            build(**overrides)
+        except ValueError as e:
+            assert "actor_names and atespace are required" in str(e)
+        else:
+            raise AssertionError(f"build_spec_dict accepted {overrides}")
+
+
+def test_max_active_requests_only_when_set():
+    assert "max_active_requests" not in build()["nighthawk_traffic_template"]
+    template = build(max_active_requests=64)["nighthawk_traffic_template"]
+    assert template["max_active_requests"] == 64
 
 
 def test_spec_round_trips_through_real_protos():
