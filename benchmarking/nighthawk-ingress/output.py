@@ -49,6 +49,15 @@ COUNTERS_OF_INTEREST = (
     "upstream_rq_total",
 )
 
+# Counters Nighthawk reports only when the rig is failing: connects refused
+# or timed out before any HTTP status, and workers that ended a stage with
+# requests still in flight. Emitted only when present, so a clean run's
+# rows carry no extra keys.
+OPTIONAL_COUNTERS_OF_INTEREST = (
+    "upstream_cx_connect_fail",
+    "sequencer.failed_terminations",
+)
+
 # Builtin metric formulas (source/adaptive_load/metrics_plugin_impl.cc):
 #   attempted-rps = specified / duration
 #   achieved-rps  = sent / duration  (errors included — NOT successes)
@@ -173,6 +182,9 @@ def _stage_row(stage: str, benchmark_result: dict) -> dict:
     )
     for name in COUNTERS_OF_INTEREST:
         row[name.replace("benchmark.", "")] = counters.get(name, 0)
+    for name in OPTIONAL_COUNTERS_OF_INTEREST:
+        if name in counters:
+            row[name] = counters[name]
     row.update(_latency_ms(result))
     row["failed_thresholds"] = sorted(failed)
     return row
