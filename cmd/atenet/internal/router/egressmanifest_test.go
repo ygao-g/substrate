@@ -61,6 +61,67 @@ func TestEgressManifestsDisableTheConnectTimeout(t *testing.T) {
 	}
 }
 
+// TestEgressManifestsSizeTheTunnelPathBreakers covers the three clusters a
+// tunnel crosses. Each open tunnel holds one connection and one request on
+// mitm_internal. The two forward proxies hold one pool per host per worker
+// thread, 105k connections measured at 1000 hosts and 88 threads, so a
+// cluster left at Envoy's 1024 default answers 503 while a fleet is still
+// opening.
+func TestEgressManifestsSizeTheTunnelPathBreakers(t *testing.T) {
+	const envoyDefault = 1024
+	for _, path := range egressManifests {
+		all := clusters(bootstrapTree(t, path))
+		for _, name := range []string{"mitm_internal", "egress_forward_proxy", "egress_forward_proxy_cleartext"} {
+			t.Run(path+"/"+name, func(t *testing.T) {
+				c := byName(all, name)
+				if c == nil {
+					t.Fatalf("no cluster named %s; the manifest changed shape", name)
+				}
+				th := defaultThreshold(c)
+				if th == nil {
+					t.Fatalf("cluster %s sets no DEFAULT circuit breaker threshold, so Envoy's %d default applies", name, envoyDefault)
+				}
+				for _, key := range []string{"max_connections", "max_requests", "max_pending_requests"} {
+					v, ok := num(th, key)
+					switch {
+					case !ok:
+						t.Errorf("cluster %s sets no %s, so Envoy's %d default applies", name, key, envoyDefault)
+					case v <= envoyDefault:
+						t.Errorf("cluster %s %s=%v; it must exceed Envoy's %d default", name, key, v, envoyDefault)
+					}
+				}
+				cx, _ := num(th, "max_connections")
+				rq, _ := num(th, "max_requests")
+				pending, _ := num(th, "max_pending_requests")
+				if cx != rq {
+					t.Errorf("cluster %s max_connections=%v != max_requests=%v; a pool holds one request per connection, so the two must agree", name, cx, rq)
+				}
+				if pending > cx {
+					t.Errorf("cluster %s max_pending_requests=%v > max_connections=%v; a queue deeper than the pool turns refusals into timeouts", name, pending, cx)
+				}
+			})
+		}
+	}
+}
+
+// defaultThreshold returns a cluster's DEFAULT priority circuit breaker
+// threshold, or nil when it has none.
+func defaultThreshold(cluster node) node {
+	for _, th := range list(child(cluster, "circuit_breakers"), "thresholds") {
+		if p := str(th, "priority"); p == "" || p == "DEFAULT" {
+			return th
+		}
+	}
+	return nil
+}
+
+// num returns a numeric leaf and whether it is set. YAML numbers decode as
+// float64 through sigs.k8s.io/yaml.
+func num(n node, key string) (float64, bool) {
+	f, ok := n[key].(float64)
+	return f, ok
+}
+
 // envoyRoute is the sliver of an Envoy bootstrap this test reads. Unnamed
 // fields are dropped by the decoder, so the manifests stay free to grow.
 type envoyRoute struct {
