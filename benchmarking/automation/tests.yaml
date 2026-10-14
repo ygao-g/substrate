@@ -17,7 +17,8 @@
 #
 # Fields shared by every entry:
 #
-#   type           Required. Selects the runner: "locust" | "nighthawk-ingress".
+#   type           Required. Selects the runner: "locust" | "nighthawk-ingress" |
+#                  "egress-tunnels".
 #                  Each type's own fields are described in its section.
 #   targetCluster  Required. Names a config file under
 #                  /etc/orchestrator/target-clusters/ (e.g. `targetCluster:
@@ -138,6 +139,19 @@
 # the "Configuration knobs" table in benchmarking/nighthawk-ingress/README.md.
 # `workerCount` is required: the benchmark warms one actor per worker, so
 # it is also the actor fleet size.
+#
+# ---- type: egress-tunnels -----------------------------------------------------
+#
+# Runs the egress gateway tunnel benchmark (benchmarking/egress-tunnels):
+# `parallel` actors each hold one tunnel per endpoint and loop requests
+# through the gateway for `duration`. `duration` is the loop time; the
+# orchestrator adds its own margin for create, resume and cleanup. The knobs
+# live in an `egress-tunnels:` block — see "In CI" in
+# benchmarking/egress-tunnels/README.md. `workerCount` is required: the
+# `parallel` actors need somewhere to run. The orchestrator deploys the
+# endpoint Services before the Job and adds the `egress` actor template to
+# the workloads deploy; the shipped gateway caps parallel x endpoints at
+# 16,384 tunnels per replica.
 
 tests:
   - name: glutton_baseline_1_user
@@ -746,3 +760,14 @@ tests:
       - "50"
       - "--ladder"
       - "50:2m@20,50:2m@50"
+  - name: egress_tunnels_smoke_http
+    description: "Egress tunnels smoke: 100 actors x 100 endpoints, 10,000 keep-alive HTTP tunnels through one gateway replica"
+    type: egress-tunnels
+    targetCluster: dev
+    duration: 5m
+    workerCount: 10
+    egress-tunnels:
+      actors: 100
+      parallel: 100
+      endpoints: 100
+      opensBudget: 1000
