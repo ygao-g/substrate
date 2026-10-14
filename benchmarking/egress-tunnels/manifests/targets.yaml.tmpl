@@ -1,0 +1,84 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The server behind every endpoint of the egress scale test. deploy.sh renders
+# target-service.yaml.tmpl once per endpoint, and all of those Services select
+# these pods. Five replicas keep the target far from being the bottleneck:
+# one pod answers about 1,000 req/s on ~0.14 core, much less than the gateway
+# needs for the same traffic.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: egress-tests-targets
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress-target
+  namespace: egress-tests-targets
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: egress-target
+  template:
+    metadata:
+      labels:
+        app: egress-target
+    spec:
+      containers:
+      - name: target
+        image: ko://github.com/agent-substrate/substrate/cmd/benchmarking/egress-target
+        args:
+        - --listen=:8080
+        - --tls-listen=:8443
+        - --tls-cert-file=/etc/egress-target-tls/tls.crt
+        - --tls-key-file=/etc/egress-target-tls/tls.key
+        ports:
+        - name: http
+          containerPort: 8080
+        - name: https
+          containerPort: 8443
+        volumeMounts:
+        # deploy.sh creates the Secret: a certificate for every endpoint name,
+        # from a CA that the egress gateway is patched to trust.
+        - name: tls
+          mountPath: /etc/egress-target-tls
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: 500m
+            memory: 64Mi
+        # runAsUser must be spelled out: ko's distroless static base declares
+        # no USER, so runAsNonRoot alone makes kubelet refuse to start it.
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          capabilities:
+            drop: ["ALL"]
+      volumes:
+      - name: tls
+        secret:
+          secretName: egress-target-tls
