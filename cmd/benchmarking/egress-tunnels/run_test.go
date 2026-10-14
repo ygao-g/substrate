@@ -1060,10 +1060,12 @@ func TestConfigValidate(t *testing.T) {
 		"settle shorter than a sweep": func(c *runConfig) {
 			c.Endpoints, c.RequestInterval, c.Settle, c.SettleTimeout = 4, 100*time.Millisecond, 100*time.Millisecond, time.Minute
 		},
-		"batch above parallel": func(c *runConfig) { c.StartBatch = c.Parallel + 1 },
-		"negative batch":       func(c *runConfig) { c.StartBatch = -1 },
-		"negative gap":         func(c *runConfig) { c.StartBatch, c.StartGap = 1, -time.Second },
-		"gap without batch":    func(c *runConfig) { c.StartGap = time.Second },
+		"batch above parallel":   func(c *runConfig) { c.StartBatch = c.Parallel + 1 },
+		"negative batch":         func(c *runConfig) { c.StartBatch = -1 },
+		"negative gap":           func(c *runConfig) { c.StartBatch, c.StartGap = 1, -time.Second },
+		"gap without batch":      func(c *runConfig) { c.StartGap = time.Second },
+		"negative pre-idle":      func(c *runConfig) { c.Usage, c.PreIdle = true, -time.Second },
+		"pre-idle without usage": func(c *runConfig) { c.PreIdle = time.Second },
 	} {
 		c := testConfig()
 		mutate(&c)
