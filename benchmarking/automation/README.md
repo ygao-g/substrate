@@ -4,9 +4,11 @@ Scheduled, repeatable benchmark runs of a substrate branch. A CronJob on an
 **orchestration cluster** drives the full build/deploy/run/teardown cycle
 against a separate **test cluster**, once per entry in [tests.yaml](tests.yaml).
 Each run uploads results to GCS via `benchmarking/locust/runner.py`
-(`type: locust`) or `benchmarking/nighthawk-ingress/runner.py` (`type: nighthawk-ingress`,
+(`type: locust`), `benchmarking/nighthawk-ingress/runner.py` (`type: nighthawk-ingress`,
 the router capacity benchmark — see
-[benchmarking/nighthawk-ingress/README.md](../nighthawk-ingress/README.md)).
+[benchmarking/nighthawk-ingress/README.md](../nighthawk-ingress/README.md)) or
+`benchmarking/egress-tunnels/runner.py` (`type: egress-tunnels`, the egress gateway
+tunnel benchmark — see [benchmarking/egress-tunnels/README.md](../egress-tunnels/README.md)).
 
 ## How it works
 
@@ -16,8 +18,9 @@ the router capacity benchmark — see
    `gcloud container clusters get-credentials` for the test cluster.
 3. Shallow-clones `--repo` at `--branch`, captures the commit hash.
 4. `docker build && docker push` builds the runner image for each test type
-   in use, tagged with the commit hash: `${KO_DOCKER_REPO}/locust-test:<commit>`
-   and/or `${KO_DOCKER_REPO}/nighthawk-ingress-test:<commit>`.
+   in use, tagged with the commit hash: `${KO_DOCKER_REPO}/locust-test:<commit>`,
+   `${KO_DOCKER_REPO}/nighthawk-ingress-test:<commit>` and/or
+   `${KO_DOCKER_REPO}/egress-tunnels-test:<commit>`.
 5. `hack/install-ate.sh --deploy-ate-system` (with `ATE_CREDENTIAL_PROVIDER`
    in `.ate-dev-env.sh`, or `--credential-provider` in the test's
    `ateArgs`) + `benchmarking/workloads/deploy.sh
@@ -37,10 +40,15 @@ the router capacity benchmark — see
 6. For each test in `tests.yaml`:
    - Submits a Job using the just-built image for the test's type
      (`runner-job.yaml.tmpl` for locust,
-     `nighthawk-ingress-runner-job.yaml.tmpl` for nighthawk-ingress).
+     `nighthawk-ingress-runner-job.yaml.tmpl` for nighthawk-ingress,
+     `egress-tunnels-runner-job.yaml.tmpl` for egress-tunnels).
    - Polls until complete/failed/timeout; tails logs; deletes the Job.
    - Tears down workloads + micro-VM deps (if any) + substrate.
    - If not the last test, redeploys them so the next run starts clean.
+   For an `egress-tunnels` test it deploys the endpoint Services the actors
+   call (`benchmarking/egress-tunnels/deploy.sh --deploy`), adds the `egress`
+   actor template to the workloads deploy, and deletes the endpoints again
+   after the Job.
 
 ## Choosing a sandbox class
 
