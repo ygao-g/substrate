@@ -61,6 +61,36 @@ func TestEgressManifestsDisableTheConnectTimeout(t *testing.T) {
 	}
 }
 
+// TestEgressManifestsLetAConnectStreamStayQuiet is the other half of the
+// route timeout above. A CONNECT stream carries nothing while the actor's
+// connection inside the tunnel is idle, and the connection manager's
+// stream_idle_timeout, 5 minutes unless set, resets the tunnel when that
+// happens. An actor opening 1000 tunnels leaves its first one quiet for up
+// to 10 minutes, so the timer must outlast that.
+func TestEgressManifestsLetAConnectStreamStayQuiet(t *testing.T) {
+	const minQuiet = 15 * time.Minute
+	for _, path := range egressManifests {
+		t.Run(path, func(t *testing.T) {
+			connect := hcm(outerChain(t, bootstrapTree(t, path)))
+			if str(connect, "stat_prefix") != "egress_connect" {
+				t.Fatalf("the CONNECT chain's connection manager has stat_prefix %q, want egress_connect; the manifest changed shape", str(connect, "stat_prefix"))
+			}
+			raw, ok := connect["stream_idle_timeout"]
+			if !ok {
+				t.Fatal("the egress_connect connection manager sets no stream_idle_timeout, so Envoy's 5 minute default resets every tunnel idle that long")
+			}
+			s, _ := raw.(string)
+			d, err := time.ParseDuration(s)
+			if err != nil {
+				t.Fatalf("egress_connect stream_idle_timeout %v is not a duration: %v", raw, err)
+			}
+			if d != 0 && d < minQuiet {
+				t.Errorf("egress_connect stream_idle_timeout is %s; it must be 0 or at least %s", d, minQuiet)
+			}
+		})
+	}
+}
+
 // envoyRoute is the sliver of an Envoy bootstrap this test reads. Unnamed
 // fields are dropped by the decoder, so the manifests stay free to grow.
 type envoyRoute struct {

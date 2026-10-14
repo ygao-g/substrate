@@ -109,8 +109,13 @@ data:
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
               stat_prefix: egress_connect
+              # A CONNECT stream carries no bytes while the tunnel inside it
+              # is quiet, and this timer resets it. An actor opening 1000
+              # tunnels leaves its first one quiet for up to 10 minutes.
+              stream_idle_timeout: 15m
               common_http_protocol_options:
                 # Set low idle timeout for connections, as atunnel does close tunnels from deleted actors.
+                # It only closes a connection with no streams, so it never cuts a tunnel.
                 idle_timeout: 30s
               http2_protocol_options:
                 # 100 streams per connection provides good balance between connection sharing and worker load.
@@ -151,7 +156,7 @@ data:
                       # with no per-destination visibility at all.
                       cluster: mitm_internal
                       # Set request timeout to disabled (0) as CONNECT is a long-running stream.
-                      # There will still be a stream_idle_timeout (5 minutes by default).
+                      # The connection manager's stream_idle_timeout still bounds a quiet tunnel.
                       timeout: 0s
                       upgrade_configs:
                       - upgrade_type: CONNECT
@@ -392,7 +397,8 @@ data:
               upgrade_configs:
               - upgrade_type: websocket
                 enabled: false
-              # Disable stream_idle_timeout as there is already an overall timeout in the outer tunnel in the HCM.
+              # No stream idle timeout: a request inside the tunnel may go
+              # quiet mid-flight, as a long poll or a streaming response does.
               stream_idle_timeout: 0s
               # This is the leg that knows where the traffic actually went.
               # REQUESTED_SERVER_NAME is the SNI the leaf was minted for and it
