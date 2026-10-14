@@ -74,6 +74,11 @@ type runConfig struct {
 	Atespace      string        `json:"atespace"`
 	Template      string        `json:"template"`
 	Scheme        string        `json:"scheme"`
+	// Usage samples what the egress path spends during the run.
+	Usage bool `json:"usage"`
+	// PreIdle is how long to sample before create, with none of the run's
+	// actors running, for the baseline.
+	PreIdle time.Duration `json:"preIdle"`
 }
 
 func (c *runConfig) validate() error {
@@ -123,6 +128,10 @@ func (c *runConfig) validate() error {
 		return fmt.Errorf("--scheme must be %s or %s, got %q", schemeHTTP, schemeHTTPS, c.Scheme)
 	case c.Atespace == "" || c.Template == "":
 		return errors.New("--atespace and --template are required")
+	case c.PreIdle < 0:
+		return fmt.Errorf("--pre-idle cannot be negative, got %v", c.PreIdle)
+	case c.PreIdle > 0 && !c.Usage:
+		return errors.New("--pre-idle needs --usage")
 	}
 	if c.ConnMode == connModeKeepAlive && c.StreamIdleTimeout > 0 && c.period() > c.StreamIdleTimeout/2 {
 		return fmt.Errorf("the per-endpoint period --endpoints x --request-interval = %v is more than half the gateway's stream idle timeout (%v): a tunnel goes quiet for one period, or for one slow request bounded by --request-timeout, and the other half is that margin", c.period(), c.StreamIdleTimeout)
@@ -246,6 +255,8 @@ type runner struct {
 	// fatal is set when the run found it cannot measure: an actor from
 	// before the exposition. The actors are still suspended.
 	fatal error
+	// usage samples the components' CPU and memory; nil without --usage.
+	usage *usageSampler
 }
 
 func newRunner(cfg runConfig, api ateapipb.ControlClient, k8s kubernetes.Interface, router *routerClient, out io.Writer) *runner {
@@ -276,6 +287,25 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 
 	if err := preflight(ctx, r.k8s, r.cfg.Endpoints, r.cfg.Scheme); err != nil {
 		return nil, err
+	}
+	if r.usage != nil {
+		if err := r.usage.start(ctx); err != nil {
+			return nil, fmt.Errorf("starting usage sampling: %w", err)
+		}
+		defer r.finishUsage(rep)
+		if r.cfg.PreIdle > 0 {
+			phaseStart := time.Now()
+			r.logf("pre-idle: sampling %v before create", r.cfg.PreIdle)
+			select {
+			case <-ctx.Done():
+			case <-time.After(r.cfg.PreIdle):
+			}
+			rep.addPhase("pre-idle", phaseStart)
+			if ctx.Err() != nil {
+				rep.Interrupted = true
+				return rep, ctx.Err()
+			}
+		}
 	}
 	phaseStart := time.Now()
 	created := r.createActors(ctx, rep)
@@ -312,9 +342,11 @@ func (r *runner) run(ctx context.Context) (*report, error) {
 			rep.Settle = w.settle(ctx)
 			rep.addPhase("settle", phaseStart)
 		}
+		r.mark(ctx, markSteadyBegin)
 		phaseStart = time.Now()
 		w.steady(ctx)
 		rep.addPhase("steady", phaseStart)
+		r.mark(ctx, markSteadyEnd)
 		rep.LoopTimeline = w.timeline
 		rep.Steady = w.window()
 	}
@@ -755,6 +787,19 @@ type loopWatch struct {
 	// steadyFrom indexes the first timeline point of the measured window,
 	// polled as the window opens; -1 before that.
 	steadyFrom int
+}
+
+// mark forces a read of every live usage source at a phase boundary.
+func (r *runner) mark(ctx context.Context, label string) {
+	if r.usage != nil {
+		r.usage.mark(ctx, label)
+	}
+}
+
+// finishUsage stops the sampler and summarizes what it read.
+func (r *runner) finishUsage(rep *report) {
+	rep.Usage = r.usage.stop()
+	summarizeUsage(rep)
 }
 
 func (r *runner) watchLoops(started []*actorRun) *loopWatch {

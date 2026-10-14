@@ -125,6 +125,8 @@ func bindRunFlags(fs *pflag.FlagSet, cfg *runConfig, opts *runOptions) {
 	fs.DurationVar(&cfg.SettleTimeout, "settle-timeout", 30*time.Minute, "How long to wait for --settle before measuring anyway.")
 	fs.StringVar(&cfg.Template, "template", "egress", "Actor template the actors are created from; WORKLOAD_TEMPLATES=egress benchmarking/workloads/deploy.sh creates it.")
 	fs.StringVar(&cfg.Scheme, "scheme", schemeHTTP, "Scheme the loops request endpoints over: http, or https through the gateway's TLS interception (needs deploy.sh --https).")
+	fs.BoolVar(&cfg.Usage, "usage", false, "Sample what the egress path spends during the run: the gateway's and ateapi's process counters and Envoy's stats every second, cAdvisor every 5s. The report gains cpu, memory and gateway lines and a usage section.")
+	fs.DurationVar(&cfg.PreIdle, "pre-idle", 0, "With --usage, sample this long before create, with none of the run's actors running; the report shows it as the baseline.")
 	fs.StringVar(&opts.routerURL, "router-url", "", "atenet router base URL. Empty port-forwards to the atenet-router Service.")
 	fs.StringVar(&opts.output, "output", "", "If set, write the report as JSON to this file.")
 }
@@ -192,6 +194,13 @@ func runCmd(ctx context.Context, cfg runConfig, opts runOptions) error {
 	}
 
 	r := newRunner(cfg, conn.api, conn.k8s, newRouterClient(*routerURL, cfg.Atespace, cfg.Parallel), os.Stdout)
+	if cfg.Usage {
+		get, err := newSamplerGetter(cf.kubeconfig, cf.kubeContext)
+		if err != nil {
+			return err
+		}
+		r.usage = newUsageSampler(get, conn.k8s, cfg.Atespace)
+	}
 	rep, runErr := r.run(ctx)
 	if rep != nil {
 		rep.print(os.Stdout)
