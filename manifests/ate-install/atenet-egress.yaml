@@ -976,6 +976,15 @@ data:
       - name: egress_forward_proxy
         lb_policy: CLUSTER_PROVIDED
         connect_timeout: 5s
+        # The pool is one connection per host per worker thread, not per
+        # tunnel: 105k measured at 1000 hosts and 88 threads. Envoy's 1024
+        # default answers 503 to every request past it while a fleet opens.
+        circuit_breakers:
+          thresholds:
+          - priority: DEFAULT
+            max_connections: 262144
+            max_requests: 262144
+            max_pending_requests: 4096
         cluster_type:
           name: envoy.clusters.dynamic_forward_proxy
           typed_config:
@@ -1047,6 +1056,13 @@ data:
       - name: egress_forward_proxy_cleartext
         lb_policy: CLUSTER_PROVIDED
         connect_timeout: 5s
+        # Same pool shape and the same breakers as egress_forward_proxy.
+        circuit_breakers:
+          thresholds:
+          - priority: DEFAULT
+            max_connections: 262144
+            max_requests: 262144
+            max_pending_requests: 4096
         cluster_type:
           name: envoy.clusters.dynamic_forward_proxy
           typed_config:
