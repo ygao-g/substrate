@@ -1,0 +1,365 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptrace"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/agent-substrate/substrate/internal/egresstunnels"
+)
+
+// maxBodyBytes bounds what the actor reads, from a /start body or from an
+// endpoint's response.
+const maxBodyBytes = 1 << 20
+
+// server serves the egresstunnels routes. At most one loop runs at a time.
+type server struct {
+	// endpointURL maps an endpoint number and scheme to the URL the loop
+	// requests. Tests point it at local servers.
+	endpointURL func(i int, scheme string) string
+	// rootCAs verifies HTTPS endpoints; nil uses the system roots, which
+	// SSL_CERT_FILE extends with the gateway's MITM CA. Tests set their own.
+	rootCAs *x509.CertPool
+	// dial opens the loop's connections; nil uses a plain net.Dialer. Tests
+	// send the in-cluster endpoint names to local listeners through it.
+	dial dialFunc
+
+	mu  sync.Mutex
+	run *loopRun // nil when no loop is running
+}
+
+func newServer() *server {
+	return &server{endpointURL: egresstunnels.EndpointURL}
+}
+
+func (s *server) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+egresstunnels.ReadyzRoute, func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("POST "+egresstunnels.StartRoute, s.handleStart)
+	mux.HandleFunc("GET "+egresstunnels.StatsRoute, s.handleStats)
+	mux.HandleFunc("POST "+egresstunnels.StopRoute, s.handleStop)
+	return mux
+}
+
+func (s *server) handleStart(w http.ResponseWriter, r *http.Request) {
+	var req egresstunnels.StartRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		http.Error(w, "decoding start request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := req.Validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.run != nil {
+		http.Error(w, "a loop is already running; POST "+egresstunnels.StopRoute+" first", http.StatusConflict)
+		return
+	}
+	urls := make([]string, req.Endpoints)
+	for i := range urls {
+		urls[i] = s.endpointURL(i, req.URLScheme())
+	}
+	s.run = startLoop(req, urls, s.rootCAs, s.dial)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) handleStats(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	run := s.run
+	s.mu.Unlock()
+	if run == nil {
+		http.Error(w, "no loop is running", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, run.snapshot())
+}
+
+func (s *server) handleStop(w http.ResponseWriter, _ *http.Request) {
+	// Held across the wait so a /start cannot slip in before the loop exits.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.run == nil {
+		http.Error(w, "no loop is running", http.StatusNotFound)
+		return
+	}
+	stats := s.run.stop()
+	s.run = nil
+	writeJSON(w, stats)
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}
+
+// loopRun is one started loop and what it has measured.
+type loopRun struct {
+	cancel    context.CancelFunc
+	done      chan struct{}
+	started   time.Time
+	transport *http.Transport
+
+	mu    sync.Mutex
+	stats egresstunnels.Stats
+	last  []time.Time // start of each endpoint's most recent request
+}
+
+func startLoop(req egresstunnels.StartRequest, urls []string, roots *x509.CertPool, dial dialFunc) *loopRun {
+	timeoutMs := req.RequestTimeoutMs
+	if timeoutMs == 0 {
+		timeoutMs = egresstunnels.DefaultRequestTimeoutMs
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &loopRun{
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		started:   time.Now(),
+		transport: newTransport(req.NewConnPerRequest, roots, dial),
+	}
+	r.stats.Scheme = req.URLScheme()
+	r.stats.Endpoints = make([]egresstunnels.Endpoint, len(urls))
+	r.last = make([]time.Time, len(urls))
+	client := &http.Client{
+		Transport: r.transport,
+		// Count a redirect as the endpoint's answer rather than following it
+		// somewhere the egress policy may not allow.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	go r.loop(ctx, client, urls, time.Duration(timeoutMs)*time.Millisecond, time.Duration(req.IntervalMs)*time.Millisecond)
+	return r
+}
+
+// dialFunc opens one connection, as net.Dialer.DialContext does.
+type dialFunc = func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// newTransport keeps one connection alive per endpoint, or none at all when
+// newConnPerRequest is set, and verifies HTTPS endpoints against roots. It
+// ignores proxy environment variables: the sandbox's egress capture is the
+// only proxy under test.
+func newTransport(newConnPerRequest bool, roots *x509.CertPool, dial dialFunc) *http.Transport {
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	}
+	return &http.Transport{
+		DialContext:         dial,
+		TLSClientConfig:     &tls.Config{RootCAs: roots},
+		ForceAttemptHTTP2:   false, // HTTP/1.1 over either scheme: one request per connection at a time
+		MaxIdleConns:        0,     // no total cap, so C endpoints keep C connections
+		MaxIdleConnsPerHost: 1,     // requests are sequential, so one per endpoint is enough
+		// Must outlive one full pass over every endpoint, or a keep-alive
+		// loop reopens every connection each pass.
+		IdleConnTimeout:   30 * time.Minute,
+		DisableKeepAlives: newConnPerRequest,
+		// No TLSHandshakeTimeout: the request's own timeout bounds the
+		// handshake, so a stalled one is counted as a timeout like any other.
+	}
+}
+
+// loop opens every endpoint once, in order, then sweeps them youngest first,
+// round and round, until ctx is cancelled. Every sweep runs in the same
+// order, so no endpoint waits more than one pass, and the first one touches
+// the tunnels still alive before the oldest, which the gateway may already
+// have reset, are redialed.
+func (r *loopRun) loop(ctx context.Context, client *http.Client, urls []string, timeout, interval time.Duration) {
+	defer close(r.done)
+	for i, u := range urls {
+		r.request(ctx, client, i, u, timeout)
+		if ctx.Err() != nil {
+			return
+		}
+		r.mu.Lock()
+		r.stats.Opened++
+		r.mu.Unlock()
+		if !pause(ctx, interval) {
+			return
+		}
+	}
+	for {
+		for i := len(urls) - 1; i >= 0; i-- {
+			r.request(ctx, client, i, urls[i], timeout)
+			if !pause(ctx, interval) {
+				return
+			}
+		}
+		r.mu.Lock()
+		r.stats.Sweeps++
+		r.mu.Unlock()
+	}
+}
+
+// pause waits interval, or until ctx ends, and reports whether to go on.
+func pause(ctx context.Context, interval time.Duration) bool {
+	if interval <= 0 {
+		return ctx.Err() == nil
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(interval):
+		return true
+	}
+}
+
+// requestTrace collects what httptrace reports about one request. The dial,
+// and with it the DNS callbacks, can still be running on another goroutine
+// after a timed-out request returns, hence the lock.
+type requestTrace struct {
+	mu         sync.Mutex
+	gotConn    bool
+	newConn    bool
+	dnsStart   time.Time
+	dns        time.Duration
+	didDNS     bool
+	tlsStart   time.Time
+	tls        time.Duration
+	tlsStarted bool
+	didTLS     bool
+}
+
+func (t *requestTrace) clientTrace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.gotConn, t.newConn = true, !info.Reused
+		},
+		DNSStart: func(httptrace.DNSStartInfo) {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.dnsStart = time.Now()
+		},
+		DNSDone: func(httptrace.DNSDoneInfo) {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.dns, t.didDNS = time.Since(t.dnsStart), true
+		},
+		TLSHandshakeStart: func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			t.tlsStart, t.tlsStarted = time.Now(), true
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			if err == nil {
+				t.tls, t.didTLS = time.Since(t.tlsStart), true
+			}
+		},
+	}
+}
+
+func (r *loopRun) request(ctx context.Context, client *http.Client, i int, u string, timeout time.Duration) {
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	trace := &requestTrace{}
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(reqCtx, trace.clientTrace()), http.MethodGet, u, nil)
+	if err != nil {
+		r.record(i, 0, 0, err, trace)
+		return
+	}
+
+	start := time.Now()
+	r.mu.Lock()
+	if last := r.last[i]; !last.IsZero() {
+		r.stats.LongestGap = max(r.stats.LongestGap, start.Sub(last))
+	}
+	r.last[i] = start
+	r.mu.Unlock()
+	status := 0
+	resp, err := client.Do(req)
+	if err == nil {
+		status = resp.StatusCode
+		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
+		resp.Body.Close()
+	}
+	latency := time.Since(start)
+	if ctx.Err() != nil {
+		// Stopped mid-request: the failure is the stop, not the egress path.
+		return
+	}
+	r.record(i, latency, status, err, trace)
+}
+
+func (r *loopRun) record(i int, latency time.Duration, status int, err error, trace *requestTrace) {
+	trace.mu.Lock()
+	newConn := trace.gotConn && trace.newConn
+	didDNS, dns := trace.didDNS, trace.dns
+	tlsStarted, didTLS, tlsTime := trace.tlsStarted, trace.didTLS, trace.tls
+	trace.mu.Unlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := &r.stats
+	s.Requests++
+	s.Endpoints[i].Requests++
+	if newConn {
+		s.NewConns++
+	}
+	if didDNS {
+		s.DNS.Record(dns)
+	}
+	if didTLS {
+		s.TLS.Record(tlsTime)
+	}
+	class := egresstunnels.Classify(err, status)
+	if class != "" && tlsStarted && !didTLS && !strings.HasPrefix(class, "tls: ") {
+		// A failure inside the handshake, such as the gateway closing a
+		// connection whose SNI no rule allows, is told apart from the same
+		// error in an HTTP exchange.
+		class = "tls handshake: " + class
+	}
+	if class == "" {
+		s.Successes++
+		s.Latency.Record(latency)
+		return
+	}
+	if s.Errors == nil {
+		s.Errors = make(map[string]int64)
+	}
+	s.Errors[class]++
+	s.Endpoints[i].Errors++
+}
+
+// snapshot returns a copy of the stats so far.
+func (r *loopRun) snapshot() *egresstunnels.Stats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.stats.Clone()
+	s.Elapsed = time.Since(r.started)
+	return s
+}
+
+// stop cancels the loop, waits for it to exit, and returns the final stats.
+func (r *loopRun) stop() *egresstunnels.Stats {
+	r.cancel()
+	<-r.done
+	r.transport.CloseIdleConnections()
+	return r.snapshot()
+}
