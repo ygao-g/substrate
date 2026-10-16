@@ -27,12 +27,14 @@ contract). The flow, with the type hooks marked:
         target cluster.
      b. Sweep leftovers, deploy substrate, let the type shape the
         cluster [hook: pre_test], deploy workloads (+ microvm deps when
-        the sandbox class needs them).
+        the sandbox class needs them, + the type's own actor templates
+        [hook: workload_templates]).
      c. Render the type's Job template [hooks: job_tmpl, job_subs],
         submit it, wait, tail logs, delete the Job.
-     d. Tear substrate + workloads down again so tests don't pollute
-        each other, then drop the env file so the next test can't
-        inherit this one's cluster.
+     d. Let the type undo what pre_test did [hook: post_test], tear
+        substrate + workloads down again so tests don't pollute each
+        other, then drop the env file so the next test can't inherit
+        this one's cluster.
   4. Exit non-zero if any test didn't complete.
 """
 
@@ -70,6 +72,9 @@ MANIFESTS_DIR = "/opt/automation/manifests"
 NAMESPACE = "benchmarking"
 
 TEST_TYPES = tuple(TYPES)
+# The templates benchmarking/workloads/deploy.sh creates when
+# WORKLOAD_TEMPLATES is unset; a type's own templates are added to these.
+DEFAULT_WORKLOAD_TEMPLATES = ("sleep", "glutton", "glutton-durdir-data", "glutton-durdir-full")
 
 # Snapshot the process's initial env so apply_config can return to a known
 # baseline before sourcing the next config (avoids stale vars carrying over
@@ -359,6 +364,17 @@ def teardown_microvm_deps() -> None:
     run_no_check(["hack/install-microvm-deps.sh", "--delete"])
 
 
+def workload_env(templates: Iterable[str] = ()) -> dict[str, Any]:
+    """Keyword arguments for the workloads/deploy.sh run: with templates,
+    an environment whose WORKLOAD_TEMPLATES names the actor templates to
+    create or delete, the script's defaults plus the type's own. Empty
+    leaves the process environment untouched."""
+    extra = list(templates)
+    if not extra:
+        return {}
+    return {"env": {**os.environ, "WORKLOAD_TEMPLATES": " ".join([*DEFAULT_WORKLOAD_TEMPLATES, *extra])}}
+
+
 def deploy_workloads(
     worker_count: int = 1,
     sandbox_class: str = "gvisor",
@@ -366,6 +382,7 @@ def deploy_workloads(
     wait_timeout_secs: int | str = "",
     worker_memory: str = "",
     fake_atelet_args: Iterable[str] = (),
+    templates: Iterable[str] = (),
 ) -> None:
     cmd = [
         "benchmarking/workloads/deploy.sh",
@@ -390,11 +407,25 @@ def deploy_workloads(
     # An isolate block's tuning of fake-atelet, on the fake data plane.
     cmd += list(fake_atelet_args)
     # deploy.sh itself blocks until every template's golden snapshot exists.
-    run(cmd)
+    run(cmd, **workload_env(templates))
 
 
-def teardown_workloads() -> None:
-    run_no_check(["benchmarking/workloads/deploy.sh", "--delete"])
+def teardown_workloads(templates: Iterable[str] = ()) -> None:
+    run_no_check(["benchmarking/workloads/deploy.sh", "--delete"], **workload_env(templates))
+
+
+def type_templates(test: dict[str, Any]) -> list[str]:
+    """The actor templates the test's type adds to the workloads deploy;
+    the hook is optional."""
+    hook = getattr(TYPES[test_type(test)], "workload_templates", None)
+    return list(hook(test)) if hook else []
+
+
+def type_post_test(test: dict[str, Any]) -> None:
+    """Undo what the type's pre_test did; the hook is optional."""
+    hook = getattr(TYPES[test_type(test)], "post_test", None)
+    if hook:
+        hook(test)
 
 
 def run_test(
@@ -544,7 +575,8 @@ def main() -> None:
             # this is cheap on a clean cluster. Order matters:
             # microvm-deps deletes a SandboxConfig CR, which requires the
             # SandboxConfig CRD that teardown_substrate removes.
-            teardown_workloads()
+            templates = type_templates(test)
+            teardown_workloads(templates)
             teardown_microvm_deps()
             teardown_substrate()
 
@@ -566,6 +598,7 @@ def main() -> None:
                     test.get("workerWaitTimeout", ""),
                     test.get("workerMemory", ""),
                     isolate_workload_args(test),
+                    templates,
                 )
                 try:
                     status = run_test(
@@ -587,8 +620,13 @@ def main() -> None:
                 # Always tear down, even if deploy or run failed, so the
                 # next test (and the next CronJob fire) starts clean.
                 # microvm-deps must go before substrate for the same reason
-                # as above.
-                teardown_workloads()
+                # as above; the type's post_test goes first because it may
+                # patch substrate's own objects.
+                try:
+                    type_post_test(test)
+                except Exception as e:
+                    print(f"Test {test['name']} post_test failed: {e}", flush=True)
+                teardown_workloads(templates)
                 teardown_microvm_deps()
                 teardown_substrate()
             duration = time.time() - start_time

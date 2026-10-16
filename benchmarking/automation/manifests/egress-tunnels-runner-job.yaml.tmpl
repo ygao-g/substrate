@@ -1,0 +1,196 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Per-test Job manifest for `type: egress-tunnels` tests. Rendered by
+# orchestrator.py, which substitutes the placeholders before kubectl apply;
+# mirrors nighthawk-ingress-runner-job.yaml.tmpl's structure, labels and
+# token volume. The RBAC is what cmd/benchmarking/egress-tunnels reads: the
+# endpoint Services and the target's certificate Secret in
+# egress-tests-targets, the gateway Deployment and the trust ConfigMap in
+# ate-system, and the ClusterTrustBundles the ate client verifies ateapi
+# against.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: benchmarking
+  labels:
+    # ate-system admits API clients only from namespaces with this label.
+    ate.dev/api-access: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: benchmark-runner-trust-bundles
+rules:
+- apiGroups: ["certificates.k8s.io"]
+  resources: ["clustertrustbundles"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: benchmark-runner-trust-bundles
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: benchmark-runner-trust-bundles
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-runner-egress-targets
+  namespace: egress-tests-targets
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["list"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["egress-target-tls"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-runner-egress-targets
+  namespace: egress-tests-targets
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: benchmark-runner-egress-targets
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-runner-egress-gateway
+  namespace: ate-system
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  resourceNames: ["atenet-egress"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["egress-tests-target-ca"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-runner-egress-gateway
+  namespace: ate-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: benchmark-runner-egress-gateway
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: benchmarking
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: substrate-benchmark-runner
+        test-name: ${NAME}
+        tag: ${TAG}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: benchmark-runner
+      # Lets the runner land on a node pool reserved for load generators
+      # with the taint ate.dev/benchmarking=true:NoSchedule.
+      tolerations:
+      - key: ate.dev/benchmarking
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      containers:
+      - name: runner
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - "python3"
+        - "/app/runner.py"
+        args:
+        - "--name"
+        - "${NAME}"
+        - "--tag"
+        - "${TAG}"
+        - "--dest"
+        - "${DEST}"
+        - "--actors"
+        - "${ACTORS}"
+        - "--parallel"
+        - "${PARALLEL}"
+        - "--endpoints"
+        - "${ENDPOINTS}"
+        - "--duration"
+        - "${DURATION}"
+        - "--scheme"
+        - "${SCHEME}"
+        - "--conn-mode"
+        - "${CONN_MODE}"
+        - "--request-interval"
+        - "${REQUEST_INTERVAL}"
+        - "--request-timeout"
+        - "${REQUEST_TIMEOUT}"
+        - "--atespace"
+        - "${ATESPACE}"
+        - "--template"
+        - "${TEMPLATE}"
+        - "--success-rate-threshold"
+        - "${SUCCESS_RATE}"
+        volumeMounts:
+        - name: ateapi-token
+          mountPath: /run/ateapi-token
+          readOnly: true
+        # Requests only, no limits: the driver polls every running actor
+        # and must not be throttled while it does.
+        resources:
+          requests:
+            cpu: "${RUNNER_CPU}"
+            memory: "${RUNNER_MEMORY}"
+      volumes:
+      # ateapi accepts ServiceAccount tokens for this audience. kubelet
+      # rotates the file; the driver re-reads it on every call.
+      - name: ateapi-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 3600
+              path: token
