@@ -125,6 +125,8 @@ go run ./cmd/benchmarking/egress-tunnels run --actors 1000 --parallel 10 --endpo
 | `--settle-timeout` | 30m | How long to wait for `--settle` before measuring anyway. The report then says `NOT settled`. |
 | `--atespace`, `--template` | `benchmark-workloads`, `egress` | Where the actors live and what they are created from. |
 | `--output` | | Write the full report, including per-actor stats, as JSON to this file. Durations are in nanoseconds. |
+| `--usage` | off | Sample what the egress path spends during the run. See [Usage sampling](#usage-sampling). |
+| `--pre-idle` | 0 | With `--usage`, sample this long before create, with none of the run's actors running; the report shows it as the baseline. |
 | `--kubeconfig`, `--context` | | Which cluster to use. |
 | `--api-endpoint`, `--router-url` | | When left empty, the driver port-forwards to the `api` and `atenet-router` Services. |
 | `--api-token-file` | | With `--api-endpoint`, authenticate to ateapi with the token in this file, re-read on every call, such as a projected ServiceAccount token with audience `api.ate-system.svc`. When left empty, the driver mints an `ate-client` token. `cleanup` takes it too. |
@@ -277,6 +279,96 @@ retries included; ready latency from then until the actor first answers through
 the router. Actors that never ran restore from the template's golden snapshot,
 and actors an earlier run suspended restore from their own, so one warm-up run
 of B actors makes every later run of at most B restore from own snapshots.
+
+## Usage sampling
+
+`--usage` measures what the egress path spends during a run. It reads three
+sources through the API server, each on its own cadence:
+
+| Source | What | Cadence | Path |
+|---|---|---|---|
+| live | `process_cpu_seconds_total` and RSS of the gateway's `ext-proc` and of `ate-api-server` | every second, and at the start and end of steady | `pods/<pod>:9090/proxy/metrics` |
+| envoy | the gateway's tunnel, connection, breaker and heap stats, listed below | same | `pods/<pod>:15090/proxy/stats/prometheus`, the `envoy_metrics` listener; the admin API itself is loopback-only |
+| cadvisor | container CPU, CFS throttling and working set of the workers, gateway, ateapi, router, targets and kube-dns | polled every 5s; the kubelet refreshes each container every 12 to 20s | `nodes/<node>/proxy/metrics/cadvisor` |
+
+The workers are the WorkerPool pods in the actors' atespace. A worker pod is
+the smallest unit cAdvisor sees: it holds the actors, gVisor, atunnel and the
+sandbox DNS relay together. The gateway pod is read as `envoy`, `ext-proc` and
+`sdsmint`, its native sidecar that mints the per-actor certificates.
+
+The report then adds `cpu`, `memory` and `gateway` lines, and `--output` adds a
+`usage` section with the raw readings, the per-component summaries, the
+gateway summary and the flags. `phases` and `loopTimeline` hold the phase
+boundaries and the progress polls; `--progress-interval 5s` gives a finer
+timeline.
+
+**Steady and settled.** The first round over the C endpoints opens every
+tunnel and resolves every name, so the steady mean carries that setup cost.
+The `settled` line drops it. The settled window starts one progress poll after
+new connections stop growing. When the polls come further apart than one
+round, it starts 1.5 rounds (1.5 x C x `--request-interval`) into steady
+instead, and never earlier than 5s into steady (`floored` in the JSON).
+`usage.settledWindow` records the start, the rule, the request rate and the
+settled p50 and p99 from the progress polls' histograms; each component
+carries `settled` beside `steady`. Cores per 1000 req/s is the figure to
+compare across runs; `steady` includes the opening round, `settled` does not.
+
+**Opening cost.** Once every loop has opened, the report's `opening` and
+`opening-pure` phase marks (see [Opening throughput](#opening-throughput))
+window the same samples: each component carries `opening` and, with
+`--start-batch`, `openingPure` beside `steady`, and the gateway's
+`msPerOpen` is its mean cores over the window times the window's seconds,
+divided by the tunnels opened in it: the CPU one tunnel costs to open. The
+pure window, the first batch's, holds opens and nothing else, so its figure
+is the cleaner one; the full opening window also carries the earlier
+batches' steady traffic. Both need at least two cAdvisor readings inside the
+window, so a window under about 40 s reads as insufficient.
+
+**What the gateway line says.** The actors reach the gateway over HTTP/2, so
+one actor connection carries up to 100 CONNECT streams, one per tunnel; inside
+the gateway each tunnel is still one connection and one request on the
+`mitm_internal` cluster. The line reads:
+
+- `tunnels opened`: the rise of `cluster.mitm_internal.upstream_cx_total`. In
+  keepalive mode it is about B×C; more means tunnels were cut and reopened.
+- `open max`: the peak of `upstream_rq_active`, the exact tunnel count.
+  `tunnel connections max` is the peak of `upstream_cx_active`, which can run
+  a little higher while released connections linger idle.
+- `actor connections max` and `streams per connection max`:
+  `http.egress_connect.downstream_cx_active` and `downstream_rq_active`, and
+  their ratio, which the gateway caps at 100.
+- `h2 connections` and `http1`: how many actor connections negotiated each
+  protocol; a run on this gateway shows the h2 count rising and http1 flat.
+- `cut by the stream idle timeout`: `downstream_rq_idle_timeout`, the
+  tunnels the connection manager reset for silence; the actor redials
+  without an error, so only this counter and the request rate show it. The
+  connection idle timeout and protocol errors are listed next to it.
+- `upstream connections max`: each cluster's peak of open upstream
+  connections; `refusals` lists the overflow counters that rose, and a
+  breaker that opened is flagged.
+
+`memory` adds Envoy's allocated heap at its peak and per open tunnel at the
+read with the most tunnels. Flags print as `!! usage` lines: tunnels cut by
+the stream idle timeout, more streams per connection than the gateway
+allows, and an open breaker. They do not fail the run.
+
+**Baseline.** `--pre-idle 45s` samples for that long before create, with none
+of the run's actors running. `usage.baseline` holds each component's and
+container's use over that phase and the `cpu` lines add a `pre-idle baseline
+cores` line; subtract it to get a run's own cost. A component needs two
+cAdvisor readings inside the phase, about 45s, and the line names the ones
+that got fewer.
+
+**Run at least 45s.** A cAdvisor series needs two readings inside the steady
+window. A shorter run marks cAdvisor-only components `insufficient`; the live
+sources still resolve one second, and the Go processes' `exact` figures come
+from the reads at the steady marks.
+
+**Permissions.** The driver uses your kubeconfig identity. `--usage` needs
+`get` on `nodes/proxy`, `list` on pods in the atespace, `egress-tests-targets`,
+`ate-system` and `kube-system`, and `get` on `pods/proxy` in `ate-system`.
+`nodes/proxy` also reaches the kubelet's exec and attach endpoints, so grant
+it only to people who could exec into pods anyway.
 
 ## Limits to expect
 
