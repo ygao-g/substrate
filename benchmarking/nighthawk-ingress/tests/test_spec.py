@@ -16,13 +16,14 @@
 
 The dict-shape tests run anywhere (stdlib only, `python3 tests/test_spec.py`
 or pytest). The textproto round-trip test needs the FileDescriptorSet built
-by the Docker protogen stage and self-skips when NIGHTHAWK_DESC is absent
-(i.e. outside the runner image):
-  docker run --rm --entrypoint python3 <image> -m pytest /app/tests
+by the Docker protogen stage and skips when NIGHTHAWK_DESC is absent (i.e.
+outside the runner image):
+  docker run --rm --entrypoint python3 <image> /app/tests/test_spec.py
 """
 
 import os
 import sys
+import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -123,13 +124,18 @@ def test_tail_latency_slo_threshold():
     assert len(build(tail_latency_slo_ms=None)["metric_thresholds"]) == 2
 
 
+
+
+
+
 def test_spec_round_trips_through_real_protos():
-    """Round-trip through the real Nighthawk protos; self-skips outside the
+    """Round-trip through the real Nighthawk protos; skips outside the
     runner image (no FileDescriptorSet)."""
     desc = os.environ.get("NIGHTHAWK_DESC", "/app/nighthawk.desc")
     if not os.path.exists(desc):
-        print("SKIP: FileDescriptorSet only present inside the runner image")
-        return
+        raise unittest.SkipTest(
+            "FileDescriptorSet only present inside the runner image"
+        )
     from google.protobuf import text_format
 
     text = spec_mod.spec_dict_to_textproto(build(tail_latency_slo_ms=25), desc)
@@ -145,5 +151,9 @@ def test_spec_round_trips_through_real_protos():
 if __name__ == "__main__":
     for fn_name, fn in sorted(dict(globals()).items()):
         if fn_name.startswith("test_") and callable(fn):
-            fn()
+            try:
+                fn()
+            except unittest.SkipTest as e:
+                print(f"SKIP {fn_name}: {e}")
+                continue
             print(f"PASS {fn_name}")

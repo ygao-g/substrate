@@ -1,0 +1,565 @@
+{
+  "adjusting_stage_results": [
+    {
+      "end_time": "2026-10-01T04:01:04.848Z",
+      "metric_evaluations": [
+        {
+          "metric_id": "nighthawk.builtin/success-rate",
+          "metric_value": 1.0,
+          "threshold_score": 1.0,
+          "weight": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/send-rate",
+          "metric_value": 1.0,
+          "threshold_score": 1.0,
+          "weight": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/latency-ns-mean-plus-2stdev",
+          "metric_value": 2923171.0,
+          "threshold_score": 1.0,
+          "weight": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/attempted-rps",
+          "metric_value": 496.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/achieved-rps",
+          "metric_value": 496.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/send-rate",
+          "metric_value": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/latency-ns-mean",
+          "metric_value": 1720351.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/latency-ns-mean-plus-2stdev",
+          "metric_value": 2923171.0
+        }
+      ],
+      "nighthawk_service_output": {
+        "options": {
+          "concurrency": "16",
+          "requests_per_second": 31
+        },
+        "results": [
+          {
+            "counters": [
+              {
+                "name": "benchmark.http_2xx",
+                "value": "4960"
+              },
+              {
+                "name": "cluster_manager.cluster_added",
+                "value": "16"
+              },
+              {
+                "name": "default.total_match_count",
+                "value": "16"
+              },
+              {
+                "name": "membership_change",
+                "value": "16"
+              },
+              {
+                "name": "runtime.load_success",
+                "value": "1"
+              },
+              {
+                "name": "runtime.override_dir_not_exists",
+                "value": "1"
+              },
+              {
+                "name": "upstream_cx_http1_total",
+                "value": "16"
+              },
+              {
+                "name": "upstream_cx_rx_bytes_total",
+                "value": "923536"
+              },
+              {
+                "name": "upstream_cx_total",
+                "value": "16"
+              },
+              {
+                "name": "upstream_cx_tx_bytes_total",
+                "value": "689440"
+              },
+              {
+                "name": "upstream_rq_pending_total",
+                "value": "16"
+              },
+              {
+                "name": "upstream_rq_total",
+                "value": "4960"
+              }
+            ],
+            "execution_duration": "10.000000034s",
+            "name": "global",
+            "statistics": [
+              {
+                "count": "4960",
+                "id": "benchmark_http_client.request_to_response",
+                "max": "0.023576575s",
+                "mean": "0.001720351s",
+                "min": "0.001210240s",
+                "percentiles": [
+                  {
+                    "count": "2480",
+                    "duration": "0.001645055s",
+                    "percentile": 0.5
+                  },
+                  {
+                    "count": "4464",
+                    "duration": "0.001968575s",
+                    "percentile": 0.9
+                  },
+                  {
+                    "count": "4712",
+                    "duration": "0.002123135s",
+                    "percentile": 0.95
+                  },
+                  {
+                    "count": "4914",
+                    "duration": "0.003381759s",
+                    "percentile": 0.990625
+                  }
+                ],
+                "pstdev": "0.000601410s"
+              }
+            ]
+          }
+        ]
+      },
+      "start_time": "2026-10-01T04:00:52.783Z"
+    },
+    {
+      "end_time": "2026-10-01T04:02:30.746Z",
+      "metric_evaluations": [
+        {
+          "metric_id": "nighthawk.builtin/success-rate",
+          "metric_value": 0.9861704137540147,
+          "threshold_score": -1.0,
+          "weight": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/send-rate",
+          "metric_value": 0.661625,
+          "threshold_score": -1.0,
+          "weight": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/latency-ns-mean-plus-2stdev",
+          "metric_value": 184260482.0,
+          "threshold_score": -1.0,
+          "weight": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/attempted-rps",
+          "metric_value": 16000.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/achieved-rps",
+          "metric_value": 10586.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/send-rate",
+          "metric_value": 0.661625
+        },
+        {
+          "metric_id": "nighthawk.builtin/latency-ns-mean",
+          "metric_value": 146880002.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/latency-ns-mean-plus-2stdev",
+          "metric_value": 184260482.0
+        }
+      ],
+      "nighthawk_service_output": {
+        "options": {
+          "concurrency": "16",
+          "requests_per_second": 1000
+        },
+        "results": [
+          {
+            "counters": [
+              {
+                "name": "benchmark.http_2xx",
+                "value": "104396"
+              },
+              {
+                "name": "benchmark.pool_overflow",
+                "value": "54140"
+              },
+              {
+                "name": "cluster_manager.cluster_added",
+                "value": "16"
+              },
+              {
+                "name": "default.total_match_count",
+                "value": "16"
+              },
+              {
+                "name": "membership_change",
+                "value": "16"
+              },
+              {
+                "name": "runtime.load_success",
+                "value": "1"
+              },
+              {
+                "name": "runtime.override_dir_not_exists",
+                "value": "1"
+              },
+              {
+                "name": "upstream_cx_http1_total",
+                "value": "1616"
+              },
+              {
+                "name": "upstream_cx_rx_bytes_total",
+                "value": "19540428"
+              },
+              {
+                "name": "upstream_cx_total",
+                "value": "1616"
+              },
+              {
+                "name": "upstream_cx_tx_bytes_total",
+                "value": "14714540"
+              },
+              {
+                "name": "upstream_rq_active_overflow",
+                "value": "54140"
+              },
+              {
+                "name": "upstream_rq_pending_total",
+                "value": "1616"
+              },
+              {
+                "name": "upstream_rq_total",
+                "value": "105860"
+              }
+            ],
+            "execution_duration": "10.000019431s",
+            "name": "global",
+            "statistics": [
+              {
+                "count": "104396",
+                "id": "benchmark_http_client.request_to_response",
+                "max": "0.279150591s",
+                "mean": "0.146880002s",
+                "min": "0.009449984s",
+                "percentiles": [
+                  {
+                    "count": "52208",
+                    "duration": "0.144465919s",
+                    "percentile": 0.5
+                  },
+                  {
+                    "count": "93957",
+                    "duration": "0.170549247s",
+                    "percentile": 0.9
+                  },
+                  {
+                    "count": "99178",
+                    "duration": "0.178388991s",
+                    "percentile": 0.95
+                  },
+                  {
+                    "count": "103419",
+                    "duration": "0.198262783s",
+                    "percentile": 0.990625
+                  }
+                ],
+                "pstdev": "0.018690240s"
+              }
+            ]
+          }
+        ]
+      },
+      "start_time": "2026-10-01T04:02:18.441Z"
+    },
+    {
+      "end_time": "2026-10-01T04:04:14.010Z",
+      "metric_evaluations": [
+        {
+          "metric_id": "nighthawk.builtin/success-rate",
+          "metric_value": 0.9973283179012346,
+          "threshold_score": -1.0,
+          "weight": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/send-rate",
+          "metric_value": 1.0,
+          "threshold_score": 1.0,
+          "weight": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/latency-ns-mean-plus-2stdev",
+          "metric_value": 23711842.0,
+          "threshold_score": 1.0,
+          "weight": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/attempted-rps",
+          "metric_value": 10368.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/achieved-rps",
+          "metric_value": 10368.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/send-rate",
+          "metric_value": 1.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/latency-ns-mean",
+          "metric_value": 11900174.0
+        },
+        {
+          "metric_id": "nighthawk.builtin/latency-ns-mean-plus-2stdev",
+          "metric_value": 23711842.0
+        }
+      ],
+      "nighthawk_service_output": {
+        "options": {
+          "concurrency": "16",
+          "requests_per_second": 648
+        },
+        "results": [
+          {
+            "counters": [
+              {
+                "name": "benchmark.http_2xx",
+                "value": "103403"
+              },
+              {
+                "name": "cluster_manager.cluster_added",
+                "value": "16"
+              },
+              {
+                "name": "default.total_match_count",
+                "value": "16"
+              },
+              {
+                "name": "membership_change",
+                "value": "16"
+              },
+              {
+                "name": "runtime.load_success",
+                "value": "1"
+              },
+              {
+                "name": "runtime.override_dir_not_exists",
+                "value": "1"
+              },
+              {
+                "name": "upstream_cx_http1_total",
+                "value": "434"
+              },
+              {
+                "name": "upstream_cx_rx_bytes_total",
+                "value": "19250454"
+              },
+              {
+                "name": "upstream_cx_total",
+                "value": "434"
+              },
+              {
+                "name": "upstream_cx_tx_bytes_total",
+                "value": "14411520"
+              },
+              {
+                "name": "upstream_rq_pending_total",
+                "value": "434"
+              },
+              {
+                "name": "upstream_rq_total",
+                "value": "103680"
+              }
+            ],
+            "execution_duration": "10.000016879s",
+            "name": "global",
+            "statistics": [
+              {
+                "count": "103403",
+                "id": "benchmark_http_client.request_to_response",
+                "max": "0.059359231s",
+                "mean": "0.011900174s",
+                "min": "0.002590336s",
+                "percentiles": [
+                  {
+                    "count": "51704",
+                    "duration": "0.010359295s",
+                    "percentile": 0.5
+                  },
+                  {
+                    "count": "93064",
+                    "duration": "0.018761727s",
+                    "percentile": 0.9
+                  },
+                  {
+                    "count": "98233",
+                    "duration": "0.024434687s",
+                    "percentile": 0.95
+                  },
+                  {
+                    "count": "102434",
+                    "duration": "0.035926015s",
+                    "percentile": 0.990625
+                  }
+                ],
+                "pstdev": "0.005905834s"
+              }
+            ]
+          }
+        ]
+      },
+      "start_time": "2026-10-01T04:04:01.823Z"
+    }
+  ],
+  "session_status": {},
+  "testing_stage_result": {
+    "end_time": "2026-10-01T04:05:21.312Z",
+    "metric_evaluations": [
+      {
+        "metric_id": "nighthawk.builtin/success-rate",
+        "metric_value": 0.999906185300207,
+        "threshold_score": 1.0,
+        "weight": 1.0
+      },
+      {
+        "metric_id": "nighthawk.builtin/send-rate",
+        "metric_value": 1.0,
+        "threshold_score": 1.0,
+        "weight": 1.0
+      },
+      {
+        "metric_id": "nighthawk.builtin/latency-ns-mean-plus-2stdev",
+        "metric_value": 29041507.0,
+        "threshold_score": -1.0,
+        "weight": 1.0
+      },
+      {
+        "metric_id": "nighthawk.builtin/attempted-rps",
+        "metric_value": 10304.0
+      },
+      {
+        "metric_id": "nighthawk.builtin/achieved-rps",
+        "metric_value": 10304.0
+      },
+      {
+        "metric_id": "nighthawk.builtin/send-rate",
+        "metric_value": 1.0
+      },
+      {
+        "metric_id": "nighthawk.builtin/latency-ns-mean",
+        "metric_value": 11395829.0
+      },
+      {
+        "metric_id": "nighthawk.builtin/latency-ns-mean-plus-2stdev",
+        "metric_value": 29041507.0
+      }
+    ],
+    "nighthawk_service_output": {
+      "options": {
+        "concurrency": "16",
+        "requests_per_second": 644
+      },
+      "results": [
+        {
+          "counters": [
+            {
+              "name": "benchmark.http_2xx",
+              "value": "618182"
+            },
+            {
+              "name": "cluster_manager.cluster_added",
+              "value": "16"
+            },
+            {
+              "name": "default.total_match_count",
+              "value": "16"
+            },
+            {
+              "name": "membership_change",
+              "value": "16"
+            },
+            {
+              "name": "runtime.load_success",
+              "value": "1"
+            },
+            {
+              "name": "runtime.override_dir_not_exists",
+              "value": "1"
+            },
+            {
+              "name": "upstream_cx_http1_total",
+              "value": "930"
+            },
+            {
+              "name": "upstream_cx_rx_bytes_total",
+              "value": "115077373"
+            },
+            {
+              "name": "upstream_cx_total",
+              "value": "930"
+            },
+            {
+              "name": "upstream_cx_tx_bytes_total",
+              "value": "85935360"
+            },
+            {
+              "name": "upstream_rq_pending_total",
+              "value": "930"
+            },
+            {
+              "name": "upstream_rq_total",
+              "value": "618240"
+            }
+          ],
+          "execution_duration": "60.000014355s",
+          "name": "global",
+          "statistics": [
+            {
+              "count": "618182",
+              "id": "benchmark_http_client.request_to_response",
+              "max": "0.141254655s",
+              "mean": "0.011395829s",
+              "min": "0.001961088s",
+              "percentiles": [
+                {
+                  "count": "309116",
+                  "duration": "0.009504767s",
+                  "percentile": 0.5
+                },
+                {
+                  "count": "556366",
+                  "duration": "0.016508415s",
+                  "percentile": 0.9
+                },
+                {
+                  "count": "587276",
+                  "duration": "0.021440511s",
+                  "percentile": 0.95
+                },
+                {
+                  "count": "612388",
+                  "duration": "0.061063167s",
+                  "percentile": 0.990625
+                }
+              ],
+              "pstdev": "0.008822839s"
+            }
+          ]
+        }
+      ]
+    },
+    "start_time": "2026-10-01T04:04:19.012Z"
+  }
+}
