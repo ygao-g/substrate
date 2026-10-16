@@ -121,3 +121,8 @@ func (h *Histogram) Mean() time.Duration {
 func (h *Histogram) Max() time.Duration {
 	return time.Duration(h.MaxMicros) * time.Microsecond
 }
+
+func (h Histogram) clone() Histogram {
+	h.Counts = slices.Clone(h.Counts)
+	return h
+}
