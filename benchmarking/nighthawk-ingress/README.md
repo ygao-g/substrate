@@ -141,7 +141,7 @@ Then each benchmark run is one command, ~8–10 min:
    `capacity.json`.
 
 Flags: `--envoy-cpu`, `--actors`, `--tail-latency-slo-ms`, `--atespace`,
-`--dest` (see
+`--dest`, `--sample-resources` (see
 `--help`). It needs a running Docker daemon and gcloud/kubectl credentials.
 
 Notes:
@@ -167,6 +167,147 @@ Start with `capacity.json`, drill into `stats.jsonl`:
 | `results.json` | full session, 1:1 with Nighthawk's output |
 | `spec.textproto`, `output.textproto` | exact Nighthawk input/output, for reproducibility |
 | `status.json`, `logs.txt` | run metadata + process logs |
+| `resources.jsonl`, `resources-by-stage.json`, `envoy-stats.jsonl` | only with `--sample-resources`; see "Resource usage" below |
+
+## Resource usage
+
+Three tools put CPU and memory next to `stats.jsonl`. All three write the
+`stats.jsonl` envelope (`timestamp`, `tag`, `test_name`, `metric`,
+`measurements`) and need only the Python standard library. Their tests are
+`unittest` cases: `python3 -m unittest discover -s tests` runs them, but
+silently skips the directory's older pytest-style `test_output.py` and
+`test_spec.py`. `python3 -m pytest tests` runs all of them.
+
+A sample covers the window `(timestamp - window_s, timestamp]` and counts
+toward every stage that window overlaps. `resources-by-stage.json` gives
+mean, max, p95 and `n` per stage and container. For router containers
+it adds `cpu_fraction_of_pin`, which is `cpu_cores / --envoy-cpu`.
+
+`null` means no sample reached that stage and container. A missing source
+reads as `null`, never as zero. `missing` lists containers that produced
+no sample at all.
+
+### During a run: `resource_sampler.py` and `--sample-resources`
+
+This is the only source of router CPU and memory on the benchmark
+cluster today. `runner.py --sample-resources [--sample-interval 2]` polls
+each relevant node's kubelet cAdvisor endpoint through the API server,
+`/api/v1/nodes/<node>/proxy/metrics/cadvisor`, and writes
+`resources.jsonl` and `resources-by-stage.json` to the work dir, which
+the upload step copies next to `stats.jsonl`. It samples:
+
+- router: `ate-system`, `app=atenet-router`, containers `envoy` and
+  `atenet-router`;
+- runner: `benchmarking`, `app=substrate-benchmark-runner`, container
+  `runner`, narrowed to the runner's own pod via `HOSTNAME`;
+- workers: `benchmark-workloads`, `ate.dev/worker-pool`, container `ateom`.
+
+Per container it records `cpu_cores`, the rate of
+`cpu_usage_seconds_total` between two cAdvisor readings,
+`cfs_throttled_ratio`, `working_set_bytes` and `rss_bytes`. Each target
+pod also gets a `POD` row with pod network and PSI. The flag is off by
+default. Standalone, with the caller's kubeconfig:
+
+```
+python3 resource_sampler.py --duration 60 --interval 2 --out /tmp/rs \
+  [--stats stats.jsonl] [--envoy-cpu 2] [--context <ctx>] \
+  [--target component=namespace:selector[:c1,c2]]
+```
+
+The runner's ServiceAccount needs `nodes/proxy` get cluster-wide and
+`pods` list in `ate-system`, `benchmarking` and `benchmark-workloads`.
+`resource-sampler-rbac.yaml` grants both; apply it after those namespaces
+exist. The orchestrator does not apply it. `nodes/proxy` reaches every
+kubelet endpoint, including exec, so grant it only on
+benchmark clusters.
+
+Limits:
+
+- The sampler keeps the series `benchmarking/monitoring.yaml` keeps. Like
+  that config, it drops `cpu_usage_seconds_total` and
+  `memory_working_set_bytes` on the pod cgroup row, `container=""`. That
+  row is the sum of the containers, and keeping both double counts.
+- cAdvisor refreshes each container every 10 to 20 s, whatever the poll
+  interval. A poll that finds no new reading writes no value for it, and
+  a rate's `window_s` is the real gap between cAdvisor readings. Expect
+  roughly one CPU point per 10 s stage.
+- CFS throttling appears only for containers with a CPU limit. A
+  BestEffort router has no `cfs_throttled_ratio`.
+- Actors run inside the worker's `ateom` container, so a worker row
+  covers every actor on that worker.
+
+### After a run: `fetch_run_resources.py`
+
+```
+SSL_CERT_FILE=/etc/ssl/cert.pem python3 fetch_run_resources.py \
+  gs://<bucket>/runs/<name>/run_date=.../run_ts=.../run_tag=<sha> \
+  --project <project> --cluster <cluster> --envoy-cpu 2 --out /tmp/res
+```
+
+`--project` and `--cluster` default to `PROJECT_ID` and `CLUSTER_NAME`
+from the environment, so `source .ate-dev-env.sh` covers both. The
+tool reads `stats.jsonl` and queries Managed Prometheus for the run's
+time range. By default it fetches what the benchmark cluster exports today:
+
+- `ate.actor.stats.*` from the run's atelet pods, matched by the commit
+  sha in the tag or named with `--atelet`: actor CPU,
+  working set and sampled actor count, summed per atelet pod;
+- router request rate from `atenet.router.route.duration`, for the
+  `atenet-router-*` pod on the same nodes as those atelet pods.
+
+Two Substrate installs can report under one cluster label, so the tool
+picks the run's pods by name, never by cluster alone. `--system-metrics`
+adds `kubernetes.io/container/*` queries for router, runner and worker
+containers. They return nothing until the cluster exports GKE system
+metrics.
+`queries` in `resources-by-stage.json` records every query with its
+series count or error.
+
+The caller needs `roles/monitoring.viewer` on the project and
+`storage.objects.get` on the bucket. The token comes from `--token-file`,
+`GOOGLE_OAUTH_ACCESS_TOKEN`, or
+`gcloud auth application-default print-access-token`. The python.org
+build of Python ships no CA bundle, hence `SSL_CERT_FILE`.
+
+Limits:
+
+- Points are 60 s rates, and stages last about 10 s. One point spans
+  several stages, so per-stage values are smeared and `n` is often 1
+  or 2.
+- Monitoring keeps data for six weeks.
+- Actor stats are per atelet pod, the sum of the actors it hosts, not
+  per actor.
+
+### Envoy admin stats: `envoy_stats.py`
+
+With `--sample-resources`, the runner also snapshots the router's Envoy
+`/stats` before and after the session into `envoy-stats.jsonl`. It keeps
+`server.memory_*`, `server.worker_*`, `cluster.*.upstream_cx_total`,
+`http.*.downstream_rq_*` and `listener.*.downstream_cx_*`. Subtract
+`before` from `after` for session counters.
+
+```
+python3 envoy_stats.py --via proxy --label now --out envoy-stats.jsonl [--context <ctx>]
+```
+
+The admin port is 9901 on the pod IP. The `atenet-router` Service does
+not expose it, so a Service address cannot reach it.
+
+- `--via direct` is the runner default. It reads pod IPs from the
+  `atenet-router` EndpointSlices, which Role `atelet-endpointslices`
+  already grants the runner. It then GETs `http://<pod IP>:9901/stats`.
+  The runner Job runs in the benchmark cluster, so this needs no new
+  RBAC. It works only while no NetworkPolicy blocks `ate-system` ingress.
+- `--via proxy` goes through the API server:
+  `/api/v1/namespaces/ate-system/pods/<pod>:9901/proxy/stats`. It needs
+  `pods` list and `pods/proxy` get in `ate-system` and works off-cluster.
+
+A Prow job runs outside the benchmark cluster and cannot reach pod IPs.
+It would need `--via proxy` with those two permissions for its
+credentials, or a `9901` port on a Service it can reach.
+
+`stats` is `null`, with `error` set, when a pod's admin port did not
+answer.
 
 ## Tuning
 

@@ -41,7 +41,10 @@ from pathlib import Path
 from typing import IO, TextIO
 
 import actors
+import envoy_stats
+import kubeapi
 import output as output_mod
+import resource_sampler
 import spec as spec_mod
 
 NIGHTHAWK_SERVICE = "nighthawk_service"
@@ -107,6 +110,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--router-url", default=DEFAULT_ROUTER_URL, dest="router_url")
     p.add_argument("--warm-deadline", default="600s", dest="warm_deadline")
     p.add_argument("--atespace", default=actors.ATESPACE)
+    # Off by default: needs resource-sampler-rbac.yaml applied.
+    p.add_argument(
+        "--sample-resources",
+        action="store_true",
+        dest="sample_resources",
+        help="Sample router/runner/worker CPU and memory from cAdvisor and "
+        "snapshot router Envoy admin stats before and after the session",
+    )
+    p.add_argument(
+        "--sample-interval", type=float, default=2, dest="sample_interval"
+    )
     args, extra = p.parse_known_args()
     args.extra = extra
     return args
@@ -226,6 +240,57 @@ def log_run_config(args: argparse.Namespace, prefix: str, logs: TextIO) -> None:
         tee(logs, line)
 
 
+def start_resource_sampling(args, envoy_stats_path: Path, log):
+    """Start the cAdvisor sampler and take the before Envoy snapshot.
+
+    Failures are logged, never raised: sampling must not fail a run.
+    Returns None when no API client can be built.
+    """
+    try:
+        client = kubeapi.default_client()
+    except Exception as e:
+        log(f"Resource sampling disabled: {e}")
+        return None
+    try:
+        envoy_stats.append(
+            client, envoy_stats_path, "before", "direct", args.tag, args.name
+        )
+    except Exception as e:
+        log(f"Envoy stats snapshot failed: {e}")
+    try:
+        sampler = resource_sampler.Sampler(
+            client,
+            resource_sampler.default_targets(os.environ.get("HOSTNAME", "")),
+            interval_s=args.sample_interval,
+            log=log,
+        )
+        sampler.start()
+    except Exception as e:
+        log(f"Resource sampling disabled: {e}")
+        return None
+    log(f"Resource sampling every {args.sample_interval}s")
+    return sampler
+
+
+def stop_resource_sampling(sampler, args, envoy_stats_path: Path, log) -> None:
+    sampler.stop()
+    log(
+        f"Resource sampling stopped: {len(sampler.samples)} samples, "
+        f"{sampler.errors} errors"
+    )
+    try:
+        envoy_stats.append(
+            kubeapi.default_client(),
+            envoy_stats_path,
+            "after",
+            "direct",
+            args.tag,
+            args.name,
+        )
+    except Exception as e:
+        log(f"Envoy stats snapshot failed: {e}")
+
+
 def main() -> None:
     args = parse_args()
     now = datetime.now(timezone.utc)
@@ -245,11 +310,13 @@ def main() -> None:
     stats_path = work_dir / "stats.jsonl"
     capacity_path = work_dir / "capacity.json"
     status_path = work_dir / "status.json"
+    envoy_stats_path = work_dir / "envoy-stats.jsonl"
 
     adaptive_exit: int | None = None
     testing_stage_parsed = False
     actor_names: list[str] = []
     service_proc = None
+    sampler = None
 
     with open(logs_path, "w") as logs:
         log_run_config(args, prefix, logs)
@@ -298,7 +365,15 @@ def main() -> None:
             tee(logs, f"Wrote spec to {spec_path}")
 
             service_proc = start_service(logs)
+            if args.sample_resources:
+                sampler = start_resource_sampling(
+                    args, envoy_stats_path, lambda m: tee(logs, m)
+                )
             adaptive_exit = run_adaptive_client(spec_path, output_path, logs)
+            if sampler is not None:
+                stop_resource_sampling(
+                    sampler, args, envoy_stats_path, lambda m: tee(logs, m)
+                )
             tee(logs, f"{ADAPTIVE_CLIENT} exited with code {adaptive_exit}")
 
             if output_path.exists():
@@ -332,6 +407,20 @@ def main() -> None:
         except Exception as e:
             tee(logs, f"Run failed: {e}")
         finally:
+            if sampler is not None:
+                # Idempotent; covers a run that failed mid-session.
+                sampler.stop()
+                try:
+                    resource_sampler.write_outputs(
+                        sampler.snapshot(),
+                        work_dir,
+                        stats_path,
+                        args.envoy_cpu,
+                        args.tag,
+                        args.name,
+                    )
+                except Exception as e:
+                    tee(logs, f"Writing resource samples failed: {e}")
             if service_proc is not None:
                 service_proc.terminate()
                 try:
@@ -367,6 +456,9 @@ def main() -> None:
         (results_path, "results.json"),
         (stats_path, "stats.jsonl"),
         (capacity_path, "capacity.json"),
+        (work_dir / "resources.jsonl", "resources.jsonl"),
+        (work_dir / "resources-by-stage.json", "resources-by-stage.json"),
+        (envoy_stats_path, "envoy-stats.jsonl"),
     ]
     for src, basename in files:
         if not src.exists():
