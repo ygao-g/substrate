@@ -42,6 +42,8 @@ happened; the target is the endpoint every tunnel leads to.`,
 		// Nobody types these commands often enough to want shell completion.
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 	}
+	root.AddCommand(actorCommand())
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := root.ExecuteContext(ctx); err != nil {
