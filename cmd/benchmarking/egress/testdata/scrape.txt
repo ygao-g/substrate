@@ -1,0 +1,27 @@
+connections_opened_total COUNTER {}
+dns_seconds HISTOGRAM {}
+endpoint_longest_gap_seconds GAUGE {endpoint=0}
+endpoint_longest_gap_seconds GAUGE {endpoint=1}
+endpoint_longest_gap_seconds GAUGE {endpoint=2}
+endpoint_longest_gap_seconds GAUGE {endpoint=3}
+endpoint_requests_total COUNTER {endpoint=0,result=error}
+endpoint_requests_total COUNTER {endpoint=0,result=success}
+endpoint_requests_total COUNTER {endpoint=1,result=error}
+endpoint_requests_total COUNTER {endpoint=1,result=success}
+endpoint_requests_total COUNTER {endpoint=2,result=error}
+endpoint_requests_total COUNTER {endpoint=2,result=success}
+endpoint_requests_total COUNTER {endpoint=3,result=error}
+endpoint_requests_total COUNTER {endpoint=3,result=success}
+endpoints_opened_total COUNTER {}
+latency_seconds HISTOGRAM {}
+longest_gap_seconds GAUGE {}
+loop_elapsed_seconds GAUGE {}
+loop_info GAUGE {scheme=https}
+opening_done_seconds GAUGE {}
+opening_seconds HISTOGRAM {}
+request_errors_total COUNTER {class=HTTP 503}
+request_errors_total COUNTER {class=timeout}
+requests_total COUNTER {result=error}
+requests_total COUNTER {result=success}
+rounds GAUGE {}
+tls_seconds HISTOGRAM {}
