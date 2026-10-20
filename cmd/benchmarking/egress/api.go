@@ -16,13 +16,18 @@ package main
 
 import "fmt"
 
-// Routes the actor serves on port 80, the only inbound port of a sandbox.
+// Control routes the actor serves on port 80, the only inbound port of a
+// sandbox; metricsRoute, the exposition, is defined with its families.
 const (
 	readyzRoute = "/readyz"
 	startRoute  = "/start"
-	statsRoute  = "/stats"
 	stopRoute   = "/stop"
 )
+
+// noLoopMessage is the body of the 404 that /metrics and /stop answer while
+// no loop runs. A driver tells a fresh actor from one built before the
+// exposition by it: the old image's /metrics is a plain 404.
+const noLoopMessage = "no loop is running"
 
 // defaultRequestTimeoutMs applies when startRequest.RequestTimeoutMs is zero.
 const defaultRequestTimeoutMs = 5000

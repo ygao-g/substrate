@@ -64,7 +64,7 @@ flowchart LR
 ```
 
 - **`benchmark-egress actor`** runs inside each Actor. The driver controls it
-  through the atenet router on port 80: `/readyz`, `/start`, `/stats`, `/stop`.
+  through the atenet router on port 80: `/readyz`, `/start`, `/metrics`, `/stop`.
   Once started, it holds one CONNECT tunnel per endpoint through the gateway
   and sends a `GET` on each at a fixed pace. The actor's egress policy must
   name every endpoint hostname. Section 3 has the workflow.
@@ -84,8 +84,8 @@ flowchart LR
   HTTPS certificate for `*.egress-tests-targets.svc.cluster.local` from a
   throwaway CA that is name-constrained to
   `egress-tests-targets.svc.cluster.local`.
-- **Driver.** Sets up the run, starts the A actors, posts `/start`, polls
-  `/stats` and the gateway's stats, and merges the reports into the results of
+- **Driver.** Sets up the run, starts the A actors, posts `/start`, scrapes
+  `/metrics` and the gateway's stats, and sums the scrapes into the results of
   section 5.
 
 ## 3. What the actor does
@@ -101,23 +101,24 @@ a JSON body:
 | `requestTimeoutMs` | Bound on one request, handshake included; zero means 5000. |
 
 `/start` answers 204, 400 for a body it rejects, or 409 while a loop is
-already running. `/stats` and `/stop` answer 404 when no loop is running.
+already running. `/metrics` and `/stop` answer 404 when no loop is running.
 
 The loop then runs one goroutine per endpoint:
 
 1. Wait *i* × interval, so C handshakes do not reach the gateway at once.
 2. Send the first `GET` to the endpoint. When it completes, success or not, the
    endpoint counts as opened. When the last endpoint opens, the actor stamps
-   `openingDone`.
+   `opening_done_seconds`.
 3. Send one `GET` per period on a ticker started when the open starts. At most
    one request is in flight per endpoint. A request that outlasts the period
    delays only its own endpoint, whose next request starts as soon as the slow
    one returns.
-4. Stop on `POST /stop`, which waits for every goroutine and returns the final
-   report. A request cut off by the stop is not counted.
+4. Stop on `POST /stop`, which waits for every goroutine and answers 204. The
+   driver scrapes `/metrics` once more before it stops. A request cut off by
+   the stop is not counted.
 
 The client keeps one connection per endpoint and never closes it for idling,
-so a redial in `newConns` means the gateway cut the tunnel or a request on it
+so a redial in `connections_opened_total` means the gateway cut the tunnel or a request on it
 timed out. The gateway resets a tunnel that stays quiet for its stream idle
 timeout, 5 minutes by default, so keep the per-endpoint period, C ×
 `intervalMs` between two requests on the same endpoint, under it.
@@ -127,54 +128,64 @@ and holds C tunnels.
 
 ## 4. What the actor reports
 
-`GET /stats` returns the counts so far; `POST /stop` returns the final set. All
-counts are cumulative since `/start`. `elapsed`, `openingDone` and
-`longestGap` are nanoseconds; histogram values are microseconds.
+`GET /metrics` serves the loop's instruments as a Prometheus exposition, text
+or protobuf by `Accept`. Counters are cumulative since `/start`; durations are
+seconds. The per-endpoint families are served only when the scrape asks for
+them, `GET /metrics?endpoints=1`, since at C = 1024 they outweigh the rest of
+the scrape six to one.
 
-| Field | What it counts | Used for |
-|---|---|---|
-| `scheme`, `elapsed` | The scheme in use and the time since `/start`. | Rates between two polls. |
-| `requests`, `successes` | Requests finished, failed ones included; HTTP 200 with no error is a success. | Request rate and success rate. |
-| `newConns` | Requests sent on a freshly dialed connection. | One per endpoint is the tunnel. Any more is a reconnect after the gateway cut a tunnel or a request on it timed out. |
-| `opened` | Endpoints whose first request has completed. | Progress of this actor's opens. |
-| `openingDone` | `elapsed` when the last endpoint opened; zero until then. | Added to this actor's `/start` time, the latest across actors ends the blended window. |
-| `rounds` | Requests completed by the least-visited endpoint. | Two means every tunnel has been reused. |
-| `longestGap` | Longest time between two consecutive requests on one endpoint. | Whether any tunnel went quiet long enough to be reset. |
-| `opening` | Histogram of successful first requests. | Tunnel setup latency as the actor sees it, apart from the steady state. |
-| `latency` | Histogram of successful repeat requests. | Settled quantiles, no handshakes in them. |
-| `dns`, `tls` | Histograms of lookup and handshake times, when the request did one. | Setup costs. |
-| `errors` | Failures by class, such as `timeout`, `connection reset`, `HTTP 403`. Absent when nothing has failed. | One class per failure mode. |
-| `endpoints[i]` | Per-endpoint `requests`, `errors`, `longestGap`. | Naming a quiet or failing tunnel. |
+| Family | Type, labels | What it counts | Used for |
+|---|---|---|---|
+| `loop_info` | gauge, `scheme` | Always 1. | The scheme in use. |
+| `loop_elapsed_seconds` | gauge | Time since `/start`, set when scraped. | Rates between two polls. |
+| `requests_total` | counter, `result` = `success` or `error` | Requests finished; HTTP 200 with no error is a success. | Request rate and success rate. |
+| `request_errors_total` | counter, `class` | Failures by class, such as `timeout`, `connection reset`, `HTTP 403`; one series per class seen. | One class per failure mode. |
+| `connections_opened_total` | counter | Requests sent on a freshly dialed connection. | One per endpoint is the tunnel. Any more is a reconnect after the gateway cut a tunnel or a request on it timed out. |
+| `endpoints_opened_total` | counter | Endpoints whose first request has completed. | Progress of this actor's opens. |
+| `opening_done_seconds` | gauge | Elapsed time when the last endpoint opened; zero until then. | Added to this actor's `/start` time, the latest across actors ends the blended window. |
+| `rounds` | gauge | Requests completed by the least-visited endpoint. | Two means every tunnel has been reused. |
+| `longest_gap_seconds` | gauge | Longest time between two consecutive requests on one endpoint. | Whether any tunnel went quiet long enough to be reset. |
+| `opening_seconds` | histogram | Successful first requests. | Tunnel setup latency as the actor sees it, apart from the steady state. |
+| `latency_seconds` | histogram | Successful repeat requests. | Settled quantiles, no handshakes in them. |
+| `dns_seconds`, `tls_seconds` | histogram | Lookup and handshake times, when the request did one. | Setup costs. |
+| `endpoint_requests_total` | counter, `endpoint`, `result` | Per-endpoint requests and failures. `?endpoints=1` only. | Naming a failing tunnel. |
+| `endpoint_longest_gap_seconds` | gauge, `endpoint` | Per-endpoint longest gap. `?endpoints=1` only. | Naming a quiet tunnel. |
 
-Each histogram is `bounds`, `counts`, `count`, `sumMicros` and `maxMicros`, in
-microseconds; one with no samples has no `bounds` and no `counts`. The bounds
-are fixed, 20 per decade from 1 µs to the first bound past 60 s, plus an
-overflow bucket, so reports from any number of actors add bucket by bucket and
-a quantile read from the sum is within about 12% of the true value.
+Counters and gauges are present at zero from the first scrape; a histogram
+appears with its first sample. The four histograms share one set of bounds, 20
+per decade from 1 µs to 60 s, 157 `le` labels plus `+Inf`, so scrapes from any
+number of actors add bucket by bucket and a quantile read from the sum is
+within about 12% of the true value. A Prometheus histogram carries a count and
+a sum but no maximum, so the report has no run maximum.
 
 ## 5. What a run aggregates
 
 The driver is the next PR. This section is the contract it implements.
 
-The driver merges the actors' reports and pairs them with the gateway's own
-metrics. Per actor field, the merge rule is:
+The driver scrapes every actor's `/metrics`, protobuf requested, and pairs the
+sum with the gateway's own metrics. Per family, the rule is:
 
-| Rule | Fields |
+| Rule | Families |
 |---|---|
-| sum | `requests`, `successes`, `newConns`, `opened`, `rounds`, each `errors` class, each `endpoints[i].requests` and `.errors` |
-| max | `elapsed`, `openingDone`, `longestGap`, each `endpoints[i].longestGap` |
-| bucket-wise add | `opening`, `latency`, `dns`, `tls` |
-| first non-empty | `scheme` |
+| sum, per label set | `requests_total`, `request_errors_total`, `connections_opened_total`, `endpoints_opened_total`, `rounds`, `endpoint_requests_total` |
+| max | `loop_elapsed_seconds`, `opening_done_seconds`, `longest_gap_seconds`, `endpoint_longest_gap_seconds` |
+| bucket-wise add | `opening_seconds`, `latency_seconds`, `dns_seconds`, `tls_seconds`: every `le` bucket, the count and the sum |
+| first | `loop_info` |
 
-A merge is refused, and the receiver left untouched, when a histogram's bucket
-counts do not fit its bounds, or when two non-empty histograms carry different
-bounds. An empty receiver takes the other side's bounds.
+A scrape whose histogram carries `le` labels other than the fixed bounds is
+refused, naming the actor, and the sum is left untouched. A protobuf scrape
+omits the `+Inf` bucket; its count is the sample count. A quantile is read from
+the summed buckets as the upper bound of the bucket that holds the rank; a rank
+past the last finite bound reads as over 60 s. A windowed figure is a later
+scrape minus an earlier one, bucket by bucket. A count that went down means the
+actor restarted, so that window is dropped and the next starts from the later
+scrape.
 
 The results of a cell come from two windows. The blended window runs from the
-first `/start` to the latest `openingDone`, each actor's offset by its own
+first `/start` to the latest `opening_done_seconds`, each actor's offset by its own
 `/start` time. The settled window starts once every actor has opened, every
-actor's `rounds` has reached two, checked per actor before the merge, and
-`newConns` is flat between two polls. Two actors and three endpoints, 100 ms
+actor's `rounds` has reached two, checked per actor before the sum, and
+`connections_opened_total` is flat between two polls. Two actors and three endpoints, 100 ms
 apart, with actor 2 started 100 ms later and its third open slow:
 
 ```mermaid
@@ -203,7 +214,7 @@ sequenceDiagram
     A2->>S0: repeat (t=400ms)
     A1->>S2: repeat (t=500ms)
     A2->>S1: repeat (t=500ms)
-    S2-->>-A2: latest openingDone (t=520ms)
+    S2-->>-A2: latest opening_done_seconds (t=520ms)
   end
   Note over A1,S2: Settled Phase (Post-Blended Window)
   A2->>S2: repeat (t=600ms)
@@ -225,6 +236,6 @@ setups.
 | Settled req/s per gateway core | actors + gateway | Requests completed in the settled window divided by the gateway pod's CPU-seconds in the same window: the kubelet's cAdvisor metric `container_cpu_usage_seconds_total`, summed over the envoy, ext-proc and sdsmint containers. |
 | Gateway CPU per tunnel opened | actors + gateway | The blended window's gateway CPU, minus every request in it priced at the settled per-request cost, divided by the tunnels opened. What remains is setup alone, independent of pacing, on the assumption that a request on an open tunnel costs the same in either window. Computed after the settled window, since it needs the settled rate. |
 | Envoy heap | gateway | The maximum of `server.memory_allocated` in the cell; per-tunnel cost is the slope across fleet sizes. |
-| Settled p50, p99, p99.9 | actors | Read from the difference between two polls of the summed `latency` histogram. |
-| Success rate | actors | `successes` over `requests` for the period. |
-| Run validity | actors + gateway | `newConns` equals `opened` and stays flat, `longestGap` stays under the stream idle timeout, `cluster.mitm_internal.upstream_cx_total` equals A × C and stays flat, and `http.egress_connect.downstream_rq_idle_timeout`, `downstream_cx_idle_timeout` and `downstream_cx_protocol_error` do not move. |
+| Settled p50, p99, p99.9 | actors | Read from the difference between two polls of the summed `latency_seconds` histogram. |
+| Success rate | actors | `requests_total{result="success"}` over all of `requests_total` for the period. |
+| Run validity | actors + gateway | `connections_opened_total` equals `endpoints_opened_total` and stays flat, `longest_gap_seconds` stays under the stream idle timeout, `cluster.mitm_internal.upstream_cx_total` equals A × C and stays flat, and `http.egress_connect.downstream_rq_idle_timeout`, `downstream_cx_idle_timeout` and `downstream_cx_protocol_error` do not move. |

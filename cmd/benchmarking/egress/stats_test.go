@@ -18,128 +18,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 )
-
-func TestStatsMergeAndJSON(t *testing.T) {
-	a := &stats{
-		Elapsed:     time.Minute,
-		Requests:    10,
-		Successes:   9,
-		NewConns:    2,
-		Opened:      2,
-		OpeningDone: 3 * time.Second,
-		Rounds:      1,
-		LongestGap:  time.Second,
-		Errors:      map[string]int64{"timeout": 1},
-		Endpoints:   []endpoint{{Requests: 5}, {Requests: 5, Errors: 1, LongestGap: 2 * time.Second}},
-	}
-	a.Latency = recorded(t, time.Millisecond)
-	a.Opening = recorded(t, 2*time.Millisecond)
-	b := &stats{
-		Scheme:      schemeHTTPS,
-		Elapsed:     2 * time.Minute,
-		Requests:    6,
-		Successes:   4,
-		Opened:      3,
-		OpeningDone: time.Second,
-		Rounds:      4,
-		LongestGap:  2 * time.Second,
-		Errors:      map[string]int64{"timeout": 1, "HTTP 503": 1},
-		Endpoints:   []endpoint{{Requests: 2}, {Requests: 2, LongestGap: 3 * time.Second}, {Requests: 2, Errors: 2}},
-	}
-	b.DNS = recorded(t, time.Millisecond)
-	b.TLS = recorded(t, 3*time.Millisecond)
-
-	var got stats
-	if err := got.merge(a); err != nil {
-		t.Fatal(err)
-	}
-	if err := got.merge(b); err != nil {
-		t.Fatal(err)
-	}
-	if got.Elapsed != 2*time.Minute || got.Requests != 16 || got.Successes != 13 || got.NewConns != 2 || got.Opened != 5 ||
-		got.OpeningDone != 3*time.Second || got.Rounds != 5 || got.LongestGap != 2*time.Second {
-		t.Errorf("merged totals = %+v", got)
-	}
-	if got.Errors["timeout"] != 2 || got.Errors["HTTP 503"] != 1 {
-		t.Errorf("merged errors = %v", got.Errors)
-	}
-	wantEndpoints := []endpoint{{Requests: 7}, {Requests: 7, Errors: 1, LongestGap: 3 * time.Second}, {Requests: 2, Errors: 2}}
-	if fmt.Sprint(got.Endpoints) != fmt.Sprint(wantEndpoints) {
-		t.Errorf("merged endpoints = %v, want %v", got.Endpoints, wantEndpoints)
-	}
-	if got.Latency.Count != 1 || got.Opening.Count != 1 || got.DNS.Count != 1 || got.TLS.Count != 1 {
-		t.Errorf("merged histograms: latency %d, opening %d, dns %d, tls %d samples; want 1 each", got.Latency.Count, got.Opening.Count, got.DNS.Count, got.TLS.Count)
-	}
-	if got.Scheme != schemeHTTPS {
-		t.Errorf("merged scheme = %q, want %q from the stats that set one", got.Scheme, schemeHTTPS)
-	}
-
-	raw, err := json.Marshal(&got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var back stats
-	if err := json.Unmarshal(raw, &back); err != nil {
-		t.Fatal(err)
-	}
-	if back.Latency.quantile(0.5) != got.Latency.quantile(0.5) || back.Opening.Count != 1 || back.TLS.Count != 1 || back.Scheme != schemeHTTPS ||
-		back.Requests != got.Requests || back.Rounds != 5 || back.OpeningDone != 3*time.Second || back.Errors["HTTP 503"] != 1 ||
-		back.Endpoints[1].LongestGap != 3*time.Second {
-		t.Errorf("JSON round trip lost data: %s", raw)
-	}
-}
-
-func TestStatsMergeRefusesMismatchedHistograms(t *testing.T) {
-	got := stats{Latency: recorded(t, time.Millisecond)}
-	bad := &stats{Requests: 5, Successes: 5}
-	bad.TLS.Count = 5 // counts missing, as a report with omitted buckets has
-	err := got.merge(bad)
-	if err == nil || !strings.Contains(err.Error(), "tls") {
-		t.Fatalf("merge() = %v, want an error naming the tls histogram", err)
-	}
-	if got.Requests != 0 || got.Latency.Count != 1 || got.TLS.Count != 0 {
-		t.Errorf("a refused merge changed the receiver: %+v", got)
-	}
-}
-
-func TestStatsCloneIsDeep(t *testing.T) {
-	s := &stats{Errors: map[string]int64{"EOF": 1}, Endpoints: []endpoint{{Requests: 1, LongestGap: time.Second}}}
-	s.Latency = recorded(t, time.Millisecond)
-	s.Opening = recorded(t, time.Millisecond)
-	s.TLS = recorded(t, time.Millisecond)
-	c := s.clone()
-	c.Errors["EOF"]++
-	c.Endpoints[0].Requests++
-	c.Endpoints[0].LongestGap++
-	for _, h := range []*histogram{&c.Latency, &c.Opening, &c.TLS} {
-		if err := h.merge(recorded(t, time.Millisecond)); err != nil {
-			t.Fatal(err)
-		}
-		h.Bounds[0]++
-	}
-	if s.Errors["EOF"] != 1 || s.Endpoints[0].Requests != 1 || s.Endpoints[0].LongestGap != time.Second ||
-		s.Latency.Count != 1 || s.Opening.Count != 1 || s.TLS.Count != 1 || s.Latency.Bounds[0] != bucketBounds[0] {
-		t.Errorf("mutating the clone changed the original: %+v", s)
-	}
-	var sum uint64
-	for _, n := range s.Latency.BucketCounts {
-		sum += n
-	}
-	if sum != 1 {
-		t.Errorf("original latency buckets hold %d samples after mutating the clone, want 1", sum)
-	}
-}
 
 type timeoutErr struct{}
 

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -134,44 +135,30 @@ func get(h http.Handler, path string) *httptest.ResponseRecorder {
 	return rec
 }
 
-// runLoop starts a loop with req, lets it run until cond holds on the live
-// stats (or fails after 10s), then stops it and returns the final stats.
-func runLoop(t *testing.T, h http.Handler, req startRequest, cond func(*stats) bool) *stats {
+// runLoop starts a loop with req, lets it run until cond holds on a live
+// scrape (or fails after 10s), then stops it and returns the last scrape
+// before the stop, as the driver reads it.
+func runLoop(t *testing.T, h http.Handler, req startRequest, cond func(*loopView) bool) *loopView {
 	t.Helper()
 	if rec := post(t, h, startRoute, req); rec.Code != http.StatusNoContent {
 		t.Fatalf("POST /start = %d %s", rec.Code, rec.Body)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		rec := get(h, statsRoute)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("GET /stats = %d %s", rec.Code, rec.Body)
-		}
-		var s stats
-		if err := json.Unmarshal(rec.Body.Bytes(), &s); err != nil {
-			t.Fatal(err)
-		}
-		if cond(&s) {
+		s := scrapeView(t, h)
+		if cond(s) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("condition not reached; last stats %+v", s)
+			t.Fatalf("condition not reached; last scrape %+v", s)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	rec := post(t, h, stopRoute, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /stop = %d %s", rec.Code, rec.Body)
-	}
-	var final stats
-	if err := json.Unmarshal(rec.Body.Bytes(), &final); err != nil {
-		t.Fatal(err)
-	}
-	return &final
+	return stopLoop(t, h)
 }
 
-func atLeast(n int64) func(*stats) bool {
-	return func(s *stats) bool { return s.Requests >= n }
+func atLeast(n int64) func(*loopView) bool {
+	return func(s *loopView) bool { return s.Requests >= n }
 }
 
 func TestKeepAliveReusesOneConnectionPerEndpoint(t *testing.T) {
@@ -183,7 +170,7 @@ func TestKeepAliveReusesOneConnectionPerEndpoint(t *testing.T) {
 	}
 	h := serve(hosts...)
 
-	s := runLoop(t, h, startRequest{Endpoints: len(hosts)}, func(s *stats) bool { return s.Rounds >= 10 })
+	s := runLoop(t, h, startRequest{Endpoints: len(hosts)}, func(s *loopView) bool { return s.Rounds >= 10 })
 	if s.Scheme != schemeHTTP || s.TLS.Count != 0 {
 		t.Errorf("a start with no scheme ran over %q with %d TLS handshakes, want http with none", s.Scheme, s.TLS.Count)
 	}
@@ -218,7 +205,7 @@ func TestEveryEndpointIsOpenedAndRevisited(t *testing.T) {
 	}
 	h := serve(hosts...)
 
-	s := runLoop(t, h, startRequest{Endpoints: len(hosts), IntervalMs: 2}, func(s *stats) bool { return s.Rounds >= 2 })
+	s := runLoop(t, h, startRequest{Endpoints: len(hosts), IntervalMs: 2}, func(s *loopView) bool { return s.Rounds >= 2 })
 
 	if s.Opened != int64(len(hosts)) {
 		t.Errorf("Opened = %d, want %d", s.Opened, len(hosts))
@@ -247,7 +234,7 @@ func TestStopDuringOpeningDoesNotCountTheCancelledOpen(t *testing.T) {
 	})
 	h := serve(first.host(), blocked.host())
 
-	s := runLoop(t, h, startRequest{Endpoints: 2}, func(s *stats) bool { return s.Opened >= 1 })
+	s := runLoop(t, h, startRequest{Endpoints: 2}, func(s *loopView) bool { return s.Opened >= 1 })
 	if s.Opened != 1 {
 		t.Errorf("Opened = %d after stopping during the second open, want 1", s.Opened)
 	}
@@ -354,19 +341,31 @@ func TestStartStopLifecycle(t *testing.T) {
 	h := serve(tg.host())
 	req := startRequest{Endpoints: 1}
 
-	if rec := get(h, statsRoute); rec.Code != http.StatusNotFound {
-		t.Errorf("GET /stats before start = %d, want 404", rec.Code)
+	if rec := get(h, metricsRoute); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /metrics before start = %d, want 404", rec.Code)
 	}
 	if rec := post(t, h, stopRoute, nil); rec.Code != http.StatusNotFound {
 		t.Errorf("POST /stop before start = %d, want 404", rec.Code)
 	}
 
-	first := runLoop(t, h, req, atLeast(5))
+	if rec := post(t, h, startRoute, req); rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /start = %d %s", rec.Code, rec.Body)
+	}
+	for deadline := time.Now().Add(10 * time.Second); scrapeView(t, h).Requests < 5; {
+		if time.Now().After(deadline) {
+			t.Fatal("the loop did not reach 5 requests")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if rec := post(t, h, stopRoute, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /stop = %d %s", rec.Code, rec.Body)
+	}
+	atStop := tg.requests.Load()
 	time.Sleep(20 * time.Millisecond)
 	// A request the stop cut short can still reach the target after /stop
 	// returns; nothing else may.
-	if extra := tg.requests.Load() - first.Requests; extra > 1 {
-		t.Errorf("target got %d requests the stopped loop did not count, want at most the one cut short by the stop", extra)
+	if extra := tg.requests.Load() - atStop; extra > 1 {
+		t.Errorf("target got %d requests after the stop, want at most the one it cut short", extra)
 	}
 
 	if rec := post(t, h, startRoute, req); rec.Code != http.StatusNoContent {
@@ -375,15 +374,14 @@ func TestStartStopLifecycle(t *testing.T) {
 	if rec := post(t, h, startRoute, req); rec.Code != http.StatusConflict {
 		t.Errorf("second /start while running = %d, want 409", rec.Code)
 	}
-	rec := post(t, h, stopRoute, nil)
-	var second stats
-	if err := json.Unmarshal(rec.Body.Bytes(), &second); err != nil {
-		t.Fatal(err)
+	second := scrapeView(t, h)
+	if rec := post(t, h, stopRoute, nil); rec.Code != http.StatusNoContent {
+		t.Errorf("stop after restart = %d, want 204", rec.Code)
 	}
 	// The target saw every request of both runs (plus any cut short by a
 	// stop), so a second run that started from zero counts no more than the
 	// target saw after the first run.
-	if sinceRestart := tg.requests.Load() - first.Requests; second.Requests > sinceRestart {
+	if sinceRestart := tg.requests.Load() - atStop; second.Requests > sinceRestart {
 		t.Errorf("restarted loop counted %d requests, more than the %d sent since the restart: the old counts were kept", second.Requests, sinceRestart)
 	}
 }
@@ -607,7 +605,7 @@ func TestEndpointsByNameOverBothSchemes(t *testing.T) {
 
 			const interval = 2 * time.Millisecond
 			st := runLoop(t, h, startRequest{Endpoints: c, Scheme: scheme, IntervalMs: int64(interval / time.Millisecond)},
-				func(s *stats) bool { return s.Rounds >= 3 })
+				func(s *loopView) bool { return s.Rounds >= 3 })
 
 			if st.Opened != c || st.Rounds < 3 {
 				t.Errorf("Opened = %d, Rounds = %d, want %d and at least 3", st.Opened, st.Rounds, c)
@@ -655,7 +653,7 @@ func TestResetConnectionIsRedialedWithoutAnError(t *testing.T) {
 	steady := []*target{newTarget(t, okHandler), newTarget(t, okHandler)}
 	h := serve(steady[0].host(), cut.host(), steady[1].host())
 
-	s := runLoop(t, h, startRequest{Endpoints: 3, IntervalMs: 2}, func(s *stats) bool { return s.Rounds >= 2 })
+	s := runLoop(t, h, startRequest{Endpoints: 3, IntervalMs: 2}, func(s *loopView) bool { return s.Rounds >= 2 })
 
 	if s.Successes != s.Requests || len(s.Errors) != 0 {
 		t.Errorf("successes %d of %d requests, errors %v; want the reset absorbed", s.Successes, s.Requests, s.Errors)
@@ -722,7 +720,7 @@ func (pipeAddr) String() string  { return "pipe" }
 // startPipeLoop serves the actor over pn, with endpoint i named endpoint-i,
 // and starts a loop with req. It returns the handler and a stats reader that
 // waits for the bubble to settle first.
-func startPipeLoop(t *testing.T, pn *pipeNet, req startRequest) (http.Handler, func() *stats) {
+func startPipeLoop(t *testing.T, pn *pipeNet, req startRequest) (http.Handler, func() *loopView) {
 	t.Helper()
 	s := newServer()
 	s.dial = pn.dial
@@ -731,27 +729,21 @@ func startPipeLoop(t *testing.T, pn *pipeNet, req startRequest) (http.Handler, f
 	if rec := post(t, h, startRoute, req); rec.Code != http.StatusNoContent {
 		t.Fatalf("POST /start = %d %s", rec.Code, rec.Body)
 	}
-	return h, func() *stats {
+	return h, func() *loopView {
 		synctest.Wait()
-		var st stats
-		if err := json.Unmarshal(get(h, statsRoute).Body.Bytes(), &st); err != nil {
-			t.Fatal(err)
-		}
-		return &st
+		return scrapeView(t, h)
 	}
 }
 
-func stopLoop(t *testing.T, h http.Handler) *stats {
+// stopLoop scrapes the loop one last time, with the endpoint families, then
+// stops it, in the order the driver does.
+func stopLoop(t *testing.T, h http.Handler) *loopView {
 	t.Helper()
-	rec := post(t, h, stopRoute, nil)
-	if rec.Code != http.StatusOK {
+	st := scrapeView(t, h)
+	if rec := post(t, h, stopRoute, nil); rec.Code != http.StatusNoContent {
 		t.Fatalf("POST /stop = %d %s", rec.Code, rec.Body)
 	}
-	var st stats
-	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
-		t.Fatal(err)
-	}
-	return &st
+	return st
 }
 
 // TestPacingAndGapsAreExact runs the loop on a fake clock with instant
@@ -893,8 +885,8 @@ func TestSlowOpensDoNotDelayOpenedEndpoints(t *testing.T) {
 				t.Errorf("endpoint %d: longest gap %v, want its own open latency (%v)", i, got, openLatency)
 			}
 		}
-		if st.LongestGap != openLatency || st.Opening.Count != c || st.Opening.max() != openLatency {
-			t.Errorf("LongestGap = %v, opening samples %d with max %v; want %v, %d and %v", st.LongestGap, st.Opening.Count, st.Opening.max(), openLatency, c, openLatency)
+		if st.LongestGap != openLatency || st.Opening.Count != c || st.Opening.bucketOf(boundAtOrAbove(openLatency)) != c {
+			t.Errorf("LongestGap = %v, opening samples %d, %d of them at or under %v; want %v, %d and all of them", st.LongestGap, st.Opening.Count, st.Opening.bucketOf(boundAtOrAbove(openLatency)), openLatency, openLatency, c)
 		}
 		stopLoop(t, h)
 	})
@@ -958,8 +950,93 @@ func TestStopWithRequestsInFlightReturnsAtOnce(t *testing.T) {
 		if st.Requests != 0 || st.Opened != 0 {
 			t.Errorf("Requests = %d, Opened = %d after stopping mid-open, want 0 and 0", st.Requests, st.Opened)
 		}
-		if rec := get(h, statsRoute); rec.Code != http.StatusNotFound {
-			t.Errorf("GET /stats after stop = %d, want 404", rec.Code)
+		if rec := get(h, metricsRoute); rec.Code != http.StatusNotFound {
+			t.Errorf("GET /metrics after stop = %d, want 404", rec.Code)
 		}
 	})
+}
+
+func TestStatsGoneStopIs204(t *testing.T) {
+	tg := newTarget(t, okHandler)
+	s := newServer()
+	s.endpointURL = func(int, string) string { return "http://" + tg.host() + "/" }
+	h := s.handler()
+	if rec := get(h, "/stats"); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /stats = %d, want 404", rec.Code)
+	}
+	if rec := get(h, metricsRoute); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /metrics with no loop = %d, want 404", rec.Code)
+	}
+	if rec := post(t, h, startRoute, startRequest{Endpoints: 1}); rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /start = %d %s", rec.Code, rec.Body)
+	}
+	if rec := post(t, h, stopRoute, nil); rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+		t.Errorf("POST /stop = %d with %d body bytes, want 204 and no body", rec.Code, rec.Body.Len())
+	}
+	if rec := get(h, metricsRoute); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /metrics after stop = %d, want 404", rec.Code)
+	}
+	if rec := post(t, h, stopRoute, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("second POST /stop = %d, want 404", rec.Code)
+	}
+}
+
+func TestFreshRegistryPerLoop(t *testing.T) {
+	tg := newTarget(t, okHandler)
+	s := newServer()
+	s.endpointURL = func(int, string) string { return "http://" + tg.host() + "/" }
+	h := s.handler()
+	first := runLoop(t, h, startRequest{Endpoints: 2}, atLeast(10))
+	if first.Requests < 10 {
+		t.Fatalf("first loop made %d requests, want at least 10", first.Requests)
+	}
+	// A new loop starts from zero: scrape it before its first interval.
+	if rec := post(t, h, startRoute, startRequest{Endpoints: 2, IntervalMs: 60_000}); rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /start = %d %s", rec.Code, rec.Body)
+	}
+	second := scrapeView(t, h)
+	if second.Requests > 1 || second.Opened > 1 {
+		t.Errorf("second loop's first scrape: %d requests, %d opened; want a fresh registry", second.Requests, second.Opened)
+	}
+	post(t, h, stopRoute, nil)
+}
+
+func TestScrapeInvariantUnderRace(t *testing.T) {
+	tg := newTarget(t, okHandler)
+	s := newServer()
+	s.endpointURL = func(int, string) string { return "http://" + tg.host() + "/" }
+	h := s.handler()
+	if rec := post(t, h, startRoute, startRequest{Endpoints: 8}); rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /start = %d %s", rec.Code, rec.Body)
+	}
+	var wg sync.WaitGroup
+	var bad atomic.Int64
+	for range 4 {
+		wg.Go(func() {
+			for range 50 {
+				v := scrapeView(t, h)
+				if int64(v.Opening.Count+v.Latency.Count) != v.Successes {
+					bad.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	final := stopLoop(t, h)
+	if bad.Load() > 0 {
+		t.Errorf("%d scrapes broke opening+latency = successes", bad.Load())
+	}
+	if int64(final.Opening.Count+final.Latency.Count) != final.Successes || final.Successes == 0 {
+		t.Errorf("final: opening %d + latency %d != successes %d", final.Opening.Count, final.Latency.Count, final.Successes)
+	}
+}
+
+// boundAtOrAbove is the first bucket bound at or above d, the bucket d lands in.
+func boundAtOrAbove(d time.Duration) float64 {
+	for _, b := range bucketBounds {
+		if b >= d.Seconds() {
+			return b
+		}
+	}
+	return math.Inf(1)
 }

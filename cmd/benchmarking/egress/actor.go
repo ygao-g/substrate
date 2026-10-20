@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -107,7 +108,7 @@ func (s *server) handler() http.Handler {
 		w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("POST "+startRoute, s.handleStart)
-	mux.HandleFunc("GET "+statsRoute, s.handleStats)
+	mux.HandleFunc("GET "+metricsRoute, s.handleMetrics)
 	mux.HandleFunc("POST "+stopRoute, s.handleStop)
 	return mux
 }
@@ -142,20 +143,15 @@ func (s *server) handleStart(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	run := s.run
 	s.mu.Unlock()
 	if run == nil {
-		http.Error(w, "no loop is running", http.StatusNotFound)
+		http.Error(w, noLoopMessage, http.StatusNotFound)
 		return
 	}
-	st, err := run.snapshot(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, st)
+	run.serveMetrics(w, r)
 }
 
 func (s *server) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -163,36 +159,53 @@ func (s *server) handleStop(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.run == nil {
-		http.Error(w, "no loop is running", http.StatusNotFound)
+		http.Error(w, noLoopMessage, http.StatusNotFound)
 		return
 	}
-	final, err := s.run.stop(r.Context())
+	err := s.run.stop(r.Context())
 	s.run = nil
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, final)
+	w.WriteHeader(http.StatusNoContent)
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
-}
-
-// loopRun is one started loop and what it has measured.
+// loopRun is one started loop. What it measures lives in its instruments;
+// it keeps only what the next measurement needs.
 type loopRun struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup // one goroutine per endpoint
 	started   time.Time
 	transport *http.Transport
-	inst      *latencyInstruments
+	metrics   *loopMetrics
 
 	mu sync.Mutex
-	// stats holds every count but the histograms, which inst holds until
-	// snapshot reads them.
-	stats stats
-	last  []time.Time // start of each endpoint's most recent request
+	// requests counts each endpoint's finished requests, for rounds and to
+	// tell an endpoint's first request from its repeats.
+	requests []int64
+	opened   int
+	// longestGap and gaps hold the longest gap seen overall and per
+	// endpoint, so the gauges only ever move up.
+	longestGap time.Duration
+	gaps       []time.Duration
+	last       []time.Time // start of each endpoint's most recent request
+}
+
+// newLoopRun is a loop over c endpoints with fresh instruments and no
+// goroutines yet; startLoop runs it.
+func newLoopRun(c int, scheme string) (*loopRun, error) {
+	m, err := newLoopMetrics(c, scheme)
+	if err != nil {
+		return nil, err
+	}
+	return &loopRun{
+		started:  time.Now(),
+		metrics:  m,
+		requests: make([]int64, c),
+		gaps:     make([]time.Duration, c),
+		last:     make([]time.Time, c),
+	}, nil
 }
 
 func startLoop(req startRequest, urls []string, roots *x509.CertPool, dial dialFunc) (*loopRun, error) {
@@ -200,20 +213,12 @@ func startLoop(req startRequest, urls []string, roots *x509.CertPool, dial dialF
 	if timeoutMs == 0 {
 		timeoutMs = defaultRequestTimeoutMs
 	}
-	inst, err := newLatencyInstruments()
+	r, err := newLoopRun(len(urls), req.urlScheme())
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &loopRun{
-		cancel:    cancel,
-		started:   time.Now(),
-		transport: newTransport(req.NewConnPerRequest, roots, dial),
-		inst:      inst,
-	}
-	r.stats.Scheme = req.urlScheme()
-	r.stats.Endpoints = make([]endpoint, len(urls))
-	r.last = make([]time.Time, len(urls))
+	r.cancel, r.transport = cancel, newTransport(req.NewConnPerRequest, roots, dial)
 	client := &http.Client{
 		Transport: r.transport,
 		// Count a redirect as the endpoint's answer rather than following it
@@ -277,9 +282,10 @@ func (r *loopRun) endpoint(ctx context.Context, client *http.Client, i int, u st
 		return // stopped mid-open: not an open
 	}
 	r.mu.Lock()
-	r.stats.Opened++
-	if r.stats.Opened == int64(len(r.stats.Endpoints)) {
-		r.stats.OpeningDone = time.Since(r.started)
+	r.opened++
+	r.metrics.endpointsOpened.Add(context.Background(), 1)
+	if r.opened == len(r.requests) {
+		r.metrics.openingDone.Record(context.Background(), time.Since(r.started).Seconds())
 	}
 	r.mu.Unlock()
 	for ctx.Err() == nil {
@@ -369,8 +375,14 @@ func (r *loopRun) request(ctx context.Context, client *http.Client, i int, u str
 	r.mu.Lock()
 	if last := r.last[i]; !last.IsZero() {
 		gap := start.Sub(last)
-		r.stats.LongestGap = max(r.stats.LongestGap, gap)
-		r.stats.Endpoints[i].LongestGap = max(r.stats.Endpoints[i].LongestGap, gap)
+		if gap > r.longestGap {
+			r.longestGap = gap
+			r.metrics.longestGap.Record(ctx, gap.Seconds())
+		}
+		if gap > r.gaps[i] {
+			r.gaps[i] = gap
+			r.metrics.endpointLongestGap.Record(ctx, gap.Seconds(), r.metrics.endpointOnly[i])
+		}
 	}
 	r.last[i] = start
 	r.mu.Unlock()
@@ -398,18 +410,17 @@ func (r *loopRun) record(i int, latency time.Duration, status int, err error, tr
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	s := &r.stats
-	first := s.Endpoints[i].Requests == 0
-	s.Requests++
-	s.Endpoints[i].Requests++
+	m, ctx := r.metrics, context.Background()
+	first := r.requests[i] == 0
+	r.requests[i]++
 	if newConn {
-		s.NewConns++
+		m.connectionsOpened.Add(ctx, 1)
 	}
 	if didDNS {
-		observe(r.inst.dns, dns)
+		m.dns.Record(ctx, dns.Seconds())
 	}
 	if didTLS {
-		observe(r.inst.tls, tlsTime)
+		m.tls.Record(ctx, tlsTime.Seconds())
 	}
 	class := classify(err, status)
 	if class != "" && tlsStarted && !didTLS && !strings.HasPrefix(class, "tls: ") {
@@ -419,49 +430,55 @@ func (r *loopRun) record(i int, latency time.Duration, status int, err error, tr
 		class = "tls handshake: " + class
 	}
 	if class == "" {
-		s.Successes++
+		m.requests.Add(ctx, 1, m.success)
+		m.endpointRequests.Add(ctx, 1, m.endpointResult[i][0])
 		if first {
-			observe(r.inst.opening, latency)
+			m.opening.Record(ctx, latency.Seconds())
 		} else {
-			observe(r.inst.latency, latency)
+			m.latency.Record(ctx, latency.Seconds())
 		}
 		return
 	}
-	if s.Errors == nil {
-		s.Errors = make(map[string]int64)
-	}
-	s.Errors[class]++
-	s.Endpoints[i].Errors++
+	m.requests.Add(ctx, 1, m.failure)
+	m.requestErrors.Add(ctx, 1, m.class(class))
+	m.endpointRequests.Add(ctx, 1, m.endpointResult[i][1])
 }
 
-// snapshot returns a copy of the stats so far, histograms included. The
-// lock is held across the collect so the histograms agree with the counts.
-func (r *loopRun) snapshot(ctx context.Context) (*stats, error) {
+// serveMetrics answers GET /metrics: the loop's families, plus the
+// per-endpoint ones with ?endpoints=1. The gauges that are derived rather
+// than recorded are set first, under the lock, which is held for the gather
+// only, never for the write.
+func (r *loopRun) serveMetrics(w http.ResponseWriter, req *http.Request) {
+	withEndpoints := req.URL.Query().Get("endpoints") == "1"
+	ctx := context.Background()
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	hs, err := r.inst.collect(ctx)
+	rounds := int64(0)
+	if len(r.requests) > 0 {
+		rounds = slices.Min(r.requests)
+	}
+	r.metrics.rounds.Record(ctx, rounds)
+	r.metrics.elapsed.Record(ctx, time.Since(r.started).Seconds())
+	mfs, err := r.metrics.gather(withEndpoints)
+	r.mu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("collecting the latency histograms: %w", err)
+		http.Error(w, "gathering metrics: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
-	s := r.stats.clone()
-	s.Opening, s.Latency, s.DNS, s.TLS = hs[openingInstrument], hs[latencyInstrument], hs[dnsInstrument], hs[tlsInstrument]
-	s.Elapsed = time.Since(r.started)
-	s.Rounds = s.Endpoints[0].Requests
-	for _, e := range s.Endpoints[1:] {
-		s.Rounds = min(s.Rounds, e.Requests)
-	}
-	return s, nil
+	writeExposition(w, req, mfs)
 }
 
 // stop cancels the loop, waits for every endpoint's goroutine to exit, and
-// returns the final stats.
-func (r *loopRun) stop(ctx context.Context) (*stats, error) {
-	r.cancel()
+// releases its instruments.
+func (r *loopRun) stop(ctx context.Context) error {
+	if r.cancel != nil {
+		r.cancel()
+	}
 	r.wg.Wait()
-	r.transport.CloseIdleConnections()
-	s, err := r.snapshot(ctx)
-	// Nothing is attached to the provider, so there is nothing to flush and
+	if r.transport != nil {
+		r.transport.CloseIdleConnections()
+	}
+	// Nothing is attached to the providers, so there is nothing to flush and
 	// a failed shutdown loses nothing.
-	_ = r.inst.shutdown(ctx)
-	return s, err
+	_ = r.metrics.shutdown(ctx)
+	return nil
 }

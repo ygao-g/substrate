@@ -16,223 +16,413 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"flag"
+	"fmt"
 	"maps"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel/metric"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 )
 
-// recorded returns the histogram of ds, recorded through a fresh instrument
-// and read back through its reader.
-func recorded(t *testing.T, ds ...time.Duration) histogram {
+var updateGolden = flag.Bool("update", false, "rewrite testdata goldens")
+
+// scrape GETs the exposition in the text format and parses it. withEndpoints
+// asks for the per-endpoint families.
+func scrape(t *testing.T, h http.Handler, withEndpoints bool) map[string]*dto.MetricFamily {
 	t.Helper()
-	li, err := newLatencyInstruments()
+	rec := getText(h, metricsPath(withEndpoints))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d %s", metricsPath(withEndpoints), rec.Code, rec.Body)
+	}
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	fams, err := parser.TextToMetricFamilies(rec.Body)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("parsing the exposition: %v\n%s", err, rec.Body)
 	}
-	defer li.shutdown(context.Background())
-	for _, d := range ds {
-		observe(li.latency, d)
-	}
-	hs, err := li.collect(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return hs[latencyInstrument]
+	return fams
 }
 
-// withinBucket reports whether got is no lower than want and at most one
-// bucket width (~12%) above it.
-func withinBucket(got, want time.Duration) bool {
-	return got >= want && float64(got) <= float64(want)*1.13
+// scrapeProto is scrape over the protobuf encoding.
+func scrapeProto(t *testing.T, h http.Handler, withEndpoints bool) map[string]*dto.MetricFamily {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, metricsPath(withEndpoints), nil)
+	req.Header.Set("Accept", string(expfmt.NewFormat(expfmt.TypeProtoDelim)))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s (protobuf) = %d %s", metricsPath(withEndpoints), rec.Code, rec.Body)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/vnd.google.protobuf") {
+		t.Fatalf("protobuf scrape answered Content-Type %q", ct)
+	}
+	fams, err := decodeFamilies(rec.Body, expfmt.ResponseFormat(rec.Header()))
+	if err != nil {
+		t.Fatalf("decoding the protobuf exposition: %v", err)
+	}
+	return fams
 }
 
-func TestHistogramQuantiles(t *testing.T) {
-	// 1ms, 2ms, ..., 1000ms: the q-th quantile is q*1000ms.
-	var ds []time.Duration
-	for i := 1; i <= 1000; i++ {
-		ds = append(ds, time.Duration(i)*time.Millisecond)
+// getText GETs path from h in the text format.
+func getText(h http.Handler, path string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec
+}
+
+func metricsPath(withEndpoints bool) string {
+	if withEndpoints {
+		return metricsRoute + "?endpoints=1"
 	}
-	h := recorded(t, ds...)
-	for _, tc := range []struct {
-		q    float64
-		want time.Duration
-	}{
-		{0.5, 500 * time.Millisecond},
-		{0.9, 900 * time.Millisecond},
-		{0.99, 990 * time.Millisecond},
-	} {
-		if got := h.quantile(tc.q); !withinBucket(got, tc.want) {
-			t.Errorf("quantile(%v) = %v, want within one bucket above %v", tc.q, got, tc.want)
+	return metricsRoute
+}
+
+// loopView is what the old JSON body carried, read back from a scrape, so the
+// loop tests keep their assertions.
+type loopView struct {
+	Scheme                                string
+	Elapsed, OpeningDone, LongestGap      time.Duration
+	Requests, Successes, NewConns, Opened int64
+	Rounds                                int64
+	Errors                                map[string]int64
+	Endpoints                             []endpointView
+	Opening, Latency, DNS, TLS            histView
+}
+
+type endpointView struct {
+	Requests, Errors int64
+	LongestGap       time.Duration
+}
+
+// histView is one histogram family's single data point.
+type histView struct {
+	Count   uint64
+	Sum     float64 // seconds
+	Buckets []*dto.Bucket
+}
+
+// bucketOf returns the cumulative count of the bucket with upper bound le;
+// the +Inf bucket is the sample count.
+func (h histView) bucketOf(le float64) uint64 {
+	if math.IsInf(le, 1) {
+		return h.Count
+	}
+	for _, b := range h.Buckets {
+		if b.GetUpperBound() == le {
+			return b.GetCumulativeCount()
 		}
 	}
-	if got := h.quantile(1); got != time.Second {
-		t.Errorf("quantile(1) = %v, want the max sample 1s", got)
-	}
-	if got, want := h.mean(), 500500*time.Microsecond; got != want {
-		t.Errorf("mean() = %v, want %v", got, want)
-	}
-	if h.Count != 1000 {
-		t.Errorf("Count = %d, want 1000", h.Count)
-	}
+	return 0
 }
 
-func TestCollectKeysByInstrumentName(t *testing.T) {
-	li, err := newLatencyInstruments()
+func labelValue(m *dto.Metric, name string) string {
+	for _, l := range m.GetLabel() {
+		if l.GetName() == name {
+			return l.GetValue()
+		}
+	}
+	return ""
+}
+
+func viewOf(t *testing.T, fams map[string]*dto.MetricFamily) *loopView {
+	t.Helper()
+	v := &loopView{Errors: map[string]int64{}}
+	counter := func(name string) int64 {
+		var n int64
+		for _, m := range fams[name].GetMetric() {
+			n += int64(m.GetCounter().GetValue())
+		}
+		return n
+	}
+	gauge := func(name string) float64 {
+		ms := fams[name].GetMetric()
+		if len(ms) == 0 {
+			return 0
+		}
+		return ms[0].GetGauge().GetValue()
+	}
+	secs := func(f float64) time.Duration { return time.Duration(math.Round(f * 1e9)) }
+	hist := func(name string) histView {
+		ms := fams[name].GetMetric()
+		if len(ms) == 0 {
+			return histView{}
+		}
+		h := ms[0].GetHistogram()
+		// The text encoding spells the +Inf bucket out and the protobuf one
+		// leaves it to sample_count; the view keeps the finite buckets only.
+		buckets := slices.DeleteFunc(slices.Clone(h.GetBucket()), func(b *dto.Bucket) bool { return math.IsInf(b.GetUpperBound(), 1) })
+		return histView{Count: h.GetSampleCount(), Sum: h.GetSampleSum(), Buckets: buckets}
+	}
+	for _, m := range fams[famRequests].GetMetric() {
+		n := int64(m.GetCounter().GetValue())
+		v.Requests += n
+		if labelValue(m, "result") == "success" {
+			v.Successes += n
+		}
+	}
+	for _, m := range fams[famRequestErrors].GetMetric() {
+		v.Errors[labelValue(m, "class")] += int64(m.GetCounter().GetValue())
+	}
+	if len(v.Errors) == 0 {
+		v.Errors = nil
+	}
+	v.NewConns, v.Opened = counter(famConnectionsOpened), counter(famEndpointsOpened)
+	v.Rounds = int64(gauge(famRounds))
+	v.OpeningDone, v.LongestGap, v.Elapsed = secs(gauge(famOpeningDone)), secs(gauge(famLongestGap)), secs(gauge(famElapsed))
+	if ms := fams[famLoopInfo].GetMetric(); len(ms) > 0 {
+		v.Scheme = labelValue(ms[0], "scheme")
+	}
+	v.Opening, v.Latency, v.DNS, v.TLS = hist(famOpening), hist(famLatency), hist(famDNS), hist(famTLS)
+	if reqs := fams[famEndpointRequests]; reqs != nil {
+		for _, m := range reqs.GetMetric() {
+			i, err := strconv.Atoi(labelValue(m, "endpoint"))
+			if err != nil {
+				t.Fatalf("endpoint label %q: %v", labelValue(m, "endpoint"), err)
+			}
+			for len(v.Endpoints) <= i {
+				v.Endpoints = append(v.Endpoints, endpointView{})
+			}
+			n := int64(m.GetCounter().GetValue())
+			v.Endpoints[i].Requests += n
+			if labelValue(m, "result") == "error" {
+				v.Endpoints[i].Errors += n
+			}
+		}
+		for _, m := range fams[famEndpointLongestGap].GetMetric() {
+			i, _ := strconv.Atoi(labelValue(m, "endpoint"))
+			if i < len(v.Endpoints) {
+				v.Endpoints[i].LongestGap = secs(m.GetGauge().GetValue())
+			}
+		}
+	}
+	return v
+}
+
+// scrapeView is viewOf(scrape()), with the endpoint families.
+func scrapeView(t *testing.T, h http.Handler) *loopView {
+	t.Helper()
+	return viewOf(t, scrape(t, h, true))
+}
+
+// metricsHandlerOf serves one scrape of m, as the loop's handler does once
+// it has set the derived gauges.
+func metricsHandlerOf(m *loopMetrics) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mfs, err := m.gather(r.URL.Query().Get("endpoints") == "1")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeExposition(w, r, mfs)
+	})
+}
+
+// scriptedMetrics records a fixed sequence on fresh instruments, so a scrape
+// has a known shape: 60 requests over c endpoints, each endpoint opened with
+// a lookup and a handshake, a few 503s and timeouts.
+func scriptedMetrics(t *testing.T, c int) *loopMetrics {
+	t.Helper()
+	m, err := newLoopMetrics(c, "https")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer li.shutdown(context.Background())
-	for _, h := range []metric.Float64Histogram{li.opening, li.latency, li.dns, li.tls} {
-		observe(h, time.Millisecond)
-	}
-	hs, err := li.collect(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{openingInstrument, latencyInstrument, dnsInstrument, tlsInstrument} {
-		if hs[name].Count != 1 {
-			t.Errorf("collect()[%q].Count = %d, want 1", name, hs[name].Count)
+	t.Cleanup(func() { m.shutdown(context.Background()) })
+	ctx := context.Background()
+	for n := range 60 {
+		i := n % c
+		if n < c {
+			m.connectionsOpened.Add(ctx, 1)
+			m.dns.Record(ctx, (time.Duration(100+n) * time.Microsecond).Seconds())
+			m.tls.Record(ctx, (time.Duration(5+n) * time.Millisecond).Seconds())
+			m.endpointsOpened.Add(ctx, 1)
+		}
+		latency := (time.Duration(1+n) * time.Millisecond).Seconds()
+		switch class := ""; {
+		case n%17 == 3:
+			class = "HTTP 503"
+			fallthrough
+		case n%23 == 5:
+			if class == "" {
+				class = "timeout"
+			}
+			m.requests.Add(ctx, 1, m.failure)
+			m.requestErrors.Add(ctx, 1, m.class(class))
+			m.endpointRequests.Add(ctx, 1, m.endpointResult[i][1])
+		default:
+			m.requests.Add(ctx, 1, m.success)
+			m.endpointRequests.Add(ctx, 1, m.endpointResult[i][0])
+			if n < c {
+				m.opening.Record(ctx, latency)
+			} else {
+				m.latency.Record(ctx, latency)
+			}
 		}
 	}
-	if len(hs) != 4 {
-		t.Errorf("collect() returned %d histograms, want 4: %v", len(hs), slices.Sorted(maps.Keys(hs)))
-	}
+	m.rounds.Record(ctx, int64(60/c))
+	m.longestGap.Record(ctx, 0.4)
+	m.endpointLongestGap.Record(ctx, 0.4, m.endpointOnly[0])
+	return m
 }
 
-func TestHistogramUsesTheSharedBounds(t *testing.T) {
-	h := recorded(t, time.Millisecond)
-	if !slices.Equal(h.Bounds, bucketBounds) {
-		t.Errorf("Bounds = %v, want bucketBounds", h.Bounds)
-	}
-	if len(h.BucketCounts) != len(bucketBounds)+1 {
-		t.Errorf("%d bucket counts for %d bounds, want one per bound plus overflow", len(h.BucketCounts), len(bucketBounds))
-	}
-	if h.Sum != 1000 || h.Max != 1000 {
-		t.Errorf("Sum = %v, Max = %v for one 1ms sample, want 1000 %s each", h.Sum, h.Max, latencyUnit)
-	}
-}
-
-func TestHistogramEmpty(t *testing.T) {
-	var h histogram
-	if h.quantile(0.5) != 0 || h.mean() != 0 || h.max() != 0 {
-		t.Errorf("empty histogram: quantile=%v mean=%v max=%v, want all 0", h.quantile(0.5), h.mean(), h.max())
-	}
-	if err := h.merge(histogram{}); err != nil {
-		t.Fatal(err)
-	}
-	if h.BucketCounts != nil || h.Bounds != nil {
-		t.Errorf("merging an empty histogram allocated buckets")
-	}
-	if got := recorded(t); !got.empty() {
-		t.Errorf("an instrument with no samples collected %+v, want an empty histogram", got)
-	}
-}
-
-func TestHistogramOverflow(t *testing.T) {
-	h := recorded(t, 2*time.Minute)
-	if got := h.BucketCounts[len(h.BucketCounts)-1]; got != 1 {
-		t.Fatalf("overflow bucket = %d, want 1", got)
-	}
-	if got := h.quantile(0.5); got != 2*time.Minute {
-		t.Errorf("quantile(0.5) = %v, want the overflowed sample 2m", got)
-	}
-}
-
-func TestHistogramMergeMatchesSingleRecorder(t *testing.T) {
-	var evens, odds, every []time.Duration
-	for i := 1; i <= 500; i++ {
-		d := time.Duration(i*i) * time.Microsecond
-		every = append(every, d)
-		if i%2 == 0 {
-			evens = append(evens, d)
-		} else {
-			odds = append(odds, d)
+func TestScrapeGolden(t *testing.T) {
+	fams := scrape(t, metricsHandlerOf(scriptedMetrics(t, 4)), true)
+	var lines []string
+	for _, name := range slices.Sorted(maps.Keys(fams)) {
+		f := fams[name]
+		for _, m := range f.GetMetric() {
+			var labels []string
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "le" {
+					continue
+				}
+				labels = append(labels, l.GetName()+"="+l.GetValue())
+			}
+			lines = append(lines, fmt.Sprintf("%s %s {%s}", name, f.GetType(), strings.Join(labels, ",")))
 		}
 	}
-	all := recorded(t, every...)
-	var merged histogram
-	for _, part := range []histogram{recorded(t, evens...), recorded(t, odds...)} {
-		if err := merged.merge(part); err != nil {
+	got := strings.Join(slices.Compact(lines), "\n") + "\n"
+	path := filepath.Join("testdata", "scrape.txt")
+	if *updateGolden {
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, q := range []float64{0.1, 0.5, 0.9, 0.99, 1} {
-		if merged.quantile(q) != all.quantile(q) {
-			t.Errorf("quantile(%v): merged %v, single recorder %v", q, merged.quantile(q), all.quantile(q))
-		}
-	}
-	if merged.Count != all.Count || merged.Sum != all.Sum || merged.Max != all.Max || !slices.Equal(merged.BucketCounts, all.BucketCounts) {
-		t.Errorf("merged totals %+v differ from %+v", merged, all)
-	}
-}
-
-func TestHistogramMergeRefusesMismatchedBuckets(t *testing.T) {
-	rec := recorded(t, time.Millisecond)
-	decode := func(raw string) histogram {
-		var h histogram
-		if err := json.Unmarshal([]byte(raw), &h); err != nil {
-			t.Fatal(err)
-		}
-		return h
-	}
-	otherBounds := rec.clone()
-	otherBounds.Bounds[0] *= 2
-	for name, tc := range map[string]struct {
-		into histogram
-		from histogram
-	}{
-		"more buckets than bounds": {rec.clone(), decode(`{"counts":[` + repeat("1,", 200) + `1],"count":201}`)},
-		"ours decoded short":       {decode(`{"counts":[1],"count":1}`), rec},
-		"counts missing":           {rec.clone(), histogram{Count: 99}},
-		"other bounds":             {rec.clone(), otherBounds},
-	} {
-		t.Run(name, func(t *testing.T) {
-			before := tc.into.clone()
-			err := tc.into.merge(tc.from)
-			if err == nil {
-				t.Fatalf("merge accepted mismatched buckets: %+v", tc.into)
-			}
-			if tc.into.Count != before.Count || !slices.Equal(tc.into.BucketCounts, before.BucketCounts) {
-				t.Errorf("a refused merge changed the receiver: %+v, was %+v", tc.into, before)
-			}
-		})
-	}
-	var empty histogram
-	if err := empty.merge(histogram{}); err != nil {
-		t.Errorf("merging two empty histograms: %v", err)
-	}
-	if err := empty.merge(rec); err != nil || empty.Count != 1 || !slices.Equal(empty.Bounds, rec.Bounds) {
-		t.Errorf("merging into an empty histogram: %v, %+v", err, empty)
-	}
-}
-
-func TestHistogramJSONRoundTrip(t *testing.T) {
-	rec := recorded(t, time.Microsecond, time.Millisecond, time.Second, 2*time.Minute)
-	raw, err := json.Marshal(rec)
+	want, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var back histogram
-	if err := json.Unmarshal(raw, &back); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(back.Bounds, rec.Bounds) || !slices.Equal(back.BucketCounts, rec.BucketCounts) ||
-		back.Count != rec.Count || back.Sum != rec.Sum || back.Max != rec.Max {
-		t.Errorf("JSON round trip changed the histogram:\n got %+v\nwant %+v", back, rec)
-	}
-	if err := back.merge(rec); err != nil {
-		t.Errorf("a decoded histogram does not merge with the one it was encoded from: %v", err)
+	if got != string(want) {
+		t.Errorf("scrape shape differs from %s (run with -update to accept):\n%s", path, got)
 	}
 }
 
-func repeat(s string, n int) string {
-	out := make([]byte, 0, len(s)*n)
-	for range n {
-		out = append(out, s...)
+func TestOneSampleLandsInOneBucket(t *testing.T) {
+	m, err := newLoopMetrics(1, "http")
+	if err != nil {
+		t.Fatal(err)
 	}
-	return string(out)
+	// 1 ms is a bound: the sample goes in the bucket whose le is 0.001, not
+	// the one above it.
+	m.opening.Record(context.Background(), time.Millisecond.Seconds())
+	v := scrapeView(t, metricsHandlerOf(m))
+	h := v.Opening
+	if h.Count != 1 || h.Sum != 0.001 {
+		t.Fatalf("one 1ms sample: count %d sum %v, want 1 and 0.001", h.Count, h.Sum)
+	}
+	le := bucketBounds[60]
+	if le != 0.001 {
+		t.Fatalf("bucketBounds[60] = %v, want 0.001", le)
+	}
+	if h.bucketOf(le) != 1 || h.bucketOf(bucketBounds[59]) != 0 || h.bucketOf(bucketBounds[61]) != 1 {
+		t.Errorf("buckets around 1ms: le=%v -> %d, le=%v -> %d, le=%v -> %d; want 0, 1, 1",
+			bucketBounds[59], h.bucketOf(bucketBounds[59]), le, h.bucketOf(le), bucketBounds[61], h.bucketOf(bucketBounds[61]))
+	}
+	if got := len(h.Buckets); got != len(bucketBounds) {
+		t.Errorf("%d finite buckets, want %d", got, len(bucketBounds))
+	}
+	if h.bucketOf(math.Inf(1)) != 1 {
+		t.Errorf("+Inf bucket = %d, want the sample count 1", h.bucketOf(math.Inf(1)))
+	}
+}
+
+func TestEmptyLoopExposesCountersAndGaugesAtZero(t *testing.T) {
+	m, err := newLoopMetrics(2, "http")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fams := scrape(t, metricsHandlerOf(m), true)
+	for _, name := range []string{famRequests, famConnectionsOpened, famEndpointsOpened, famOpeningDone, famRounds, famLongestGap, famElapsed, famLoopInfo, famEndpointRequests, famEndpointLongestGap} {
+		if fams[name] == nil {
+			t.Errorf("%s is absent from an empty loop's scrape", name)
+		}
+	}
+	v := viewOf(t, fams)
+	if v.Requests != 0 || v.Successes != 0 || v.NewConns != 0 || v.Opened != 0 || v.Rounds != 0 || v.OpeningDone != 0 || v.LongestGap != 0 || v.Scheme != "http" || len(v.Endpoints) != 2 {
+		t.Errorf("empty loop view = %+v, want zeros, scheme http and 2 endpoints", v)
+	}
+	// Histogram families appear with their first sample: the SDK emits no
+	// data point for an instrument nothing was recorded on.
+	for _, name := range []string{famOpening, famLatency, famDNS, famTLS} {
+		if fams[name] != nil {
+			t.Errorf("%s present before any sample", name)
+		}
+	}
+}
+
+func TestExporterOptionsPinned(t *testing.T) {
+	rec := getText(metricsHandlerOf(scriptedMetrics(t, 2)), metricsPath(true))
+	body := rec.Body.String()
+	for _, bad := range []string{"otel_scope_", "target_info", "otel_scope_info"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("scrape carries %q", bad)
+		}
+	}
+	for _, want := range []string{famRequests + "{", famOpening + "_bucket{", famOpening + "_sum ", famOpening + "_count ", famLongestGap + " ", famEndpointRequests + "{"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "_seconds_seconds") || strings.Contains(body, "_total_total") {
+		t.Errorf("doubled suffix in scrape")
+	}
+}
+
+func TestLeLabelsAreTheBounds(t *testing.T) {
+	rec := getText(metricsHandlerOf(scriptedMetrics(t, 1)), metricsPath(false))
+	var les []string
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if strings.HasPrefix(line, famLatency+"_bucket{le=") {
+			les = append(les, strings.TrimSuffix(strings.TrimPrefix(line, famLatency+"_bucket{le=\""), "\"} "+strings.Fields(line)[1]))
+		}
+	}
+	want := make([]string, 0, len(bucketBounds)+1)
+	for _, b := range bucketBounds {
+		want = append(want, strconv.FormatFloat(b, 'g', -1, 64))
+	}
+	want = append(want, "+Inf")
+	for i := range want {
+		if i >= len(les) || les[i] != want[i] {
+			t.Fatalf("le label %d = %q, want %q (of %d)", i, les, want[i], len(want))
+		}
+	}
+	if len(les) != len(want) {
+		t.Errorf("%d le labels, want %d", len(les), len(want))
+	}
+}
+
+func TestEndpointFamiliesOnlyOnRequest(t *testing.T) {
+	h := metricsHandlerOf(scriptedMetrics(t, 3))
+	plain := scrape(t, h, false)
+	if plain[famEndpointRequests] != nil || plain[famEndpointLongestGap] != nil {
+		t.Errorf("per-endpoint families present without ?endpoints=1")
+	}
+	with := scrape(t, h, true)
+	if n := len(with[famEndpointRequests].GetMetric()); n != 6 {
+		t.Errorf("%d endpoint_requests series, want 3 endpoints x 2 results", n)
+	}
+	if n := len(with[famEndpointLongestGap].GetMetric()); n != 3 {
+		t.Errorf("%d endpoint_longest_gap series, want 3", n)
+	}
+	if plain[famRequests] == nil || with[famRequests] == nil {
+		t.Errorf("requests family missing")
+	}
+}
+
+func TestBothEncodingsAgree(t *testing.T) {
+	h := metricsHandlerOf(scriptedMetrics(t, 3))
+	text, proto := viewOf(t, scrape(t, h, true)), viewOf(t, scrapeProto(t, h, true))
+	text.Elapsed, proto.Elapsed = 0, 0 // the one gauge that moves between two scrapes
+	if fmt.Sprintf("%+v", text) != fmt.Sprintf("%+v", proto) {
+		t.Errorf("text and protobuf scrapes differ:\n%+v\n%+v", text, proto)
+	}
 }
