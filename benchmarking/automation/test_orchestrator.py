@@ -22,6 +22,7 @@ from unittest import mock
 import yaml
 
 import orchestrator
+from testtypes import egress_tunnels
 from testtypes import locust
 
 
@@ -195,7 +196,7 @@ class RunnerNamespaceTest(unittest.TestCase):
 
     def test_namespace_has_api_access_label(self):
         want = self.api_client_labels()
-        for name in ("runner-job.yaml.tmpl", "nighthawk-ingress-runner-job.yaml.tmpl"):
+        for name in ("runner-job.yaml.tmpl", "nighthawk-ingress-runner-job.yaml.tmpl", "egress-tunnels-runner-job.yaml.tmpl"):
             with self.subTest(template=name):
                 text = open(os.path.join(self.HERE, "manifests", name)).read()
                 ns = next(
@@ -320,6 +321,97 @@ class RunMetadataTest(unittest.TestCase):
         text = orchestrator.render_template(RunnerSizingTest.TMPL, subs, ["--metadata", md])
         job = next(d for d in yaml.safe_load_all(text) if d and d.get("kind") == "Job")
         self.assertEqual(job["spec"]["template"]["spec"]["containers"][0]["args"][-1], md)
+
+
+class WorkloadTemplatesTest(unittest.TestCase):
+    """A type's own actor templates reach workloads/deploy.sh through
+    WORKLOAD_TEMPLATES, on top of the script's defaults, for the deploy and
+    the teardown alike; a type without any leaves the environment alone."""
+
+    @mock.patch("orchestrator.run")
+    def test_deploy_passes_the_templates(self, run):
+        orchestrator.deploy_workloads(templates=["egress"])
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(
+            env["WORKLOAD_TEMPLATES"],
+            " ".join([*orchestrator.DEFAULT_WORKLOAD_TEMPLATES, "egress"]),
+        )
+
+    @mock.patch("orchestrator.run_no_check")
+    def test_teardown_passes_the_same_templates(self, run_no_check):
+        orchestrator.teardown_workloads(["egress"])
+        env = run_no_check.call_args.kwargs["env"]
+        self.assertTrue(env["WORKLOAD_TEMPLATES"].endswith(" egress"))
+
+    @mock.patch("orchestrator.run")
+    def test_no_templates_keeps_the_environment(self, run):
+        orchestrator.deploy_workloads()
+        self.assertNotIn("env", run.call_args.kwargs)
+
+    def test_type_hooks_are_optional(self):
+        self.assertEqual(orchestrator.type_templates({"type": "locust"}), [])
+        self.assertEqual(orchestrator.type_templates({"type": "egress-tunnels"}), ["egress"])
+        orchestrator.type_post_test({"type": "locust"})  # no hook, no error
+
+
+class EgressTunnelsTypeTest(unittest.TestCase):
+    TMPL = os.path.join(os.path.dirname(__file__), "manifests", "egress-tunnels-runner-job.yaml.tmpl")
+
+    def entry(self, **block):
+        return {"name": "e", "type": "egress-tunnels", "duration": "5m", "workerCount": 10,
+                "egress-tunnels": block}
+
+    def test_valid_entry(self):
+        egress_tunnels.validate(self.entry(actors=100, parallel=100, endpoints=100))
+
+    def test_rejects(self):
+        for name, test in {
+            "no duration": {"name": "e", "type": "egress-tunnels", "workerCount": 1},
+            "no workerCount": {"name": "e", "type": "egress-tunnels", "duration": "5m"},
+            "unknown knob": self.entry(usage=True),
+            "parallel above actors": self.entry(actors=10, parallel=20),
+            "too many endpoints": self.entry(endpoints=egress_tunnels.MAX_ENDPOINTS + 1),
+            "past the shipped tunnel cap": self.entry(actors=200, parallel=200, endpoints=100),
+            "bad scheme": self.entry(scheme="ftp"),
+            "bad conn mode": self.entry(connMode="pooled"),
+            "bad interval": self.entry(requestInterval="fast"),
+            "bad threshold": self.entry(successRateThreshold=1.5),
+            "negative opens budget": self.entry(opensBudget=-1),
+            "bad atespace": self.entry(atespace="Not_A_Label"),
+        }.items():
+            with self.subTest(name):
+                with self.assertRaises(ValueError):
+                    egress_tunnels.validate(test)
+
+    def test_render_leaves_no_placeholder_and_sizes_the_runner(self):
+        subs = {"JOB_NAME": "j", "IMAGE": "i", "TAG": "t", "NAME": "n", "DEST": "d"}
+        subs.update(egress_tunnels.job_subs(self.entry(scheme="https", runnerCpu="4", opensBudget=1000)))
+        text = orchestrator.render_template(self.TMPL, subs)
+        self.assertNotIn("${", text)
+        job = next(d for d in yaml.safe_load_all(text) if d and d.get("kind") == "Job")
+        container = job["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(container["resources"], {"requests": {"cpu": "4", "memory": "2Gi"}})
+        args = container["args"]
+        self.assertEqual(args[args.index("--scheme") + 1], "https")
+        self.assertEqual(args[args.index("--duration") + 1], "5m")
+        self.assertEqual(args[args.index("--opens-budget") + 1], "1000")
+
+    def test_smoke_entry_sets_an_opens_budget(self):
+        with open(os.path.join(os.path.dirname(__file__), "tests.yaml")) as f:
+            tests = yaml.safe_load(f)["tests"]
+        smoke = next(t for t in tests if t["name"] == "egress_tunnels_smoke_http")
+        egress_tunnels.validate(smoke)
+        self.assertEqual(egress_tunnels.config(smoke)["opensBudget"], 1000)
+
+    @mock.patch("testtypes.egress_tunnels.run")
+    def test_pre_test_deploys_the_endpoints(self, run):
+        egress_tunnels.pre_test(self.entry(endpoints=7, scheme="https"))
+        self.assertEqual(
+            run.call_args.args[0],
+            ["benchmarking/egress-tunnels/deploy.sh", "--deploy", "--endpoints", "7", "--https"],
+        )
+        egress_tunnels.post_test(self.entry())
+        self.assertEqual(run.call_args.args[0], ["benchmarking/egress-tunnels/deploy.sh", "--delete"])
 
 
 if __name__ == "__main__":

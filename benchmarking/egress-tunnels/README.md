@@ -15,10 +15,10 @@ measures how many tunnels a gateway carries and what each one costs.
 
 | Piece | What it is |
 |---|---|
-| `benchmark-egress actor` | The workload, one of the subcommands of `cmd/benchmarking/egress`. `POST /start` starts the loop, `GET /stats` reports progress, `POST /stop` stops the loop and returns its final stats. |
+| `benchmark-egress actor` | The workload, one of the subcommands of `cmd/benchmarking/egress`. `POST /start` starts the loop, `GET /metrics` serves its instruments as a Prometheus exposition, `POST /stop` stops the loop. |
 | `benchmark-egress target` | A small HTTP and HTTPS server. One Deployment of it backs every endpoint Service. |
 | `benchmark-egress driver` | The driver: `run` creates the actors, gives each one an egress policy, resumes B of them, runs the loops, and prints a report; `cleanup` deletes the actors; `certs` issues the target's certificate. |
-| `cmd/benchmarking/egress` | Endpoint naming, the actor's stats and histogram, and the target certificate, shared by the three subcommands of the one binary. |
+| `cmd/benchmarking/egress` | Endpoint naming, the actor's instruments and their bucket bounds, and the target certificate, shared by the three subcommands of the one binary. |
 | `benchmarking/egress-tunnels/deploy.sh` | Deploys the target server, the endpoint Services and, for HTTPS, the gateway trust patch. |
 
 ## Endpoints and the egress policy
@@ -98,6 +98,47 @@ Deploy at least as many endpoints as the largest `--endpoints` you plan to run.
 Size the pool for B running actors. A worker hosts up to `--worker-memory` /
 `--actor-memory` actors, and at most 1000. When the pool is full, `ResumeActor`
 returns ResourceExhausted and the driver keeps retrying until `--resume-timeout`.
+
+## In CI
+
+The benchmark orchestrator (`benchmarking/automation`) runs an entry of
+`type: egress-tunnels` end to end: it installs Substrate on the target
+cluster, deploys the endpoints, adds the `egress` template to the shared pool,
+runs the driver in a Job from the `egress-tunnels-test` image, judges the
+report, and tears everything down. `tests.yaml` carries one smoke entry:
+
+```yaml
+- name: egress_tunnels_smoke_http
+  type: egress-tunnels
+  targetCluster: dev
+  duration: 5m          # the loop time; the orchestrator adds its own margin
+  workerCount: 10       # the parallel actors need somewhere to run
+  egress-tunnels:
+    actors: 100
+    parallel: 100
+    endpoints: 100
+    opensBudget: 1000   # the dev gateway's handshake budget; 100 actors at 100ms ask for exactly that
+```
+
+Knobs of the `egress-tunnels:` block, all optional:
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `actors`, `parallel`, `endpoints` | 100, 100, 100 | A, B and C above. B × C is the tunnel count; the shipped gateway caps it at 16,384 per replica, and the entry is rejected above that. |
+| `scheme` | `http` | `http` or `https`; HTTPS makes the orchestrator patch the gateway's trust. |
+| `connMode` | `keepalive` | `keepalive` or `new-conn`. |
+| `requestInterval`, `requestTimeout` | `100ms`, `5s` | The driver's pacing and timeout. |
+| `opensBudget` | 0 | Opens per second the gateway can handshake, the driver's `--opens-budget`; the run is refused before it creates anything when `parallel` actors at `requestInterval` ask for more. 0 leaves it unchecked. |
+| `successRateThreshold` | 0.999 | The run fails below this fraction of successful requests. |
+| `atespace`, `template` | `benchmark-workloads`, `egress` | Where the actors live. |
+| `runnerCpu`, `runnerMemory` | `2`, `2Gi` | The runner pod's requests. |
+
+The Job runs `runner.py`, which drives the binary with in-cluster addresses
+and a projected ateapi token, writes `status.json` with the verdict, deletes
+the actors, and uploads `status.json`, `report.json` and `logs.txt` to
+`<dest>/runs/<name>/run_date=.../run_ts=.../run_tag=<commit>/`. The verdict
+is the success rate against the threshold; latency and resource verdicts come
+with the sampler in a later change.
 
 ## Run
 
