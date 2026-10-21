@@ -99,14 +99,258 @@ Size the pool for B running actors. A worker hosts up to `--worker-memory` /
 `--actor-memory` actors, and at most 1000. When the pool is full, `ResumeActor`
 returns ResourceExhausted and the driver keeps retrying until `--resume-timeout`.
 
+## Run
+
+```bash
+go run ./cmd/benchmarking/egress driver run --actors 1000 --parallel 10 --endpoints 10 --duration 5m
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--actors` | 1000 | **A**: actors to create. Actors are named `egress-<i>`. A rerun reuses the ones that already exist. |
+| `--parallel` | 1 | **B**: actors to resume, all running their loops at the same time: `egress-0` up to `egress-<B-1>`, so one warm-up run gives them all their own snapshots. |
+| `--endpoints` | 10 | **C**: endpoints each loop holds a tunnel to, each requested once per period of C × `--request-interval`. At most 1024. |
+| `--duration` | 5m | How long the loops run once they have all started. |
+| `--scheme` | `http` | `http`, or `https` through the gateway's TLS interception. HTTPS needs `deploy.sh --https`; see [HTTPS](#https). |
+| `--conn-mode` | `keepalive` | `keepalive` keeps one connection per endpoint. `new-conn` opens a new connection for every request. |
+| `--request-timeout` | 5s | Timeout of one request. |
+| `--request-interval` | 100ms | Each actor's pacing: one request per interval, spread over its endpoints, so each endpoint is requested once per C intervals. 0 sends back to back at full speed. |
+| `--create-concurrency` | 32 | How many actors are created at the same time. |
+| `--resume-timeout` | 5m | Per actor: how long to keep resuming, then waiting for it to answer. |
+| `--progress-interval` | 30s | How often to print progress. 0 turns it off. |
+| `--start-batch` | off | Start the loops in batches of this many actors, `--start-gap` apart, so one batch's opens fit the gateway's handshake budget; see [Opening throughput](#opening-throughput). 0 starts them all at once. |
+| `--start-gap` | C × `--request-interval` | Pause between batches of loop starts, by default one opening window. Needs `--start-batch`. |
+| `--opens-budget` | off | Opens per second the gateway can handshake. The run is refused when the start asks for more, and the error names a batch or gap that fits; see [Opening throughput](#opening-throughput). 0 skips the check. |
+| `--stream-idle-timeout` | 5m | The gateway's CONNECT stream idle timeout. A `keepalive` run is refused when the per-endpoint period, C × `--request-interval`, is more than half of it, so that one slow request keeps its margin; see [Pacing](#pacing). 0 skips the check. |
+| `--settle` | off | Start the measured `--duration` only once every loop has opened all its endpoints with a success each and requested each of them twice, and no tunnel has been redialed for this long. `keepalive` only; needs `--progress-interval`; must cover one period, C × `--request-interval`. |
+| `--settle-timeout` | 30m | How long to wait for `--settle` before measuring anyway. The report then says `NOT settled`. |
+| `--atespace`, `--template` | `benchmark-workloads`, `egress` | Where the actors live and what they are created from. |
+| `--output` | | Write the full report, including per-actor stats, as JSON to this file. Durations are in nanoseconds. |
+| `--kubeconfig`, `--context` | | Which cluster to use. |
+| `--api-endpoint`, `--router-url` | | When left empty, the driver port-forwards to the `api` and `atenet-router` Services. |
+| `--api-token-file` | | With `--api-endpoint`, authenticate to ateapi with the token in this file, re-read on every call, such as a projected ServiceAccount token with audience `api.ate-system.svc`. When left empty, the driver mints an `ate-client` token. `cleanup` takes it too. |
+
+### Pacing
+
+Each loop runs one goroutine per endpoint, with at most one request in flight
+per endpoint. Endpoint i sends its first request i intervals after the loop
+starts, and every endpoint is then requested once per period of
+C × `--request-interval`, so an actor sends one request per interval: with the
+default 100ms, about 10 requests per second, and B=100 about 1,000 req/s in
+total. With `--request-interval 0`, every endpoint is requested as fast as
+responses come back. Use that only to find the gateway's limit, raising B
+until latency and errors climb.
+
+The gateway resets a CONNECT tunnel that stays quiet for its stream idle
+timeout, 5 minutes by default. A tunnel's gap between two requests is its
+period, C × `--request-interval`, or one slow request bounded by
+`--request-timeout` when that request outlasts the period, since it delays
+only its own endpoint's next request. So the period must stay under half the
+timer: the other half is the margin for that slow request. 1000 endpoints at
+100ms is 100s, which fits; the driver refuses a `keepalive` run that does not.
+How quiet a tunnel goes depends on that tunnel alone, not on how long the rest
+of the fleet takes to open. A tunnel the gateway did reset shows up as a
+redial: one more new connection in the actor's stats, with no error, because
+the client retries the GET on a fresh connection.
+
+With `--settle`, the measured window begins only once every loop reports all
+C endpoints opened with at least as many successes, every endpoint requested
+twice (`rounds` of 2 or more), and no redial for `--settle`. A redial is a
+connection opened beyond one per endpoint, counted per loop. The report's
+`settle` line gives when all loops had opened, when all had their second
+round, how many redials happened before the window, and the longest gap any
+endpoint saw; it flags a gap within 10% of the timer, since the period rule
+counts no request latency. The `steady` line summarizes the measured window
+alone: requests, rate, success, redials and latency quantiles between the
+window's first and last complete poll. The `whole run` line above it still
+covers everything from the first open. The loop timeline carries the same
+counters per poll.
+
+### Opening throughput
+
+Every tunnel begins with a TLS handshake through the gateway, and the
+gateway's handshake throughput, not the actors' pacing, bounds how fast a
+fleet opens. Each actor opens one tunnel per interval I whether or not the
+last open has returned, so the actors started together ask for their number
+over I opens per second, for one period of C × I. 1000 actors at 100ms ask
+for 10,000 opens/s; one 88-thread c3 gateway on main sustained about 2,800,
+and about half of that on 44 threads. Above the budget, opens queue at the
+gateway until they outlast `--request-timeout`: the actor counts a `timeout`
+error and still an opened endpoint, and the opening cost is polluted.
+
+`--start-batch` keeps the demand inside the budget: the driver starts the
+loops in batches of that many actors, `--start-gap` apart, which defaults to
+one period, so one batch has opened before the next starts. A gap shorter
+than the period makes batches overlap, and the demand is
+
+    batch × ceil(period / gap) / I opens per second.
+
+With `--start-batch 250` at 100ms and C=1000, each batch asks for 2,500
+opens/s over a 100s window, and four batches open 1000 actors in about 400s;
+the same batches 20s apart overlap five deep and ask for 12,500. On a
+44-thread gateway, halve the batch.
+
+`--opens-budget` makes the driver check this before it creates anything: with
+`--opens-budget 2800`, starting 1000 actors at once is refused with the batch
+that fits, 280, and overlapping batches are refused with the gap that fits.
+The start log always prints the demand, against the budget or marked
+unchecked. Read a gateway's budget from a run that saturates it: the opens
+per second while `opened` in the progress log is still below B × C, which is
+B × C over the length of the `opening` line when the whole wave queued.
+
+The first batch's window holds opens only, and later ones overlap with the
+earlier batches' steady traffic. The report records each batch, and the
+`opening` line gives how long the whole opening took, from the first batch's
+start until the last loop had its first answer from its last endpoint, how
+many tunnels it opened and how many of those first requests failed, the p99
+of a successful open, the timeouts and redials polled right after it, and the
+pure window of the first batch alone; the `opening` and `opening-pure` phase
+marks in the JSON report cover the same spans. An open p99 in milliseconds
+means the budget held; seconds mean the gateway queued the opens.
+
+The run goes through these phases: preflight (the C endpoint Services exist),
+create (the A actors and their policies), resume (the B actors, until each one
+answers through the router), start (all the loops at once, or in batches with
+`--start-batch`), settle (only with `--settle`), steady (`--duration`, printing
+progress), stop (collect the loops' stats), suspend. The opening is not a
+phase the driver waits for: its marks are computed from the loops' stats once
+they have stopped.
+After Ctrl-C, the loops that started are still stopped and the actors
+suspended.
+
+### HTTPS
+
+`--scheme https` sends every request over TLS, through the gateway's TLS
+interception path: the gateway terminates the actor's TLS with a certificate
+it mints for each name, checks each decrypted request against the policy, and
+opens its own TLS connection to the target. Most agent egress is HTTPS, so this
+path is the one that matters at scale.
+
+| | TLS #1: actor → gateway | TLS #2: gateway → target |
+|---|---|---|
+| Certificate | minted for the name by the gateway's sdsmint, signed by the gateway's MITM CA | the target's own `*.egress-tests-targets.svc.cluster.local`, from Secret `egress-target-tls` |
+| Why it's trusted | the actor template projects the `egress-mitm.ate.dev` trust bundle and points `SSL_CERT_FILE` at it | `deploy.sh --https` patches the gateway so its root bundle includes the target's CA |
+
+**The gateway patch.** The gateway verifies every certificate it gets from a
+destination against the public roots in its Envoy image, and the install has no
+way to add a CA. `--patch-gateway`, or `--deploy --https`, works around that on
+test clusters by patching the `atenet-egress` Deployment with an init container
+that appends the target's CA to that root bundle. It changes no `envoy.yaml`,
+and it rolls the gateway. The CA can vouch only for the endpoint names: it is
+name-constrained to their domain, and its private key was thrown away after it
+signed the target's certificate. Reinstalling Substrate drops the patch; run
+`--patch-gateway` again afterwards, and `--unpatch-gateway` or `--delete` to
+remove it. `run --scheme https` checks the patch first and stops with a hint
+if it is missing, stale or still rolling out.
+
+**The actor deliberately does not trust the target's CA.** If the gateway ever
+passed TLS straight through instead of intercepting it, the actor would fail
+with `tls: unknown authority`. So a run with no errors shows that every request
+went through decrypt, policy check and re-encrypt.
+
+### Why the loop waits for `/start`
+
+Every actor restores from the template's golden snapshot, which is taken after
+the actor boots. If the loop started at boot, it would run in the golden actor,
+which has no egress policy, so every request would fail and those failures
+would be frozen into every actor's snapshot. Starting on request keeps the
+snapshot idle, lets the driver start all B loops together, and lets C and the
+connection mode change without rebuilding the template.
+
+## Reading the report
+
+```
+== egress-tunnels: actors=100 parallel=1 endpoints=10 scheme=http conn-mode=keepalive request-interval=0s duration=2m0s
+create     100/100 ok in 386.4ms (0 actors reused, 0 policies updated)
+resume     1/1 ok in 396.4ms
+           resume p50 298.8ms p99 298.8ms max 298.8ms; ready p50 97.6ms p99 97.6ms max 97.6ms
+start      1/1 ok in 32.9ms
+loop       2m0.1s: 99142 requests, 825.7 req/s, 100.000% success, 10 new connections
+latency    p50 1.26ms p90 1.41ms p99 2ms p99.9 3.98ms max 42.9ms (mean 1.2ms)
+dns        10 lookups, p50 17.8ms p99 32.2ms max 32.2ms
+           req/s per actor: min 825.7 median 825.7 max 825.7
+stop       1/1 ok in 33.9ms
+suspend    1/1 ok in 398.9ms
+```
+
+When requests fail, the report adds an `errors` line with counts per class,
+and a line naming the endpoints with the most errors. Once every loop has
+opened, an `opening` line follows `start`; with `--settle`, a `settle` line
+and a `steady` line bracket the `whole run` line (see [Pacing](#pacing)).
+
+```
+opening    6m40s: 1000000 opens, 0 failed, open p99 410ms, 0 timeouts, 12 redials (pure window 1m40s, 250 actors)
+```
+
+- **Opens** counts every endpoint whose first request completed; **failed**
+  (`failedOpens`) is how many of those first requests failed, so the tunnel
+  opened late or not at all.
+- **Open p99** (`openP99`) is the 99th percentile of a successful open, as
+  the actor timed it. Milliseconds mean the gateway kept up; seconds mean the
+  opens queued (see [Opening throughput](#opening-throughput)).
+- **Timeouts** (`timeouts`) and **redials** are the `timeout` error count and
+  the redial count at the first poll after the opening ended.
+
+- **Latency** is measured inside the actor, for successful requests only. It
+  includes the DNS lookup when the request needed one.
+- **New connections** tell the two modes apart. In keepalive mode the count is
+  about B×C. In new-conn mode it is about one per request.
+- **DNS** counts lookups. Go does not cache DNS, so every new connection
+  resolves the name through the sandbox DNS relay and the cluster DNS.
+- **TLS** (HTTPS only) counts completed handshakes between the actor and the
+  gateway, with their times.
+- **Errors** are grouped into classes: `timeout`, `connection refused`,
+  `connection reset`, `EOF`, `dns: …`, `HTTP <code>`, and `other: …`. An
+  `HTTP 403` means the gateway denied the request. In HTTPS mode, `tls: …`
+  classes name what failed verification, a `tls handshake: ` prefix marks a
+  failure partway through a handshake, and `HTTP 503` usually means the
+  gateway could not verify the target: check that the gateway is patched.
+
+Resume latency runs from the first `ResumeActor` attempt until it succeeds,
+retries included; ready latency from then until the actor first answers through
+the router. Actors that never ran restore from the template's golden snapshot,
+and actors an earlier run suspended restore from their own, so one warm-up run
+of B actors makes every later run of at most B restore from own snapshots.
+
+## Limits to expect
+
+- **Keep-alive mode holds one tunnel per actor and endpoint.** atunnel carries
+  the tunnels as streams of a few HTTP/2 connections to the gateway, but inside
+  the gateway each tunnel is still one connection in the `mitm_internal`
+  cluster, whose circuit breakers cap tunnels per replica (16,384 as shipped;
+  `max_connections` and `max_pending_requests` in the `atenet-egress`
+  ConfigMap). Past the limit, new CONNECTs wait in the pending queue until
+  atunnel's tunnel-open deadline withdraws them and the actor sees a timeout;
+  when the queue is full too, the gateway answers 503 and the actor sees `EOF`
+  or `connection reset`. `cluster.mitm_internal.upstream_cx_overflow` and
+  `upstream_rq_pending_overflow` on the gateway's admin port say which limit
+  applied.
+- **The destination clusters have their own limit.** `egress_forward_proxy` and
+  `egress_forward_proxy_cleartext` use Envoy's default of 1,024 connections
+  unless the manifest says otherwise; bursts of simultaneous requests to many
+  destinations push those counts up, and the actor sees `HTTP 503`.
+- **HTTPS costs more per connection.** Session resumption is off, so new-conn
+  mode does a full handshake with the gateway on every request, and the
+  gateway's minted certificates last 15 minutes, so longer runs mint them
+  again. Expect more gateway CPU and memory than the same HTTP run.
+- **New-conn mode loads the control plane.** Every CONNECT makes the gateway
+  authenticate the actor through ateapi.
+- **Confirming the gateway carried the traffic.** `kubectl -n ate-system logs
+  deploy/atenet-egress -c envoy` shows JSON lines with the actor's SPIFFE ID,
+  an `egress-target-<i>` authority, and `"leg":"cleartext"` (HTTP) or
+  `"leg":"mitm"` (HTTPS). The gateway samples those logs, so at high rates
+  only failures and a sample of successes appear.
+
 ## Cleanup
 
 ```bash
+go run ./cmd/benchmarking/egress driver cleanup --actors 10000   # the largest --actors any run used
 ./benchmarking/egress-tunnels/deploy.sh --delete
 WORKLOAD_TEMPLATES=egress ./benchmarking/workloads/deploy.sh --delete
 ```
 
-`deploy.sh --delete` removes the gateway patch and the
+`cleanup` deletes `egress-0` up to `egress-<actors-1>` in any state, each with
+its egress policy. `deploy.sh --delete` removes the gateway patch and the
 endpoints; `--unpatch-gateway` removes only the patch. The workloads script
 removes the template and the `benchmark-worker` pool, which the other workload
 templates share; skip that step while other benchmarks use the pool.
@@ -120,4 +364,27 @@ start contract, the stats and the certificate from it.
 | File | Responsibility |
 |---|---|
 | `driver.go` | The `driver` command and its `run`, `cleanup` and `certs` subcommands, the cluster flags, and the ateapi and Kubernetes connection. |
+| `run.go` | The run configuration and its validation, and the runner that carries one run through its phases. |
+| `report.go` | The report: the phase, opening, settle and window results, per-actor stats, and how it prints. |
+| `aggregate.go` | Merging the actors' scrapes into the fleet's metric families, and reading counters, gauges, histograms and quantiles from them. |
+| `router.go` | The HTTP client to one actor through the atenet router: start, stats, stop and the protocol probe. |
+| `policy.go` | The egress policy every actor gets, the comparison a rerun uses, and preflight. |
+| `gateway.go` | The names the gateway trust patch creates and the check that the gateway trusts the target's CA. |
+| `retry.go` | Backoff for control-plane calls and the bounded parallel loop. |
+| `cleanup.go` | Deleting the actors. |
 | `targetcert.go` | The CA and the target's certificate that `certs` writes and deploy.sh puts in the Secret. |
+
+A run goes through these phases, in order, each owned by one function:
+
+1. Preflight, `preflight`: the C endpoint Services exist, with an HTTPS port and a patched gateway over HTTPS.
+2. Create or reuse, `runner.createActors`: `ensureActor` creates each actor once, `ensurePolicy` gives it the policy from `buildPolicy` or replaces a different one.
+3. Resume, `runner.resumeActors`: resumes the first B created actors, retrying a full pool, then `waitReady` polls each one's readiness route through the router.
+4. Wait ready and start, `runner.startLoops`: probes each actor's protocol, then posts `/start` to all at once or in batches of `--start-batch`.
+5. Poll and scrape, `loopWatch.poll`: `routerClient.scrape` reads each loop's exposition, `families.add` sums them, and the point goes on the timeline.
+6. Settle, `loopWatch.settle`: polls until every loop has opened all its endpoints, requested them twice, and no tunnel has been redialed for `--settle`.
+7. Windows, `loopWatch.steady` and `loopWatch.window`: the measured `--duration` of polls, summarized from its first and last complete poll with `histogramDelta`.
+8. Stop, `runner.stopLoops`: scrapes each loop's final stats with endpoint labels, then posts `/stop`.
+9. Suspend, `runner.suspendActors`: suspends every actor that resumed, under a deadline that starts only now.
+10. Report, `report.print` and `writeReport`: `report.markOpening` derives the opening marks from the timeline first.
+
+Aggregation lives in `aggregate.go`: `families.add` adds one actor's counters and histogram buckets to the fleet's per label set, after `sameBounds` has checked the bounds against the fleet's, and applies `gaugeRules` to the gauges. `quantile` reads a quantile from the merged histogram as the upper bound of the bucket holding the rank; `report.print`, the progress log and the window summary all read latency through it.
