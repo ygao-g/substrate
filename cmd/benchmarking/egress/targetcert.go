@@ -122,8 +122,16 @@ func generateTargetCertWithCA(now time.Time) (*targetCertBundle, *x509.Certifica
 	return b, ca, caKey, nil
 }
 
-// write stores the bundle in dir as ca.crt, tls.crt and tls.key, the keys
-// of the target's TLS Secret; only the key is private.
+// File names write uses, which are also the keys of the target's TLS Secret
+// and, for caFile, of the gateway's trust ConfigMap.
+const (
+	caFile   = "ca.crt"
+	certFile = "tls.crt"
+	keyFile  = "tls.key"
+)
+
+// write stores the bundle in dir as caFile, certFile and keyFile; only the key
+// is private.
 func (b *targetCertBundle) write(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -133,9 +141,9 @@ func (b *targetCertBundle) write(dir string) error {
 		data []byte
 		mode os.FileMode
 	}{
-		{"ca.crt", b.CA, 0o644},
-		{"tls.crt", b.Cert, 0o644},
-		{"tls.key", b.Key, 0o600},
+		{caFile, b.CA, 0o644},
+		{certFile, b.Cert, 0o644},
+		{keyFile, b.Key, 0o600},
 	} {
 		if err := os.WriteFile(filepath.Join(dir, f.name), f.data, f.mode); err != nil {
 			return err
