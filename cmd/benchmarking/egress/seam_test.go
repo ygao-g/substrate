@@ -32,6 +32,7 @@ import (
 // bucket bounds the actor exposes, after a round trip through the text
 // encoding, are the float64 values the driver matches on, and their strings
 // are the ones every actor built from this source prints.
+// CONTRACT R7.
 func TestLeStringsAgree(t *testing.T) {
 	m, err := newLoopMetrics(1, "http")
 	if err != nil {
@@ -160,6 +161,7 @@ func contractCycle(t *testing.T, textOnly bool) (families, []int64) {
 	return sum, counted
 }
 
+// CONTRACT G29.
 func TestContractCycleMatchesTheTarget(t *testing.T) {
 	sum, counted := contractCycle(t, false)
 	var total int64
@@ -194,6 +196,7 @@ func TestContractCycleMatchesTheTarget(t *testing.T) {
 	}
 }
 
+// CONTRACT G23.
 func TestBothEncodingsAgreeAcrossTheSeam(t *testing.T) {
 	proto, _ := contractCycle(t, false)
 	text, _ := contractCycle(t, true)
@@ -230,6 +233,7 @@ func TestBothEncodingsAgreeAcrossTheSeam(t *testing.T) {
 
 // TestLaterProtocolRefused: an actor that speaks a protocol version this
 // driver does not know is refused the same way, naming both versions.
+// CONTRACT R6.
 func TestLaterProtocolRefused(t *testing.T) {
 	cfg := testConfig()
 	api := newFakeAPI()
@@ -244,6 +248,7 @@ func TestLaterProtocolRefused(t *testing.T) {
 	}
 }
 
+// CONTRACT R6.
 func TestOldActorFailsFast(t *testing.T) {
 	cfg := testConfig()
 	api := newFakeAPI()

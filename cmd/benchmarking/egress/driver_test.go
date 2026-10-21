@@ -44,6 +44,7 @@ current-context: ctx
 
 // TestConnectPassesTheEndpointAndTokenFile runs both commands up to the
 // ateapi dial. It replaces newATEClient, so it does not run in parallel.
+// CONTRACT R8.
 func TestConnectPassesTheEndpointAndTokenFile(t *testing.T) {
 	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
 	writeFile(t, kubeconfig, testKubeconfig, 0o600)
@@ -113,6 +114,7 @@ func TestConnectPassesTheEndpointAndTokenFile(t *testing.T) {
 	}
 }
 
+// CONTRACT G1.
 func TestParseRunFlagsDefaultsTheStartGap(t *testing.T) {
 	for name, tc := range map[string]struct {
 		args      []string
@@ -140,6 +142,7 @@ func TestParseRunFlagsDefaultsTheStartGap(t *testing.T) {
 	}
 }
 
+// CONTRACT G1, R1.
 func TestParseRunFlagsOpensBudget(t *testing.T) {
 	cfg, _, err := parseRunFlags([]string{"--parallel", "4", "--actors", "4", "--opens-budget", "2800"})
 	if err != nil || cfg.OpensBudget != 2800 {

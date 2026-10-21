@@ -367,7 +367,7 @@ start contract, the stats and the certificate from it.
 | `run.go` | The run configuration and its validation, and the runner that carries one run through its phases. |
 | `report.go` | The report: the phase, opening, settle and window results, per-actor stats, and how it prints. |
 | `aggregate.go` | Merging the actors' scrapes into the fleet's metric families, and reading counters, gauges, histograms and quantiles from them. |
-| `router.go` | The HTTP client to one actor through the atenet router: start, stats, stop and the protocol probe. |
+| `router.go` | The HTTP client to one actor through the atenet router: start, the metrics scrape, stop and the protocol probe. |
 | `policy.go` | The egress policy every actor gets, the comparison a rerun uses, and preflight. |
 | `gateway.go` | The names the gateway trust patch creates and the check that the gateway trusts the target's CA. |
 | `retry.go` | Backoff for control-plane calls and the bounded parallel loop. |
@@ -379,12 +379,12 @@ A run goes through these phases, in order, each owned by one function:
 1. Preflight, `preflight`: the C endpoint Services exist, with an HTTPS port and a patched gateway over HTTPS.
 2. Create or reuse, `runner.createActors`: `ensureActor` creates each actor once, `ensurePolicy` gives it the policy from `buildPolicy` or replaces a different one.
 3. Resume, `runner.resumeActors`: resumes the first B created actors, retrying a full pool, then `waitReady` polls each one's readiness route through the router.
-4. Wait ready and start, `runner.startLoops`: probes each actor's protocol, then posts `/start` to all at once or in batches of `--start-batch`.
+4. Start, `runner.startLoops`: probes each actor's protocol, then posts `/start` to all at once or in batches of `--start-batch`; a loop left running by an earlier run answers 409 and is stopped and started again.
 5. Poll and scrape, `loopWatch.poll`: `routerClient.scrape` reads each loop's exposition, `families.add` sums them, and the point goes on the timeline.
 6. Settle, `loopWatch.settle`: polls until every loop has opened all its endpoints, requested them twice, and no tunnel has been redialed for `--settle`.
 7. Windows, `loopWatch.steady` and `loopWatch.window`: the measured `--duration` of polls, summarized from its first and last complete poll with `histogramDelta`.
 8. Stop, `runner.stopLoops`: scrapes each loop's final stats with endpoint labels, then posts `/stop`.
 9. Suspend, `runner.suspendActors`: suspends every actor that resumed, under a deadline that starts only now.
-10. Report, `report.print` and `writeReport`: `report.markOpening` derives the opening marks from the timeline first.
+10. Report, `report.print` and `writeReport`: `runner.run` calls `report.markOpening` after stop, which derives the opening marks from each loop's start time and `opening_done_seconds` and reads the timeouts and redials after it from the timeline.
 
-Aggregation lives in `aggregate.go`: `families.add` adds one actor's counters and histogram buckets to the fleet's per label set, after `sameBounds` has checked the bounds against the fleet's, and applies `gaugeRules` to the gauges. `quantile` reads a quantile from the merged histogram as the upper bound of the bucket holding the rank; `report.print`, the progress log and the window summary all read latency through it.
+Aggregation lives in `aggregate.go`: `families.add` adds one actor's counters and histogram buckets to the fleet's per label set, after `fleetBounds` has checked every histogram's bounds against `bucketBounds`, and applies `gaugeRules` to the gauges. `quantile` reads a quantile from the merged histogram as the upper bound of the bucket holding the rank; `report.print`, the progress log and the window summary all read latency through it.

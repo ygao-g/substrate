@@ -552,6 +552,7 @@ func wantHosts(n int) []string {
 	return hosts
 }
 
+// CONTRACT G9.
 func TestRun(t *testing.T) {
 	for _, mode := range []string{connModeKeepAlive, connModeNewConn} {
 		t.Run(mode, func(t *testing.T) {
@@ -650,6 +651,7 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// CONTRACT G5.
 func TestRunReusesActorsAndUpdatesPolicies(t *testing.T) {
 	cfg := testConfig()
 	api := newFakeAPI()
@@ -688,6 +690,7 @@ func TestRunReusesActorsAndUpdatesPolicies(t *testing.T) {
 	}
 }
 
+// CONTRACT G2.
 func TestPreflightFailsOnMissingServices(t *testing.T) {
 	cfg := testConfig()
 	api := newFakeAPI()
@@ -707,6 +710,7 @@ func TestPreflightFailsOnMissingServices(t *testing.T) {
 	}
 }
 
+// CONTRACT G8.
 func TestResumeRetriesFullPool(t *testing.T) {
 	cfg := testConfig()
 	cfg.Parallel = 1
@@ -726,6 +730,7 @@ func TestResumeRetriesFullPool(t *testing.T) {
 	}
 }
 
+// CONTRACT G8.
 func TestResumeGivesUpOnCrash(t *testing.T) {
 	cfg := testConfig()
 	cfg.Parallel = 1
@@ -745,6 +750,7 @@ func TestResumeGivesUpOnCrash(t *testing.T) {
 	}
 }
 
+// CONTRACT G11.
 func TestStartRecoversLeftoverLoop(t *testing.T) {
 	cfg := testConfig()
 	cfg.Actors, cfg.Parallel = 1, 1 // so the run resumes egress-0
@@ -765,6 +771,7 @@ func TestStartRecoversLeftoverLoop(t *testing.T) {
 	}
 }
 
+// CONTRACT G18.
 func TestStopReachesLoopsWhoseStartFailed(t *testing.T) {
 	cfg := testConfig()
 	cfg.Actors = cfg.Parallel // so the run resumes egress-0 to egress-2
@@ -796,6 +803,7 @@ func TestStopReachesLoopsWhoseStartFailed(t *testing.T) {
 	}
 }
 
+// CONTRACT G13, G17.
 func TestCleanupDeadlineStartsAfterTheLoops(t *testing.T) {
 	cfg := testConfig()
 	cfg.Duration = 100 * time.Millisecond
@@ -817,6 +825,7 @@ func TestCleanupDeadlineStartsAfterTheLoops(t *testing.T) {
 	}
 }
 
+// CONTRACT G20.
 func TestRunFailsWhenActorsAreLeftRunning(t *testing.T) {
 	cfg := testConfig()
 	api := newFakeAPI()
@@ -832,6 +841,7 @@ func TestRunFailsWhenActorsAreLeftRunning(t *testing.T) {
 	}
 }
 
+// CONTRACT G7.
 func TestPickActorsFirst(t *testing.T) {
 	cfg := testConfig()
 	cfg.Actors, cfg.Parallel = 20, 5
@@ -856,6 +866,7 @@ func TestPickActorsFirst(t *testing.T) {
 	}
 }
 
+// CONTRACT G13, G17, G21.
 func TestRunInterruptedStillStopsAndSuspends(t *testing.T) {
 	cfg := testConfig()
 	cfg.Duration = time.Hour
@@ -889,6 +900,7 @@ func TestRunInterruptedStillStopsAndSuspends(t *testing.T) {
 	}
 }
 
+// CONTRACT G33.
 func TestCleanup(t *testing.T) {
 	api := newFakeAPI()
 	for i := range 5 {
@@ -906,6 +918,7 @@ func TestCleanup(t *testing.T) {
 	}
 }
 
+// CONTRACT G5.
 func TestBuildPolicy(t *testing.T) {
 	p := buildPolicy("ns", 3)
 	if p.GetMetadata().GetName() != "default" || p.GetMetadata().GetAtespace() != "ns" {
@@ -971,6 +984,7 @@ func TestBuildPolicy(t *testing.T) {
 
 // Policies an earlier driver created allow only HTTP; a run brings each up to
 // both rules once and then leaves them alone.
+// CONTRACT G5.
 func TestRunUpgradesHTTPOnlyPolicies(t *testing.T) {
 	cfg := testConfig()
 	api := newFakeAPI()
@@ -1007,6 +1021,7 @@ func TestRunUpgradesHTTPOnlyPolicies(t *testing.T) {
 	}
 }
 
+// CONTRACT G3, G21.
 func TestRunHTTPS(t *testing.T) {
 	cfg := testConfig()
 	cfg.Scheme = schemeHTTPS
@@ -1033,6 +1048,7 @@ func TestRunHTTPS(t *testing.T) {
 	}
 }
 
+// CONTRACT G3.
 func TestPreflightHTTPS(t *testing.T) {
 	const n = 3
 	for _, tc := range []struct {
@@ -1079,6 +1095,7 @@ func TestPreflightHTTPS(t *testing.T) {
 	}
 }
 
+// CONTRACT G1, R1, R2, R3, R4, R5.
 func TestConfigValidateAccepts(t *testing.T) {
 	for name, mutate := range map[string]func(*runConfig){
 		"opening exactly half the timer": func(c *runConfig) {
@@ -1116,6 +1133,7 @@ func TestConfigValidateAccepts(t *testing.T) {
 	}
 }
 
+// CONTRACT G1, R1, R2, R3, R4, R5.
 func TestConfigValidateMessages(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mutate func(*runConfig)
@@ -1189,6 +1207,7 @@ func TestStartLogPrintsTheOpeningDemand(t *testing.T) {
 	}
 }
 
+// CONTRACT G1, R1, R2, R3, R4, R5.
 func TestConfigValidate(t *testing.T) {
 	valid := testConfig()
 	if err := valid.validate(); err != nil {
@@ -1282,6 +1301,7 @@ func TestOutcomeUnknown(t *testing.T) {
 	}
 }
 
+// CONTRACT G6, G13.
 func TestLostAnswers(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1425,6 +1445,7 @@ func settlingStats(c int, redial bool) func(name string, n int) *fakeLoop {
 	}
 }
 
+// CONTRACT G16, G28.
 func TestRunSettlesBeforeMeasuring(t *testing.T) {
 	cfg := testConfig()
 	cfg.Settle, cfg.SettleTimeout = 3*cfg.ProgressInterval, 5*time.Second
@@ -1485,6 +1506,7 @@ func TestRunSettlesBeforeMeasuring(t *testing.T) {
 	}
 }
 
+// CONTRACT G26.
 func TestRunSettleNeedsSuccessfulOpens(t *testing.T) {
 	cfg := testConfig()
 	cfg.Settle, cfg.SettleTimeout = 3*cfg.ProgressInterval, 60*time.Millisecond
@@ -1504,6 +1526,7 @@ func TestRunSettleNeedsSuccessfulOpens(t *testing.T) {
 	}
 }
 
+// CONTRACT G14.
 func TestRunSettleNamesLoopsThatDoNotAnswer(t *testing.T) {
 	cfg := testConfig()
 	cfg.Settle, cfg.SettleTimeout = 3*cfg.ProgressInterval, 60*time.Millisecond
@@ -1529,6 +1552,7 @@ func TestRunSettleNamesLoopsThatDoNotAnswer(t *testing.T) {
 	}
 }
 
+// CONTRACT G26.
 func TestRunSettleWaitsForRedialsToStop(t *testing.T) {
 	cfg := testConfig()
 	cfg.Settle, cfg.SettleTimeout = 3*cfg.ProgressInterval, 5*time.Second
@@ -1552,6 +1576,7 @@ func TestRunSettleWaitsForRedialsToStop(t *testing.T) {
 	}
 }
 
+// CONTRACT G15.
 func TestRunMeasuresAnywayWhenSettleTimesOut(t *testing.T) {
 	cfg := testConfig()
 	cfg.Settle, cfg.SettleTimeout = 3*cfg.ProgressInterval, 60*time.Millisecond
@@ -1596,6 +1621,7 @@ func batchesOf(startedAt map[string]time.Time, gap time.Duration) [][]time.Time 
 	return batches
 }
 
+// CONTRACT G10.
 func TestStartLoopsInBatches(t *testing.T) {
 	cfg := testConfig()
 	cfg.Parallel, cfg.StartBatch, cfg.StartGap = 6, 2, 50*time.Millisecond
@@ -1649,6 +1675,7 @@ func TestStartLoopsInBatches(t *testing.T) {
 	}
 }
 
+// CONTRACT G12.
 func TestInterruptBetweenBatchesStillStopsAndSuspends(t *testing.T) {
 	cfg := testConfig()
 	cfg.Parallel, cfg.StartBatch, cfg.StartGap = 6, 2, time.Hour
@@ -1685,6 +1712,7 @@ func TestInterruptBetweenBatchesStillStopsAndSuspends(t *testing.T) {
 	}
 }
 
+// CONTRACT G27.
 func TestRunMarksTheOpeningPhase(t *testing.T) {
 	cfg := testConfig()
 	cfg.StartBatch, cfg.StartGap = 1, 20*time.Millisecond
@@ -1757,6 +1785,7 @@ func TestRunMarksTheOpeningPhase(t *testing.T) {
 	}
 }
 
+// CONTRACT G27.
 func TestRunWithoutBatchesHasNoPureWindow(t *testing.T) {
 	cfg := testConfig()
 	api := newFakeAPI()
@@ -1780,6 +1809,7 @@ func TestRunWithoutBatchesHasNoPureWindow(t *testing.T) {
 	}
 }
 
+// CONTRACT G27.
 func TestRunOpeningUnknownUntilEveryLoopOpened(t *testing.T) {
 	cfg := testConfig()
 	api := newFakeAPI()
@@ -1805,6 +1835,7 @@ func TestRunOpeningUnknownUntilEveryLoopOpened(t *testing.T) {
 	}
 }
 
+// CONTRACT G26.
 func TestRunSettleNeedsTwoRounds(t *testing.T) {
 	cfg := testConfig()
 	cfg.Settle, cfg.SettleTimeout = 3*cfg.ProgressInterval, 60*time.Millisecond
@@ -1832,6 +1863,7 @@ func unmergeableStats() *fakeLoop {
 	return s
 }
 
+// CONTRACT G14, G19.
 func TestStatsTheDriverCannotMergeAreNamedAndLeftOut(t *testing.T) {
 	cfg := testConfig()
 	cfg.Settle, cfg.SettleTimeout = 3*cfg.ProgressInterval, 60*time.Millisecond

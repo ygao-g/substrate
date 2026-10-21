@@ -163,7 +163,8 @@ a sum but no maximum, so the report has no run maximum.
 
 ## 5. What a run aggregates
 
-The driver is the next PR. This section is the contract it implements.
+The driver implements this section; its own promises, phases and refusals are in
+[benchmarking/egress-tunnels/CONTRACT.md](../../../benchmarking/egress-tunnels/CONTRACT.md).
 
 The driver scrapes every actor's `/metrics`, protobuf requested, and pairs the
 sum with the gateway's own metrics. Per family, the rule is:

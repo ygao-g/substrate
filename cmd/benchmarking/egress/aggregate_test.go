@@ -59,6 +59,7 @@ func recordLatencies(ds ...time.Duration) func(m *loopMetrics) {
 	}
 }
 
+// CONTRACT G29.
 func TestAggregateEqualsOneRecorder(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	var all []time.Duration
@@ -95,6 +96,7 @@ func TestAggregateEqualsOneRecorder(t *testing.T) {
 	}
 }
 
+// CONTRACT R7.
 func TestAggregateRefusesOtherLe(t *testing.T) {
 	sum := families{}
 	if err := sum.add(fixtureScrape(t, 1, recordLatencies(time.Millisecond)), "egress-0"); err != nil {
@@ -120,6 +122,7 @@ func TestAggregateRefusesOtherLe(t *testing.T) {
 	}
 }
 
+// CONTRACT G24.
 func TestMissingInfBucketIsSampleCount(t *testing.T) {
 	text := fixtureScrape(t, 1, recordLatencies(time.Millisecond, time.Second, 2*time.Minute))
 	// The protobuf encoding has no +Inf bucket; the text one does.
@@ -141,6 +144,7 @@ func TestMissingInfBucketIsSampleCount(t *testing.T) {
 	}
 }
 
+// CONTRACT G25.
 func TestWindowAndReset(t *testing.T) {
 	m, err := newLoopMetrics(1, "http")
 	if err != nil {
@@ -181,6 +185,7 @@ func TestWindowAndReset(t *testing.T) {
 // TestQuantileTable replays the stage-0 oracle's events through the new path
 // and compares counts and quantiles with what the old code answered, except
 // where the old code capped a quantile at the recorded max.
+// CONTRACT G31.
 func TestQuantileTable(t *testing.T) {
 	raw, err := os.ReadFile("/tmp/pr2716-cobra/expo-baseline/events.json")
 	if err != nil {

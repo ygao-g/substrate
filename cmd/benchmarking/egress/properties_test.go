@@ -27,6 +27,7 @@ import (
 
 // TestAggregationIsOrderIndependent adds the same scrapes in random orders
 // and expects byte-identical families; a scrape added to itself doubles.
+// CONTRACT G30.
 func TestAggregationIsOrderIndependent(t *testing.T) {
 	r := rand.New(rand.NewPCG(7, 11))
 	var scrapes []families
