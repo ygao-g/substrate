@@ -62,6 +62,18 @@ type report struct {
 	Phases []phaseMark `json:"phases,omitempty"`
 	// LoopTimeline holds the merged loop metrics of each progress poll.
 	LoopTimeline []loopPoint `json:"loopTimeline,omitempty"`
+	// Usage is what the egress path spent, with --usage.
+	Usage *usageReport `json:"usage,omitempty"`
+}
+
+// phase returns the named phase, or the zero mark when it did not run.
+func (rep *report) phase(name string) phaseMark {
+	for _, p := range rep.Phases {
+		if p.Name == name {
+			return p
+		}
+	}
+	return phaseMark{}
 }
 
 type phaseMark struct {
@@ -476,6 +488,7 @@ func (rep *report) print(w io.Writer) {
 	}
 	printPhase(w, "stop", rep.Stop, "")
 	printPhase(w, "suspend", rep.Suspend, "")
+	rep.printUsage(w)
 }
 
 func (rep *report) printPerActor(w io.Writer) {
