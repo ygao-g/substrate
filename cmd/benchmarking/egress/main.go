@@ -15,7 +15,8 @@
 // benchmark-egress is the workload of the egress scale test, which holds many
 // CONNECT tunnels open through the egress gateway at a fixed pace and measures
 // what they cost. Each of its programs is a subcommand: the actor that opens
-// the tunnels and counts what happened, and the target they call.
+// the tunnels and counts what happened, the target they call, and the driver
+// that runs a fleet of actors from outside the cluster and prints the report.
 package main
 
 import (
@@ -34,7 +35,8 @@ func main() {
 		Short: "The actor and target of the egress scale test",
 		Long: `benchmark-egress is the workload of the egress scale test. The actor holds
 one tunnel per endpoint open through the egress gateway and counts what
-happened; the target is the endpoint every tunnel leads to.`,
+happened; the target is the endpoint every tunnel leads to; the driver creates
+and resumes the actors, runs their loops and prints the report.`,
 		// Usage is for mistakes in the command line, not for a run that fails.
 		SilenceUsage: true,
 		// main prints the error itself, once.
@@ -42,7 +44,7 @@ happened; the target is the endpoint every tunnel leads to.`,
 		// Nobody types these commands often enough to want shell completion.
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 	}
-	root.AddCommand(actorCommand(), targetCommand())
+	root.AddCommand(actorCommand(), targetCommand(), driverCommand())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
