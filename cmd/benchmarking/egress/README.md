@@ -136,7 +136,52 @@ egress policy or Service shows up as errors in `/stats`, not as a failed
 `/start`. The instruments are created at `/start` and released at `/stop`, so
 every counter counts from `/start` and a later `/start` begins from zero.
 
+The loop then runs one goroutine per endpoint:
+
+1. Wait offset + *i* × interval, so C handshakes do not reach the gateway at
+   once.
+2. Send the first `GET` to the endpoint. When it completes, success or not, the
+   endpoint counts as opened. When the last endpoint opens, the actor stamps
+   `openingDone`.
+3. Send one `GET` per period on a ticker started when the open starts. At most
+   one request is in flight per endpoint. A request that outlasts the period
+   delays only its own endpoint, whose next request starts as soon as the slow
+   one returns.
+4. Stop on `POST /stop`, which waits for every goroutine and answers with the
+   final counters of section 4. A request cut off by the stop is not counted.
+   The actor keeps those counters until the next `/start`, so a `/stop` whose
+   answer was lost is asked again and answered again.
+
+The client keeps one connection per endpoint and never closes it for idling,
+so a redial, one more in `newConns`, means the gateway cut the tunnel or a
+request on it timed out. The gateway resets a tunnel that stays quiet for its stream idle
+timeout, 5 minutes by default, so keep the per-endpoint period, C ×
+`intervalMs` between two requests on the same endpoint, under it.
+
+Only an actor's phase modulo `intervalMs` matters to the fleet: once started
+it sends at `/start` + `offsetMs` + k × `intervalMs`. A driver gives actor k
+of A `offsetMs` = ⌊k × `intervalMs` / A⌋, which spreads the phases evenly; a
+uniform draw from [0, `intervalMs`) does about as well but needs its seed
+recorded. Four actors with `intervalMs` 100:
+
+| Offsets | Fleet sends in each interval |
+|---|---|
+| 0, 0, 0, 0 | 4 at 0 ms |
+| 0, 25, 50, 75 | 1 at 0, 25, 50, 75 ms |
+
+The offset lives on the actor because the router's fan-out of `/start` sets
+each actor's real phase, and the driver does not control it.
+
+With these rules an actor sends one request per interval throughout the run,
+and holds C tunnels.
+
 ## 4. What the actor reports
+
+`GET /stats` answers one small JSON object, the counters cumulative since
+`/start`, for a driver's gates and progress: poll it, it consumes nothing. The
+actor records the same counts and the four latency distributions as OTel
+instruments on a private MeterProvider; they are the measurement, the counters
+are the view a driver polls.
 
 ### 4.1 `GET /stats` and `POST /stop`
 
@@ -169,3 +214,72 @@ more.
   "errors": {"timeout": 3}
 }
 ```
+
+## 5. What a run aggregates
+
+The driver is the next PR. This section is the contract it implements.
+
+The driver polls every actor's `/stats` for the gates and records four
+instants: `t0`, the first `/start`; `t1`, when every actor's `opened` is C,
+the end of the blended window; `t2`, when every actor's `rounds` is at least
+two and `newConns` is flat between two polls, the start of the settled window;
+`t3`, `t2` plus the cell's duration, when it posts `/stop`. Every result is a
+difference between two instants.
+
+The results of a cell come from two windows. The blended window runs from the
+first `/start` to the latest `openingDone`, each actor's shifted by its own
+`/start` time. An actor's `openingDone` counts from its `/start`, so each
+actor's window also covers its `offsetMs`. The settled window starts once
+every actor has opened, every actor's `rounds` has reached two, checked per
+actor before the sum, and `newConns` is flat between two polls. Two actors and
+two endpoints, 100 ms apart, both started at the same time, actor 2 with a
+50 ms offset and a slow second open:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A1 as Actor 1
+  participant A2 as Actor 2
+  participant S0 as Service 0
+  participant S1 as Service 1
+  rect rgb(240, 248, 255)
+    A1->>+S0: open (t=0ms)
+    S0-->>-A1: done (t=20ms)
+    A2->>+S0: open (t=50ms, offset)
+    S0-->>-A2: done (t=70ms)
+    A1->>+S1: open (t=100ms)
+    S1-->>-A1: done (t=120ms)
+    A2->>+S1: open, SLOW (t=150ms)
+    Note over A1,S1: Repeat requests begin while the slow open is still pending
+    A1->>S0: repeat (t=200ms)
+    A2->>S0: repeat (t=250ms)
+    A1->>S1: repeat (t=300ms)
+    S1-->>-A2: latest openingDone (t=320ms)
+  end
+  Note over A1,S1: Settled, after the blended window
+  A2->>S1: repeat (t=350ms)
+  A1->>S0: repeat (t=400ms)
+  A2->>S0: repeat (t=450ms)
+  A1->>S1: repeat (t=500ms)
+```
+
+Both actors' first repeats fall inside the blended window, because it ends
+when the slowest actor finishes its last open. The offset puts actor 2's sends
+halfway between actor 1's, so the two together send one request every 50 ms
+rather than two every 100 ms; without it every send of actor 2 would coincide
+with one of actor 1's. The gateway's CPU in that window paid for four tunnel
+setups and for every request in it; the settled rate prices every request, the
+first on each tunnel included, and what is left is the setups. `t1` is the
+edge the driver reads the gateway's CPU against, and the requests completed
+over `t0..t1` are the window's request count; `requestsAtOpeningDone`, summed
+from `/stats`, is the count at each actor's own opening end, for the opening
+alone.
+
+| Result | Source | How it is computed |
+|---|---|---|
+| Settled req/s per gateway core | actors + gateway | Requests completed in the settled window divided by the gateway pod's CPU-seconds in the same window, `container_cpu_usage_seconds_total` of the envoy, ext-proc and sdsmint containers over `t2..t3`. |
+| Gateway CPU per tunnel opened | actors + gateway | The blended window's gateway CPU, minus every request in it priced at the settled per-request cost, divided by the tunnels opened. What remains is setup alone, independent of pacing, on the assumption that a request on an open tunnel costs the same in either window. Computed after the settled window, since it needs the settled rate. |
+| Envoy heap | gateway | The maximum of `server.memory_allocated` in the cell; per-tunnel cost is the slope across fleet sizes. |
+| Settled p50, p99, p99.9 | actors | The settled window's `latency` histogram, to one bucket step. |
+| Success rate | actors | `successes` over `requests` in the window. |
+| Run validity | actors + gateway | `newConns` equals `opened` and stays flat; `longestGap` stays under the stream idle timeout; `dns` and `tls` do not move over `t2..t3`; `cluster.mitm_internal.upstream_cx_total` equals A × C and stays flat; `http.egress_connect.downstream_rq_idle_timeout`, `downstream_cx_idle_timeout` and `downstream_cx_protocol_error` do not move. |
