@@ -77,6 +77,12 @@ type StartRequest struct {
 	OffsetMs int64 `json:"offsetMs,omitempty"`
 	// Scheme is SchemeHTTP or SchemeHTTPS; empty means SchemeHTTP.
 	Scheme string `json:"scheme,omitempty"`
+	// Actor, Cell and Run name this loop: the actor as <atespace>/<name>, the
+	// cell it runs in, and the run the cell belongs to. All three are
+	// attributes on every metric the loop exports and all three are required.
+	Actor string `json:"actor"`
+	Cell  string `json:"cell"`
+	Run   string `json:"run"`
 }
 
 // URLScheme is the scheme the loop requests endpoints over.
@@ -106,6 +112,11 @@ func (r *StartRequest) Validate() error {
 	}
 	if r.Scheme != "" && r.Scheme != SchemeHTTP && r.Scheme != SchemeHTTPS {
 		return fmt.Errorf("scheme must be %s or %s, got %q", SchemeHTTP, SchemeHTTPS, r.Scheme)
+	}
+	for _, f := range []struct{ name, value string }{{"actor", r.Actor}, {"cell", r.Cell}, {"run", r.Run}} {
+		if f.value == "" {
+			return fmt.Errorf("%s is required", f.name)
+		}
 	}
 	return nil
 }

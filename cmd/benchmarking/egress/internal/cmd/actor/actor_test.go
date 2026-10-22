@@ -242,10 +242,10 @@ const (
 // that no route serves a distribution.
 const collectRoute = "/collect?window=1"
 
-// start posts /start with req.
+// start posts /start with req, identified.
 func start(t *testing.T, h http.Handler, req contract.StartRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	return post(t, h, contract.StartRoute, req)
+	return post(t, h, contract.StartRoute, identified(req))
 }
 
 // readStats polls the counters.
@@ -516,12 +516,17 @@ func TestStartStopLifecycle(t *testing.T) {
 func TestStartRejectsBadRequests(t *testing.T) {
 	t.Parallel()
 	h := newServer().handler()
+	const named = `"actor":"benchmark-workloads/egress-0","cell":"cell-1","run":"run-1"`
 	for _, tc := range []struct{ name, body string }{
 		{"not json", `not json`},
 		{"empty object", `{}`},
-		{"zero endpoints", `{"endpoints":0}`},
-		{"too many endpoints", `{"endpoints":1025}`},
-		{"unknown scheme", `{"endpoints":1,"scheme":"ftp"}`},
+		{"zero endpoints", `{"endpoints":0,` + named + `}`},
+		{"too many endpoints", `{"endpoints":1025,` + named + `}`},
+		{"unknown scheme", `{"endpoints":1,"scheme":"ftp",` + named + `}`},
+		{"no identity", `{"endpoints":1}`},
+		{"no actor", `{"endpoints":1,"cell":"cell-1","run":"run-1"}`},
+		{"no cell", `{"endpoints":1,"actor":"benchmark-workloads/egress-0","run":"run-1"}`},
+		{"no run", `{"endpoints":1,"actor":"benchmark-workloads/egress-0","cell":"cell-1"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1379,7 +1384,7 @@ func TestEveryRouteCarriesProtocolHeader(t *testing.T) {
 func TestPayloadBudget(t *testing.T) {
 	t.Parallel()
 	const c = contract.MaxEndpoints
-	run, err := newLoopRun(context.Background(), contract.StartRequest{Endpoints: c, Scheme: contract.SchemeHTTPS}, nil)
+	run, err := newLoopRun(context.Background(), identified(contract.StartRequest{Endpoints: c, Scheme: contract.SchemeHTTPS}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
