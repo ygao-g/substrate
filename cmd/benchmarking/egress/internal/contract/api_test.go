@@ -16,6 +16,13 @@ package contract
 
 import "testing"
 
+// named is a StartRequest with the three identity fields filled, so a case
+// states only what it is about.
+func named(r StartRequest) StartRequest {
+	r.Actor, r.Cell, r.Run = "benchmark-workloads/egress-0", "cell-1", "run-1"
+	return r
+}
+
 func TestStartRequestValidate(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -23,20 +30,24 @@ func TestStartRequestValidate(t *testing.T) {
 		req     StartRequest
 		wantErr bool
 	}{
-		{"ok", StartRequest{Endpoints: 10}, false},
-		{"http", StartRequest{Endpoints: 10, Scheme: SchemeHTTP}, false},
-		{"https", StartRequest{Endpoints: 10, Scheme: SchemeHTTPS}, false},
-		{"bad scheme", StartRequest{Endpoints: 10, Scheme: "ftp"}, true},
-		{"most endpoints", StartRequest{Endpoints: MaxEndpoints}, false},
-		{"no endpoints", StartRequest{}, true},
-		{"too many endpoints", StartRequest{Endpoints: MaxEndpoints + 1}, true},
-		{"negative timeout", StartRequest{Endpoints: 1, RequestTimeoutMs: -1}, true},
-		{"negative interval", StartRequest{Endpoints: 1, IntervalMs: -1}, true},
-		{"offset", StartRequest{Endpoints: 3, IntervalMs: 100, OffsetMs: 50}, false},
-		{"offset of one period", StartRequest{Endpoints: 3, IntervalMs: 100, OffsetMs: 300}, false},
-		{"offset over one period", StartRequest{Endpoints: 3, IntervalMs: 100, OffsetMs: 301}, true},
-		{"negative offset", StartRequest{Endpoints: 1, IntervalMs: 100, OffsetMs: -1}, true},
-		{"offset without interval", StartRequest{Endpoints: 1, OffsetMs: 1}, true},
+		{"ok", named(StartRequest{Endpoints: 10}), false},
+		{"http", named(StartRequest{Endpoints: 10, Scheme: SchemeHTTP}), false},
+		{"https", named(StartRequest{Endpoints: 10, Scheme: SchemeHTTPS}), false},
+		{"bad scheme", named(StartRequest{Endpoints: 10, Scheme: "ftp"}), true},
+		{"most endpoints", named(StartRequest{Endpoints: MaxEndpoints}), false},
+		{"no endpoints", named(StartRequest{}), true},
+		{"too many endpoints", named(StartRequest{Endpoints: MaxEndpoints + 1}), true},
+		{"negative timeout", named(StartRequest{Endpoints: 1, RequestTimeoutMs: -1}), true},
+		{"negative interval", named(StartRequest{Endpoints: 1, IntervalMs: -1}), true},
+		{"offset", named(StartRequest{Endpoints: 3, IntervalMs: 100, OffsetMs: 50}), false},
+		{"offset of one period", named(StartRequest{Endpoints: 3, IntervalMs: 100, OffsetMs: 300}), false},
+		{"offset over one period", named(StartRequest{Endpoints: 3, IntervalMs: 100, OffsetMs: 301}), true},
+		{"negative offset", named(StartRequest{Endpoints: 1, IntervalMs: 100, OffsetMs: -1}), true},
+		{"offset without interval", named(StartRequest{Endpoints: 1, OffsetMs: 1}), true},
+		{"no identity", StartRequest{Endpoints: 1}, true},
+		{"no actor", StartRequest{Endpoints: 1, Cell: "cell-1", Run: "run-1"}, true},
+		{"no cell", StartRequest{Endpoints: 1, Actor: "benchmark-workloads/egress-0", Run: "run-1"}, true},
+		{"no run", StartRequest{Endpoints: 1, Actor: "benchmark-workloads/egress-0", Cell: "cell-1"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

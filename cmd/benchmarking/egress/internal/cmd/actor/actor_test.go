@@ -238,10 +238,10 @@ const (
 	stopPath  = contract.StopRoute + "?endpoints=1"
 )
 
-// start posts /start with req.
+// start posts /start with req, identified.
 func start(t *testing.T, h http.Handler, req contract.StartRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	return post(t, h, contract.StartRoute, req)
+	return post(t, h, contract.StartRoute, identified(req))
 }
 
 // readStats polls the counters.
@@ -447,10 +447,12 @@ func TestStartStopLifecycle(t *testing.T) {
 func TestStartRejectsBadRequests(t *testing.T) {
 	t.Parallel()
 	h := newServer().handler()
+	const named = `"actor":"benchmark-workloads/egress-0","cell":"cell-1","run":"run-1"`
 	for _, tc := range []struct{ name, body string }{
 		{"not json", `not json`},
 		{"empty object", `{}`},
-		{"invalid", `{"endpoints":1,"scheme":"ftp"}`},
+		{"invalid", `{"endpoints":1,"scheme":"ftp",` + named + `}`},
+		{"no identity", `{"endpoints":1}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1277,7 +1279,7 @@ func TestEveryRouteCarriesProtocolHeader(t *testing.T) {
 func TestPayloadBudget(t *testing.T) {
 	t.Parallel()
 	const c = contract.MaxEndpoints
-	run, err := newLoopRun(context.Background(), contract.StartRequest{Endpoints: c, Scheme: contract.SchemeHTTPS}, nil)
+	run, err := newLoopRun(context.Background(), identified(contract.StartRequest{Endpoints: c, Scheme: contract.SchemeHTTPS}), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
