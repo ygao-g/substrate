@@ -21,10 +21,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 
 	"go.ate.dev/substrate/cmd/benchmarking/egress/internal/contract"
 )
@@ -43,9 +50,18 @@ const (
 	longestGapName      = "longest_gap"
 )
 
+// serviceName is the resource's service.name unless the environment sets
+// one; the collector's exporter writes it as the job label.
+const serviceName = "benchmark-egress-actor"
+
+// endpointEnv is the OTLP endpoint the SDK reads; set, the loop exports.
+const endpointEnv = "OTEL_EXPORTER_OTLP_ENDPOINT"
+
 // Recorder holds one loop's instruments on a private MeterProvider: the
-// counters that mirror its Stats and the four latency histograms. Without a
-// reader every method is a cheap no-op.
+// counters that mirror its Stats and the four latency histograms, every point
+// under the loop's actor, cell and run. With OTEL_EXPORTER_OTLP_ENDPOINT set
+// the provider pushes them over OTLP at the interval the environment names;
+// without it the provider has no reader and every method is a cheap no-op.
 type Recorder struct {
 	provider *sdkmetric.MeterProvider
 	hists    map[contract.Distribution]metric.Float64Histogram
@@ -58,23 +74,48 @@ type Recorder struct {
 	attrs, success, failure metric.MeasurementOption
 }
 
-// NewRecorder creates the instruments for the loop req starts, on a private
-// MeterProvider with readers, which tests use to read the instruments.
+// NewRecorder creates the instruments for the loop req starts, with the
+// OTLP reader when the environment names an endpoint, plus readers, which
+// tests use to read the instruments without an exporter. The resource takes
+// service.name from the environment and a fresh service.instance.id, so a
+// restarted actor never continues the old series.
 func NewRecorder(ctx context.Context, req contract.StartRequest, readers ...sdkmetric.Reader) (*Recorder, error) {
-	opts := make([]sdkmetric.Option, 0, len(readers))
+	res, err := resource.New(ctx,
+		resource.WithAttributes(semconv.ServiceName(serviceName)),
+		resource.WithFromEnv(),
+		resource.WithAttributes(semconv.ServiceInstanceID(uuid.NewString())),
+	)
+	if errors.Is(err, resource.ErrPartialResource) {
+		slog.WarnContext(ctx, "partial telemetry resource", "err", err)
+	} else if err != nil {
+		return nil, fmt.Errorf("building the resource: %w", err)
+	}
+	opts := []sdkmetric.Option{sdkmetric.WithResource(res)}
+	if os.Getenv(endpointEnv) != "" {
+		exp, err := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithTemporalitySelector(cumulative))
+		if err != nil {
+			return nil, fmt.Errorf("creating the OTLP exporter: %w", err)
+		}
+		opts = append(opts, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp)))
+	}
 	for _, rd := range readers {
 		opts = append(opts, sdkmetric.WithReader(rd))
 	}
 	r := &Recorder{provider: sdkmetric.NewMeterProvider(opts...), hists: make(map[contract.Distribution]metric.Float64Histogram, len(contract.DistributionNames))}
+	loop := attribute.NewSet(attribute.String("actor", req.Actor), attribute.String("cell", req.Cell), attribute.String("run", req.Run))
 	withResult := func(result string) metric.MeasurementOption {
-		return metric.WithAttributeSet(attribute.NewSet(attribute.String("result", result)))
+		return metric.WithAttributeSet(attribute.NewSet(append(loop.ToSlice(), attribute.String("result", result))...))
 	}
-	r.attrs, r.success, r.failure = metric.WithAttributeSet(attribute.NewSet()), withResult("success"), withResult("error")
+	r.attrs, r.success, r.failure = metric.WithAttributeSet(loop), withResult("success"), withResult("error")
 	if err := r.instruments(r.provider.Meter(meterName)); err != nil {
 		_ = r.provider.Shutdown(context.Background())
 		return nil, err
 	}
 	return r, nil
+}
+
+func cumulative(sdkmetric.InstrumentKind) metricdata.Temporality {
+	return metricdata.CumulativeTemporality
 }
 
 // instruments creates the eleven instruments on meter.
