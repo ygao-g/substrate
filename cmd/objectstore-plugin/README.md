@@ -15,6 +15,19 @@ snapshot prefixes, read-write on its own and read-only on the tag it was
 created from. The exchange is private to this plugin, defined in
 `internal/proto/objectstoreexchangepb`.
 
+On the node side, `node` mode on GCS dials that exchange, at
+`--exchange-address` through the ate-api-server Service, verified with
+`--exchange-ca-file` and `--exchange-server-name`. Each `FetchSnapshot` or
+`UploadSnapshot` runs on a storage client built with the actor's token. The
+token and the client are cached under the JWT they were obtained for, never
+under a claim read out of it, while at least twenty minutes remain, so the
+transfers that follow one another for an actor share connections. A client
+that leaves the cache is not closed, its connections close once idle. A request
+GCS refuses with a cached token is retried once with a token the exchange
+re-derives, and a second refusal is `PERMISSION_DENIED`. A transfer without
+`actor_jwt` is `INVALID_ARGUMENT` on GCS. S3 ignores the field and transfers
+with the pod's own credentials.
+
 The JWT is the one ate-api-server mints for atelet through
 `WorkerService.MintWorkerActorJwt`, with the audience named on the
 `actor_jwt` proto field. Its shape is defined in `internal/actoridjwt`, and
@@ -35,6 +48,9 @@ Reusable by every provider:
 
 This binary's, GCS and S3:
 
+- `internal/objectstoreplugin`: the node, asset and control plugins behind the
+  socket, and the `Credentials` seam a transfer gets its storage client from,
+  the pod's own on S3.
 - `internal/proto/objectstoreexchangepb`: the private wire format between the
   node and control sidecars.
 - `internal/objectstoreplugin/exchange`: the handler, and the `Issuer` interface
@@ -43,6 +59,9 @@ This binary's, GCS and S3:
   rules.
 - `internal/objectstoreplugin/gcsissuer`: the GCS `Issuer`, STS exchange and
   token cache.
+- `internal/objectstoreplugin/exchangeclient`: the node side on GCS, the
+  exchange call and the cache of tokens and storage clients per JWT. The
+  `Credentials` interface in `internal/objectstoreplugin` is its seam.
 - `cmd/objectstore-plugin`: the binary and its wiring.
 
 S3 has no issuer: its node plugin ignores the JWT and transfers with the
@@ -68,11 +87,13 @@ in memory. The sparse format and download readers are unchanged.
 
 With the current buffer sizes, the minimum budget is `384Mi` for GCS and `224Mi`
 for S3. Startup rejects smaller values. Each upload reserves for the path it
-takes: on GCS, a file split into range parts reserves only those parts, and an
-object whose sparse stream is bounded below one request (`64Mi`) reserves that
-request's buffers instead of the composite-upload buffers. Other streamed
-objects still reserve for a composite upload, even when they ultimately fit in
-one request. Raise the budget to trade memory for more simultaneous uploads.
+takes: on GCS, a file split into range parts reserves only those parts, sparse
+files with less than `8Mi` of populated data scale their compression chunk
+buffers down to `1Mi`, and an object whose stream is bounded below one request
+(`64Mi`) sizes both its lookahead and single-request chunk buffer to that
+bound instead of the composite-upload buffers. Unbounded streamed objects still
+reserve for a composite upload, even when they ultimately fit in one request.
+Raise the budget to trade memory for more simultaneous uploads.
 
 The budget is **not a process memory limit**. The Go runtime, garbage awaiting
 collection, connections, downloads, and asset transfers need additional memory.

@@ -354,10 +354,8 @@ message Snapshot {
   // +k8s:format=k8s-uuid
   string actor_template_uid = 5;
 
-  // locality identifies the node holding this snapshot's files (currently the
-  // Kubernetes node name). Set when a local pause checkpoint completes, and
-  // cleared once the files are deleted from that node; a resume does not
-  // delete them.
+  // locality identifies the Kubernetes node holding this snapshot's files.
+  // Detach, revert, or a later checkpoint clears it. Resume keeps the files.
   //
   // +k8s:optional
   // +k8s:format=k8s-long-name
@@ -902,9 +900,9 @@ message ActorStatus {
   // +k8s:optional
   ActorCrash crash = 4;
 
-  // assigned_node is the Kubernetes node the Actor is currently attached to
-  // (hosting its active worker or its node-local snapshots). Unset when the
-  // Actor is detached from any node.
+  // assigned_node is the node hosting the Actor's worker or local snapshot.
+  // A suspended Actor remains attached while its local snapshot is kept.
+  // Detach or revert clears the binding.
   //
   // +k8s:optional
   // +k8s:format=k8s-long-name
@@ -1168,36 +1166,34 @@ message ActorTemplate {
   //
   // +k8s:required
   // +k8s:customValidation # cpu and memory limits are both set
-  Resources resources = 6;
+  ResourceRequirements resources = 6;
 
   // +k8s:optional
   ActorTemplateStatus status = 7;
 }
 
-message Resources {
-  // limits is the maximum amount of compute resources allowed. Only "cpu"
-  // and "memory" are supported, each at most once, and each quantity must be
-  // greater than zero; the cpu limit must be less than 1000 cores.
+// ResourceRequirements are the compute resources a workload may use.
+message ResourceRequirements {
+  // limits is the maximum amount of compute resources allowed.
   //
   // +k8s:optional
-  // +k8s:maxItems=2
-  // +k8s:listType=map
-  // +k8s:listMapKey=name
-  repeated Limits limits = 1;
+  Resources limits = 1;
 }
 
-// +k8s:customValidation # names, quantity parse/positivity, cpu bound
-message Limits {
-  // +k8s:required
-  // +k8s:maxLength=16 # the Limits hook restricts values to cpu/memory
-  string name = 1;
-
-  // quantity is in Kubernetes resource.Quantity string form (e.g. "500m",
-  // "2Gi").
+// Resources is an amount of each compute resource.
+message Resources {
+  // cpu_millicores is CPU in millicores (1000 = one core). 0 means none.
   //
-  // +k8s:required
-  // +k8s:maxLength=32 # the Limits hook requires a parseable quantity
-  string quantity = 2;
+  // +k8s:optional
+  // +k8s:minimum=0
+  // +k8s:maximum=999999 # less than 1000 cores
+  int64 cpu_millicores = 1;
+
+  // memory_bytes is memory in bytes. 0 means none.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  int64 memory_bytes = 2;
 }
 
 message GoldenSnapshotStatus {
@@ -1345,10 +1341,10 @@ message Container {
   SecurityContext security_context = 8;
 
   // resources carries this container's compute limits, enforced inside the
-  // actor's sandbox. Only cpu and memory limits are supported.
+  // actor's sandbox. A limit of 0 leaves that resource unlimited.
   //
   // +k8s:optional
-  Resources resources = 9;
+  ResourceRequirements resources = 9;
 }
 
 // SecurityContext holds security settings for a container's process,
@@ -1502,13 +1498,11 @@ message DurableDirVolumeSource {}
 // ExternalVolumeTemplate provisions an external volume per actor; the volume
 // lives only as long as the actor.
 message ExternalVolumeTemplate {
-  // capacity of the volume to create, in Kubernetes resource.Quantity string
-  // form (e.g. "10Gi"). Required.
+  // capacity_bytes is the size of the volume to create, in bytes. Required.
   //
   // +k8s:required
-  // +k8s:maxLength=32 # matches Limits.quantity's bound
-  // +k8s:customValidation # must parse as a resource.Quantity
-  string capacity = 1;
+  // +k8s:minimum=1
+  int64 capacity_bytes = 1;
 
   // storage_class_name names the cluster-scoped Kubernetes StorageClass to
   // create the volume from. Required.
@@ -2320,14 +2314,6 @@ message Worker {
   // +k8s:immutable
   string worker_spiffe_id = 8;
 
-  // sandbox_class mirrors the WorkerPool's default sandbox class
-  //
-  // +k8s:optional
-  // +k8s:maxLength=63
-  // +k8s:customValidation # gvisor or microvm
-  // +k8s:immutable
-  string sandbox_class = 9;
-
   // labels mirror the WorkerPool object's Kubernetes labels, which selectors
   // match against.
   // Kubernetes does not cap an object's label count, so the bound below is
@@ -2337,7 +2323,7 @@ message Worker {
   // +k8s:maxProperties=64
   // +k8s:eachKey=+k8s:format=k8s-label-key
   // +k8s:eachVal=+k8s:format=k8s-label-value
-  map<string, string> labels = 10;
+  map<string, string> labels = 9;
 
   // epoch counts the runs of the worker pod's worker container: 1 for its first
   // run and one more for each restart. 0 means it has not been reported.
@@ -2351,7 +2337,7 @@ message Worker {
   // +k8s:minimum=0
   // +k8s:update=NoUnset
   // +k8s:customValidation
-  int64 epoch = 11;
+  int64 epoch = 10;
 
   // Output-only server-managed state. Absent from Create/Update request
   // payloads; whatever a request carries here is ignored. A client moves
@@ -2359,7 +2345,7 @@ message Worker {
   // MarkWorkerUnavailable, and the assignments are the scheduler's.
   //
   // +k8s:optional
-  WorkerStatus status = 12;
+  WorkerStatus status = 11;
 }
 
 enum WorkerState {
@@ -2410,7 +2396,8 @@ message WorkerStatus {
 
   // Runtime that new and cold-booted actors start under, as reported by the
   // Worker at registration. Snapshots matching default_runtime can also
-  // warm-boot on this worker.
+  // warm-boot on this worker. Its sandbox_class is the Worker's class, fixed
+  // by the first RegisterWorker call.
   //
   // +k8s:optional
   SandboxRuntime default_runtime = 5;
@@ -2493,11 +2480,20 @@ message AttributeEntry {
 
 // WorkerResources represents a set of resources.
 message WorkerResources {
-  // Resources match the Actor's definition of resources.
-  // They are matched by name and used for placement.
+  // cpu_millicores is CPU in millicores (1000 = one core). Compared against
+  // the Actor's resource limits for placement.
   //
   // +k8s:optional
-  Resources resources = 1;
+  // +k8s:minimum=0
+  // +k8s:maximum=999999 # less than 1000 cores
+  int64 cpu_millicores = 1;
+
+  // memory_bytes is memory in bytes. Compared against the Actor's resource
+  // limits for placement.
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  int64 memory_bytes = 2;
 
   // A count of Actors.  Workers can use this to limit the number of Actors
   // that can be placed on them, constraining the costs of other things that
@@ -2506,7 +2502,7 @@ message WorkerResources {
   //
   // +k8s:optional
   // +k8s:minimum=1
-  int32 actors = 2;
+  int32 actors = 3;
 }
 
 // ActorAssignment binds an Actor to a Worker.  This is a subresource of the
@@ -2655,7 +2651,9 @@ message RegisterWorkerRequest {
 
   // Runtime that new and cold-booted actors start under.
   // Snapshots matching default_runtime can also warm-boot on this worker.
-  // Like capacity, this replaces what is recorded on the Worker.
+  // The first registration fixes the Worker's sandbox_class; later reports
+  // replace version and compatibility attributes, but a different
+  // sandbox_class is refused.
   //
   // +k8s:required
   SandboxRuntime default_runtime = 3;

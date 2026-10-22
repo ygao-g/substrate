@@ -160,17 +160,6 @@ func TestValidateCreateWorkerRequest(t *testing.T) {
 		})),
 		want: field.ErrorList{field.TooLong(field.NewPath("worker", "worker_spiffe_id"), nil, 2048).WithOrigin("maxLength")},
 	}, {
-		name: "sandbox_class too long",
-		req:  validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) { w.SandboxClass = strings.Repeat("x", 64) })),
-		want: field.ErrorList{
-			field.TooLong(field.NewPath("worker", "sandbox_class"), nil, 63).WithOrigin("maxLength"),
-			field.NotSupported[string](field.NewPath("worker", "sandbox_class"), nil, nil),
-		},
-	}, {
-		name: "unsupported sandbox_class",
-		req:  validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) { w.SandboxClass = "kata" })),
-		want: field.ErrorList{field.NotSupported[string](field.NewPath("worker", "sandbox_class"), nil, nil)},
-	}, {
 		name: "valid labels",
 		req: validReq(validWorker(apiWorkerName, func(w *ateapipb.Worker) {
 			w.Labels = map[string]string{"tier": "batch", "pool.ate.io/zone": "us-west1-c"}
@@ -354,10 +343,8 @@ func TestValidateRegisterWorkerRequest(t *testing.T) {
 		r := &ateapipb.RegisterWorkerRequest{
 			Worker: workerRef(apiWorkerName),
 			Capacity: &ateapipb.WorkerResources{
-				Actors: 10,
-				Resources: &ateapipb.Resources{
-					Limits: []*ateapipb.Limits{{Name: "cpu", Quantity: "2"}, {Name: "memory", Quantity: "4Gi"}},
-				},
+				Actors:        10,
+				CpuMillicores: 2000, MemoryBytes: 4 << 30,
 			},
 			DefaultRuntime: validRuntime(),
 		}
@@ -416,11 +403,9 @@ func TestValidateRegisterWorkerRequest(t *testing.T) {
 		req:  valid(func(r *ateapipb.RegisterWorkerRequest) { r.Capacity.Actors = -1 }),
 		want: field.ErrorList{field.Invalid(field.NewPath("capacity", "actors"), nil, "").WithOrigin("minimum")},
 	}, {
-		name: "invalid limit quantity",
-		req: valid(func(r *ateapipb.RegisterWorkerRequest) {
-			r.Capacity.Resources.Limits = []*ateapipb.Limits{{Name: "cpu", Quantity: "lots"}}
-		}),
-		want: field.ErrorList{field.Invalid(field.NewPath("capacity", "resources", "limits").Index(0).Child("quantity"), nil, "")},
+		name: "negative capacity.memory_bytes",
+		req:  valid(func(r *ateapipb.RegisterWorkerRequest) { r.Capacity.MemoryBytes = -1 }),
+		want: field.ErrorList{field.Invalid(field.NewPath("capacity", "memory_bytes"), nil, "").WithOrigin("minimum")},
 	}, {
 		name: "missing default_runtime",
 		req:  valid(func(r *ateapipb.RegisterWorkerRequest) { r.DefaultRuntime = nil }),
@@ -806,7 +791,6 @@ func validWorker(name string, mods ...func(*ateapipb.Worker)) *ateapipb.Worker {
 		WorkerPodUid:    name,
 		NodeName:        "node-1",
 		Ips:             []string{"10.1.2.3"},
-		SandboxClass:    "gvisor",
 	}
 	for _, m := range mods {
 		m(w)

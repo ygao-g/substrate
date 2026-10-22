@@ -67,17 +67,27 @@ func restoreMemMode(ctx context.Context, info ch.VMMInfo) string {
 	return ch.MemRestoreEager
 }
 
+// reseedTimeout bounds ReseedRandomDev. It needs to cover a whole resume wave, not a
+// single quiet guest.
+const reseedTimeout = 60 * time.Second
+
+// randomDevReseeder is the part of *kata.AgentClient that reseedGuestCRNG
+// uses, so tests can fake it.
+type randomDevReseeder interface {
+	ReseedRandomDev(ctx context.Context, data []byte) error
+}
+
 // reseedGuestCRNG mixes fresh, per-restore entropy into the restored guest's kernel
 // CRNG through the kata-agent (see the call site in restoreMemoryFidelity for why a restore
 // needs this). The nonce is a throwaway; its only job is to differ between restores so
 // that clones of one snapshot diverge instead of producing identical randomness. The
 // caller owns ac: it stays open for log forwarding and guest stats.
-func reseedGuestCRNG(ctx context.Context, ac *kata.AgentClient) error {
+func reseedGuestCRNG(ctx context.Context, ac randomDevReseeder) error {
 	nonce, err := newReseedNonce()
 	if err != nil {
 		return err
 	}
-	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	rctx, cancel := context.WithTimeout(ctx, reseedTimeout)
 	defer cancel()
 	return ac.ReseedRandomDev(rctx, nonce)
 }
@@ -142,7 +152,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 		containers:       req.GetSpec().GetContainers(),
 		assetPaths:       req.GetRuntimeAssetPaths(),
 		egressGateway:    req.GetEgressGateway(),
-		size:             sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
+		size:             sizing.FromLimits(req.GetResources().GetLimits()),
 	}
 	restoreDir := p.actorDirs.GetRestoreDir()
 	durableDir := p.actorDirs.GetDurableDirVolumeMountsDir()
@@ -447,6 +457,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	if err := reseedGuestCRNG(ctx, guestAC); err != nil {
 		return fmt.Errorf("while reseeding guest CRNG: %w", err)
 	}
+	tReseeded := time.Now()
 
 	// Block until every wakeup-probe-enabled container reports 200.
 	if err := wakeupprobe.WaitAll(ctx, containers, actornet.ActorVethIP, wakeupprobe.DialFunc(s.sandboxDialer(actorUID))); err != nil {
@@ -456,7 +467,8 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// Where a resume goes. Like the boot phases, this used to be a single total,
 	// which hid that a first (cold) restore and a later (warm) one differ by more
 	// than 5x on the same actor. upper/lowers is the host reassembling the rootfs;
-	// vm_restore is cloud-hypervisor reading guest RAM back.
+	// vm_restore is cloud-hypervisor reading guest RAM back; reseed is the kata-agent dial
+	// and the CRNG reseed, the head of wakeup_probe.
 	dWakeupProbe := time.Since(tResume)
 	dTotal := time.Since(tStart)
 	slog.InfoContext(ctx, "Actor restore phases", slog.String("id", actorUID),
@@ -469,6 +481,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 		slog.Duration("vmm_launch", tLaunch.Sub(tTap)),
 		slog.Duration("vm_restore", tVMRestore.Sub(tLaunch)),
 		slog.Duration("resume", tResume.Sub(tVMRestore)),
+		slog.Duration("reseed", tReseeded.Sub(tResume)),
 		slog.Duration("wakeup_probe", dWakeupProbe),
 		slog.Duration("total", dTotal))
 	// The joinable per-actor record the benchmarking tooling aggregates. The

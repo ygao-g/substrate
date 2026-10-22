@@ -27,23 +27,6 @@ import (
 
 const testDigestImage = "example.com/app@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-const testSHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-
-func validSandboxAssets(mutate ...func(*ateletpb.SandboxAssets)) *ateletpb.SandboxAssets {
-	a := &ateletpb.SandboxAssets{
-		SandboxClass: "gvisor",
-		PauseImage:   testDigestImage,
-		Assets: map[string]*ateletpb.ArchAssets{
-			"amd64": {Files: map[string]*ateletpb.AssetFile{"gvisor": {Url: "gs://bucket/gvisor.tar.zstd", Sha256: testSHA256}}},
-			"arm64": {Files: map[string]*ateletpb.AssetFile{"gvisor": {Url: "gs://bucket/gvisor.tar.zstd", Sha256: testSHA256}}},
-		},
-	}
-	for _, m := range mutate {
-		m(a)
-	}
-	return a
-}
-
 // createOp is for tests of nested messages, which have no request wrapper.
 var createOp = operation.Operation{Type: operation.Create}
 
@@ -247,9 +230,8 @@ func TestValidateRunRequest(t *testing.T) {
 			ActorTemplateAtespace: "team-a",
 			ActorTemplateName:     "tmpl-1",
 			Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "worker", Image: testDigestImage}}},
-			SandboxAssets:         validSandboxAssets(),
-			CpuMilli:              500,
-			MemoryBytes:           1 << 30,
+			SandboxRuntime:        runtimeWithAttributes(1),
+			Resources:             &ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: 500, MemoryBytes: 1 << 30}},
 		}
 		for _, m := range mutate {
 			m(r)
@@ -320,14 +302,6 @@ func TestValidateRunRequest(t *testing.T) {
 		obj:  valid(func(r *ateletpb.RunRequest) { r.Spec = nil }),
 		want: field.ErrorList{field.Required(field.NewPath("spec"), "")},
 	}, {
-		name: "missing sandbox_assets",
-		obj:  valid(func(r *ateletpb.RunRequest) { r.SandboxAssets = nil }),
-		want: field.ErrorList{field.Required(field.NewPath("sandbox_assets"), "")},
-	}, {
-		name: "sandbox asset errors surface at the sandbox_assets path",
-		obj:  valid(func(r *ateletpb.RunRequest) { r.SandboxAssets.PauseImage = "registry.k8s.io/pause:3.10.2" }),
-		want: field.ErrorList{field.Invalid(field.NewPath("sandbox_assets", "pause_image"), nil, "")},
-	}, {
 		name: "invalid container name: path escape",
 		obj: valid(func(r *ateletpb.RunRequest) {
 			r.Spec.Containers[0].Name = "../escape"
@@ -371,35 +345,40 @@ func TestValidateRunRequest(t *testing.T) {
 			field.Invalid(field.NewPath("egress_gateway", "address"), nil, ""),
 		},
 	}, {
-		name: "negative cpu_milli",
-		obj:  valid(func(r *ateletpb.RunRequest) { r.CpuMilli = -1 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("cpu_milli"), nil, "").WithOrigin("minimum")},
+		name: "negative cpu_millicores",
+		obj: valid(func(r *ateletpb.RunRequest) {
+			r.Resources = &ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: -1}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("minimum")},
 	}, {
-		name: "cpu_milli at the bound",
-		obj:  valid(func(r *ateletpb.RunRequest) { r.CpuMilli = 999999 }),
+		name: "cpu_millicores at the bound",
+		obj: valid(func(r *ateletpb.RunRequest) {
+			r.Resources = &ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: 999999}}
+		}),
 	}, {
-		name: "cpu_milli over the bound",
-		obj:  valid(func(r *ateletpb.RunRequest) { r.CpuMilli = 1000000 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("cpu_milli"), nil, "").WithOrigin("maximum")},
+		name: "cpu_millicores over the bound",
+		obj: valid(func(r *ateletpb.RunRequest) {
+			r.Resources = &ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: 1000000}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("maximum")},
 	}, {
 		name: "negative memory_bytes",
-		obj:  valid(func(r *ateletpb.RunRequest) { r.MemoryBytes = -1 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("memory_bytes"), nil, "").WithOrigin("minimum")},
+		obj: valid(func(r *ateletpb.RunRequest) {
+			r.Resources = &ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{MemoryBytes: -1}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "memory_bytes"), nil, "").WithOrigin("minimum")},
 	}, {
 		name: "unset sizes are allowed",
 		obj: valid(func(r *ateletpb.RunRequest) {
-			r.CpuMilli = 0
-			r.MemoryBytes = 0
+			r.Resources = nil
 		}),
 	}, {
-		name: "valid sandbox_runtime",
-		obj: valid(func(r *ateletpb.RunRequest) {
-			r.SandboxRuntime = runtimeWithAttributes(1)
-		}),
+		name: "missing sandbox_runtime",
+		obj:  valid(func(r *ateletpb.RunRequest) { r.SandboxRuntime = nil }),
+		want: field.ErrorList{field.Required(field.NewPath("sandbox_runtime"), "")},
 	}, {
 		name: "sandbox_runtime errors surface at their path",
 		obj: valid(func(r *ateletpb.RunRequest) {
-			r.SandboxRuntime = runtimeWithAttributes(1)
 			r.SandboxRuntime.SandboxClass = "kata"
 		}),
 		want: field.ErrorList{field.NotSupported[string](field.NewPath("sandbox_runtime", "sandbox_class"), nil, nil)},
@@ -407,101 +386,6 @@ func TestValidateRunRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assertValidateErr(t, ValidateRunRequest(context.Background(), tt.obj), tt.want)
-		})
-	}
-}
-
-// TestValidateSandboxAssets covers SandboxAssets and the asset files it holds.
-func TestValidateSandboxAssets(t *testing.T) {
-	file := func(url, sha string) *ateletpb.ArchAssets {
-		return &ateletpb.ArchAssets{Files: map[string]*ateletpb.AssetFile{"gvisor": {Url: url, Sha256: sha}}}
-	}
-	amd64 := field.NewPath("assets").Key("amd64")
-	amd64File := amd64.Child("files").Key("gvisor")
-
-	tests := []struct {
-		name string
-		obj  *ateletpb.SandboxAssets
-		want field.ErrorList
-	}{{
-		name: "valid gvisor",
-		obj:  validSandboxAssets(),
-	}, {
-		name: "valid microvm",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.SandboxClass = "microvm" }),
-	}, {
-		name: "missing sandbox_class",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.SandboxClass = "" }),
-		want: field.ErrorList{field.Required(field.NewPath("sandbox_class"), "")},
-	}, {
-		name: "unknown sandbox_class",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.SandboxClass = "kvm" }),
-		want: field.ErrorList{field.NotSupported[string](field.NewPath("sandbox_class"), nil, nil)},
-	}, {
-		name: "sandbox_class is case-sensitive",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.SandboxClass = "GVISOR" }),
-		want: field.ErrorList{field.NotSupported[string](field.NewPath("sandbox_class"), nil, nil)},
-	}, {
-		name: "sandbox_class too long",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.SandboxClass = strings.Repeat("g", 64) }),
-		want: field.ErrorList{
-			field.TooLong(field.NewPath("sandbox_class"), nil, 63).WithOrigin("maxLength"),
-			field.NotSupported[string](field.NewPath("sandbox_class"), nil, nil),
-		},
-	}, {
-		name: "valid: no pause_image (microvm has no pause container)",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.PauseImage = "" }),
-	}, {
-		name: "pause_image not pinned by digest",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.PauseImage = "registry.k8s.io/pause:3.10.2" }),
-		want: field.ErrorList{field.Invalid(field.NewPath("pause_image"), nil, "")},
-	}, {
-		name: "missing assets",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.Assets = nil }),
-		want: field.ErrorList{field.Required(field.NewPath("assets"), "")},
-	}, {
-		name: "too many architectures",
-		obj: validSandboxAssets(func(a *ateletpb.SandboxAssets) {
-			for _, arch := range []string{"386", "arm", "loong64", "mips64", "ppc64le", "riscv64", "s390x"} {
-				a.Assets[arch] = file("gs://bucket/gvisor.tar.zstd", testSHA256)
-			}
-		}),
-		want: field.ErrorList{field.TooMany(field.NewPath("assets"), 9, 8).WithOrigin("maxProperties")},
-	}, {
-		name: "architecture with no files",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.Assets["amd64"] = &ateletpb.ArchAssets{} }),
-		want: field.ErrorList{field.Required(amd64.Child("files"), "")},
-	}, {
-		name: "missing url",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.Assets["amd64"] = file("", testSHA256) }),
-		want: field.ErrorList{field.Required(amd64File.Child("url"), "")},
-	}, {
-		name: "missing sha256",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.Assets["amd64"] = file("gs://bucket/gvisor.tar.zstd", "") }),
-		want: field.ErrorList{field.Required(amd64File.Child("sha256"), "")},
-	}, {
-		name: "sha256 too short",
-		obj:  validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.Assets["amd64"] = file("gs://bucket/gvisor.tar.zstd", "deadbeef") }),
-		want: field.ErrorList{field.Invalid(amd64File.Child("sha256"), nil, "")},
-	}, {
-		name: "sha256 too long",
-		obj: validSandboxAssets(func(a *ateletpb.SandboxAssets) {
-			a.Assets["amd64"] = file("gs://bucket/gvisor.tar.zstd", testSHA256+"0")
-		}),
-		want: field.ErrorList{
-			field.TooLong(amd64File.Child("sha256"), nil, 64).WithOrigin("maxLength"),
-			field.Invalid(amd64File.Child("sha256"), nil, ""),
-		},
-	}, {
-		name: "sha256 with a path escape",
-		obj: validSandboxAssets(func(a *ateletpb.SandboxAssets) {
-			a.Assets["amd64"] = file("gs://bucket/gvisor.tar.zstd", "../"+testSHA256[3:])
-		}),
-		want: field.ErrorList{field.Invalid(amd64File.Child("sha256"), nil, "")},
-	}}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assertValidateErr(t, Validate_SandboxAssets(context.Background(), createOp, nil, tt.obj, nil), tt.want)
 		})
 	}
 }
@@ -593,7 +477,7 @@ func TestValidateCheckpointRequest(t *testing.T) {
 	}, {
 		name: "spec errors surface at the spec's path",
 		obj: valid(func(r *ateletpb.CheckpointRequest) {
-			r.Spec = &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "_pause", Image: testDigestImage}}}
+			r.Spec = &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "_sandbox", Image: testDigestImage}}}
 		}),
 		want: field.ErrorList{field.Invalid(field.NewPath("spec", "containers").Index(0).Child("name"), nil, "").WithOrigin("format=k8s-short-name")},
 	}, {
@@ -697,7 +581,7 @@ func TestValidateRestoreRequest(t *testing.T) {
 				Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 				Object:       &ateletpb.ObjectStorage{SnapshotUri: snapshotURI},
 			},
-			SandboxAssets: validSandboxAssets(),
+			SandboxRuntime: runtimeWithAttributes(1),
 		}
 		for _, m := range mutate {
 			m(r)
@@ -724,8 +608,7 @@ func TestValidateRestoreRequest(t *testing.T) {
 	}, {
 		name: "valid size and egress",
 		obj: valid(func(r *ateletpb.RestoreRequest) {
-			r.CpuMilli = 999999
-			r.MemoryBytes = 1 << 30
+			r.Resources = &ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: 999999, MemoryBytes: 1 << 30}}
 			r.EgressGateway = &ateletpb.EgressGateway{Address: "10.0.0.1:15001"}
 		}),
 	}, {
@@ -769,7 +652,7 @@ func TestValidateRestoreRequest(t *testing.T) {
 	}, {
 		name: "spec errors surface at the spec's path",
 		obj: valid(func(r *ateletpb.RestoreRequest) {
-			r.Spec = &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "_pause", Image: testDigestImage}}}
+			r.Spec = &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "_sandbox", Image: testDigestImage}}}
 		}),
 		want: field.ErrorList{field.Invalid(field.NewPath("spec", "containers").Index(0).Child("name"), nil, "").WithOrigin("format=k8s-short-name")},
 	}, {
@@ -816,40 +699,34 @@ func TestValidateRestoreRequest(t *testing.T) {
 			r.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
 		}),
 	}, {
-		name: "negative cpu_milli",
-		obj:  valid(func(r *ateletpb.RestoreRequest) { r.CpuMilli = -1 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("cpu_milli"), nil, "").WithOrigin("minimum")},
+		name: "negative cpu_millicores",
+		obj: valid(func(r *ateletpb.RestoreRequest) {
+			r.Resources = &ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: -1}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("minimum")},
 	}, {
-		name: "cpu_milli too large",
-		obj:  valid(func(r *ateletpb.RestoreRequest) { r.CpuMilli = 1000000 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("cpu_milli"), nil, "").WithOrigin("maximum")},
+		name: "cpu_millicores too large",
+		obj: valid(func(r *ateletpb.RestoreRequest) {
+			r.Resources = &ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: 1000000}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("maximum")},
 	}, {
 		name: "negative memory_bytes",
-		obj:  valid(func(r *ateletpb.RestoreRequest) { r.MemoryBytes = -1 }),
-		want: field.ErrorList{field.Invalid(field.NewPath("memory_bytes"), nil, "").WithOrigin("minimum")},
+		obj: valid(func(r *ateletpb.RestoreRequest) {
+			r.Resources = &ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{MemoryBytes: -1}}
+		}),
+		want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "memory_bytes"), nil, "").WithOrigin("minimum")},
 	}, {
 		name: "empty egress gateway address",
 		obj:  valid(func(r *ateletpb.RestoreRequest) { r.EgressGateway = &ateletpb.EgressGateway{} }),
 		want: field.ErrorList{field.Required(field.NewPath("egress_gateway", "address"), "")},
 	}, {
-		name: "missing sandbox_assets",
-		obj:  valid(func(r *ateletpb.RestoreRequest) { r.SandboxAssets = nil }),
-		want: field.ErrorList{field.Required(field.NewPath("sandbox_assets"), "")},
-	}, {
-		name: "sandbox_assets errors surface at their path",
-		obj: valid(func(r *ateletpb.RestoreRequest) {
-			r.SandboxAssets = validSandboxAssets(func(a *ateletpb.SandboxAssets) { a.SandboxClass = "kata" })
-		}),
-		want: field.ErrorList{field.NotSupported[string](field.NewPath("sandbox_assets", "sandbox_class"), nil, nil)},
-	}, {
-		name: "valid sandbox_runtime",
-		obj: valid(func(r *ateletpb.RestoreRequest) {
-			r.SandboxRuntime = runtimeWithAttributes(1)
-		}),
+		name: "missing sandbox_runtime",
+		obj:  valid(func(r *ateletpb.RestoreRequest) { r.SandboxRuntime = nil }),
+		want: field.ErrorList{field.Required(field.NewPath("sandbox_runtime"), "")},
 	}, {
 		name: "sandbox_runtime errors surface at their path",
 		obj: valid(func(r *ateletpb.RestoreRequest) {
-			r.SandboxRuntime = runtimeWithAttributes(1)
 			r.SandboxRuntime.SandboxClass = "kata"
 		}),
 		want: field.ErrorList{field.NotSupported[string](field.NewPath("sandbox_runtime", "sandbox_class"), nil, nil)},
@@ -1062,7 +939,7 @@ func TestValidateTerminateRequest(t *testing.T) {
 	}, {
 		name: "spec errors surface at the spec's path",
 		obj: valid(func(r *ateletpb.TerminateRequest) {
-			r.Spec = &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "_pause", Image: testDigestImage}}}
+			r.Spec = &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "_sandbox", Image: testDigestImage}}}
 		}),
 		want: field.ErrorList{field.Invalid(field.NewPath("spec", "containers").Index(0).Child("name"), nil, "").WithOrigin("format=k8s-short-name")},
 	}, {
@@ -1146,13 +1023,13 @@ func TestValidateRegisterWorkerRequest(t *testing.T) {
 			},
 		}
 	}
-	withLimits := func(limits ...*ateletpb.Limits) *ateletpb.RegisterWorkerRequest {
+	withCapacity := func(c *ateletpb.WorkerResources) *ateletpb.RegisterWorkerRequest {
 		return &ateletpb.RegisterWorkerRequest{
-			Capacity:       &ateletpb.WorkerResources{Resources: &ateletpb.Resources{Limits: limits}},
+			Capacity:       c,
 			DefaultRuntime: testRuntime(),
 		}
 	}
-	limitsPath := field.NewPath("capacity", "resources", "limits")
+	capacityPath := field.NewPath("capacity")
 	defaultRuntimePath := field.NewPath("default_runtime")
 	restorablePath := field.NewPath("restorable_runtimes")
 
@@ -1378,9 +1255,7 @@ func TestValidateRegisterWorkerRequest(t *testing.T) {
 	}, {
 		name: "full capacity",
 		obj: &ateletpb.RegisterWorkerRequest{
-			Capacity: &ateletpb.WorkerResources{Actors: 4, Resources: &ateletpb.Resources{
-				Limits: []*ateletpb.Limits{{Name: "cpu", Quantity: "4"}, {Name: "memory", Quantity: "8Gi"}},
-			}},
+			Capacity:       &ateletpb.WorkerResources{Actors: 4, CpuMillicores: 4000, MemoryBytes: 8 << 30},
 			DefaultRuntime: testRuntime(),
 		},
 	}, {
@@ -1388,51 +1263,17 @@ func TestValidateRegisterWorkerRequest(t *testing.T) {
 		obj:  &ateletpb.RegisterWorkerRequest{Capacity: &ateletpb.WorkerResources{Actors: -1}, DefaultRuntime: testRuntime()},
 		want: field.ErrorList{field.Invalid(field.NewPath("capacity", "actors"), nil, "").WithOrigin("minimum")},
 	}, {
-		name: "unsupported resource name",
-		obj:  withLimits(&ateletpb.Limits{Name: "gpu", Quantity: "1"}),
-		want: field.ErrorList{field.NotSupported[string](limitsPath.Index(0).Child("name"), nil, nil)},
+		name: "negative cpu_millicores",
+		obj:  withCapacity(&ateletpb.WorkerResources{CpuMillicores: -1}),
+		want: field.ErrorList{field.Invalid(capacityPath.Child("cpu_millicores"), nil, "").WithOrigin("minimum")},
 	}, {
-		name: "missing resource name",
-		obj:  withLimits(&ateletpb.Limits{Quantity: "1"}),
-		want: field.ErrorList{
-			field.Required(limitsPath.Index(0).Child("name"), ""),
-			field.NotSupported[string](limitsPath.Index(0).Child("name"), nil, nil),
-		},
+		name: "cpu_millicores above the cap",
+		obj:  withCapacity(&ateletpb.WorkerResources{CpuMillicores: 1000000}),
+		want: field.ErrorList{field.Invalid(capacityPath.Child("cpu_millicores"), nil, "").WithOrigin("maximum")},
 	}, {
-		name: "resource name too long",
-		obj:  withLimits(&ateletpb.Limits{Name: strings.Repeat("x", 17), Quantity: "1"}),
-		want: field.ErrorList{
-			field.TooLong(limitsPath.Index(0).Child("name"), nil, 16).WithOrigin("maxLength"),
-			field.NotSupported[string](limitsPath.Index(0).Child("name"), nil, nil),
-		},
-	}, {
-		name: "quantity too long",
-		obj:  withLimits(&ateletpb.Limits{Name: "memory", Quantity: "1." + strings.Repeat("0", 31)}),
-		want: field.ErrorList{field.TooLong(limitsPath.Index(0).Child("quantity"), nil, 32).WithOrigin("maxLength")},
-	}, {
-		name: "duplicate resource name",
-		obj:  withLimits(&ateletpb.Limits{Name: "cpu", Quantity: "1"}, &ateletpb.Limits{Name: "cpu", Quantity: "2"}),
-		want: field.ErrorList{field.Duplicate(limitsPath.Index(1), nil)},
-	}, {
-		name: "missing quantity",
-		obj:  withLimits(&ateletpb.Limits{Name: "cpu"}),
-		want: field.ErrorList{field.Required(limitsPath.Index(0).Child("quantity"), "")},
-	}, {
-		name: "malformed quantity",
-		obj:  withLimits(&ateletpb.Limits{Name: "cpu", Quantity: "not-a-quantity"}),
-		want: field.ErrorList{field.Invalid(limitsPath.Index(0).Child("quantity"), nil, "")},
-	}, {
-		name: "too many limits",
-		obj: withLimits(
-			&ateletpb.Limits{Name: "cpu", Quantity: "1"},
-			&ateletpb.Limits{Name: "memory", Quantity: "1Gi"},
-			&ateletpb.Limits{Name: "cpu", Quantity: "2"},
-		),
-		want: field.ErrorList{field.TooMany(limitsPath, 3, 2).WithOrigin("maxItems")},
-	}, {
-		name: "nil limit entry",
-		obj:  withLimits(nil),
-		want: field.ErrorList{field.Required(limitsPath.Index(0), "")},
+		name: "negative memory_bytes",
+		obj:  withCapacity(&ateletpb.WorkerResources{MemoryBytes: -1}),
+		want: field.ErrorList{field.Invalid(capacityPath.Child("memory_bytes"), nil, "").WithOrigin("minimum")},
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1510,9 +1351,9 @@ func TestValidateWorkloadSpec(t *testing.T) {
 	}, {
 		name: "container errors surface at the container's path",
 		obj: valid(func(s *ateletpb.WorkloadSpec) {
-			s.Containers[0].Resources = &ateletpb.ResourceLimits{CpuMillis: -1}
+			s.Containers[0].Resources = &ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: -1}}
 		}),
-		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("resources", "cpu_millis"), nil, "").WithOrigin("minimum")},
+		want: field.ErrorList{field.Invalid(field.NewPath("containers").Index(0).Child("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("minimum")},
 	}, {
 		name: "mount references a declared volume",
 		obj: valid(func(s *ateletpb.WorkloadSpec) {
@@ -1824,7 +1665,7 @@ func TestValidateContainer(t *testing.T) {
 			c.SecurityContext = &ateletpb.SecurityContext{Capabilities: &ateletpb.Capabilities{Add: add, Drop: drop}}
 		})
 	}
-	limits := func(r *ateletpb.ResourceLimits) *ateletpb.Container {
+	limits := func(r *ateletpb.ResourceRequirements) *ateletpb.Container {
 		return valid(func(c *ateletpb.Container) { c.Resources = r })
 	}
 
@@ -1984,28 +1825,28 @@ func TestValidateContainer(t *testing.T) {
 			want: field.ErrorList{field.Duplicate(capsPath.Child("add").Index(1), nil)},
 		},
 
-		// ResourceLimits.
+		// Resources.
 		{
 			name: "valid limits",
-			obj:  limits(&ateletpb.ResourceLimits{MemoryBytes: 1 << 30, CpuMillis: 500}),
+			obj:  limits(&ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{MemoryBytes: 1 << 30, CpuMillicores: 500}}),
 		}, {
 			name: "limits: zero means unset",
-			obj:  limits(&ateletpb.ResourceLimits{}),
+			obj:  limits(&ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{}}),
 		}, {
 			name: "limits: negative memory_bytes",
-			obj:  limits(&ateletpb.ResourceLimits{MemoryBytes: -1}),
-			want: field.ErrorList{field.Invalid(field.NewPath("resources", "memory_bytes"), nil, "").WithOrigin("minimum")},
+			obj:  limits(&ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{MemoryBytes: -1}}),
+			want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "memory_bytes"), nil, "").WithOrigin("minimum")},
 		}, {
 			name: "limits: negative cpu_millis",
-			obj:  limits(&ateletpb.ResourceLimits{CpuMillis: -1}),
-			want: field.ErrorList{field.Invalid(field.NewPath("resources", "cpu_millis"), nil, "").WithOrigin("minimum")},
+			obj:  limits(&ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: -1}}),
+			want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("minimum")},
 		}, {
 			name: "limits: cpu_millis at the cap",
-			obj:  limits(&ateletpb.ResourceLimits{CpuMillis: 999999}),
+			obj:  limits(&ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: 999999}}),
 		}, {
 			name: "limits: cpu_millis above the cap",
-			obj:  limits(&ateletpb.ResourceLimits{CpuMillis: 1000000}),
-			want: field.ErrorList{field.Invalid(field.NewPath("resources", "cpu_millis"), nil, "").WithOrigin("maximum")},
+			obj:  limits(&ateletpb.ResourceRequirements{Limits: &ateletpb.Resources{CpuMillicores: 1000000}}),
+			want: field.ErrorList{field.Invalid(field.NewPath("resources", "limits", "cpu_millicores"), nil, "").WithOrigin("maximum")},
 		},
 	}
 	for _, tt := range tests {

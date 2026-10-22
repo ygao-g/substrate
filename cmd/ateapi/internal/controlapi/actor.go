@@ -305,13 +305,6 @@ func (s *ServiceImpl) UpdateActor(ctx context.Context, actorRef resources.ActorR
 				return apierror.FailedPrecondition(
 					"actor must be %s to change its actor template (got: %s)", ateapipb.ActorState_ACTOR_STATE_SUSPENDED, state)
 			}
-			// A paused actor resumes from its node-local snapshot, uploaded or
-			// not, which was captured from the old template's sandbox. The
-			// snapshot stays local until atelet detaches it from the node.
-			if latestSnapshotIsLocal(oldVal.GetStatus()) {
-				return apierror.FailedPrecondition(
-					"actor must hold no node-local snapshot to change its actor template: wait for its snapshot to be uploaded and detached from the node, or revert it")
-			}
 			newTemplate, err := resolveActorTemplate(ctx, s.store, newVal)
 			if err != nil {
 				return err
@@ -398,7 +391,9 @@ func validateTemplateVolumesUnchanged(oldTemplate, newTemplate *ateapipb.ActorTe
 // Deleting an actor collects everything under its external snapshot prefix. If
 // the location prefix ever changes, we risk leaking the snapshots under the old prefix.
 func (s *ServiceImpl) validateSnapshotLocationUnchanged(actor *ateapipb.Actor, newTemplate *ateapipb.ActorTemplate) error {
-	snap := findLatestDurableSnapshot(actor.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+	snap := latestSnapshot(actor.GetStatus(), func(snapshot *ateapipb.Snapshot) bool {
+		return snapshot.GetDurableSnapshot().GetObject().GetSnapshotUri() != ""
+	})
 	currentSnapshotURI := snap.GetDurableSnapshot().GetObject().GetSnapshotUri()
 	if currentSnapshotURI == "" {
 		return nil

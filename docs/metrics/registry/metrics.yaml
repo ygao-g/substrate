@@ -104,14 +104,14 @@ groups:
               stability: development
               value: suspending
               brief: >
-                ateapi is writing a snapshot: durable for a suspend,
-                node-local for a pause.
+                ateapi is writing a snapshot: node-local for an asynchronous
+                suspend, durable for a synchronous suspend.
             - id: suspended
               stability: development
               value: suspended
               brief: >
-                The actor holds no worker. Its latest snapshot is durable, or
-                node-local after a pause.
+                The actor holds no worker. Its latest snapshot is durable,
+                node-local, or both.
             - id: crashed
               stability: development
               value: crashed
@@ -267,9 +267,9 @@ groups:
               brief: >
                 The source has no class, or a class that is not in this list.
                 The default is not gvisor. Thus a bad record stays visible.
-                ateapi reports it for a Worker that CreateWorker accepted with
-                no class. atelet reports it for a snapshot manifest with no
-                class.
+                ateapi reports it for a Worker that has not reported a
+                default_runtime class. atelet reports it for a snapshot
+                manifest with no class.
       - id: ate.sandbox.oom_kills
         stability: development
         type: int
@@ -298,7 +298,10 @@ groups:
             - id: local
               stability: development
               value: local
-              brief: A snapshot on the node. A pause writes it.
+              brief: >
+                The copy on the node. An asynchronous suspend writes it. A
+                resume reads it while the node still has it, after either kind
+                of suspend and whether or not the upload has finished.
             - id: latest
               stability: development
               value: latest
@@ -589,6 +592,13 @@ groups:
                 The sandbox asset cache: the runsc binaries, the kernels and
                 the guest images the workers run actors with. Each actor on
                 the node links its assets from this one cache.
+            - id: snapshot
+              stability: development
+              value: snapshot
+              brief: >
+                The snapshot cache: the files of snapshots many actors
+                restore from, a tag's or a golden's, served to each restore
+                as hard links or private copies.
       - id: ate.filecache.gc.outcome
         stability: development
         brief: >
@@ -792,9 +802,8 @@ groups:
       Substrate can also lose the data that it did not write. Some moves into
       this state are not a loss of data. They are careful responses to a control
       plane problem.
-      ate.sandbox.class is unknown when ateapi could not read the class of the
-      worker: the worker record is already gone, or its assignment is already
-      clear.
+      ate.sandbox.class is unknown when the actor's worker assignment is already
+      clear or carries no sandbox runtime.
     annotations:
       substrate:
         emitted_by: [ateapi]
@@ -1060,16 +1069,20 @@ groups:
     note: >
       atelet uploads deferred snapshots in the background once the upload delay
       or the detach delay elapses. A probe that finds the manifest committed
-      already without uploading is not recorded. An upload that Terminate or an
-      atelet shutdown cancels records error.type Canceled. Synchronous uploads
-      from UPLOAD_MODE_IMMEDIATE checkpoints and PromoteSnapshot are recorded
-      on ate.actor.checkpoint.duration instead.
+      already without uploading is not recorded. An upload that Terminate, an
+      atelet shutdown, or a newer durable snapshot cancels records error.type
+      Canceled, and one that runs past its timeout (--snapshot-upload-timeout
+      plus the time the snapshot takes at --snapshot-upload-est-throughput-mib,
+      doubled for each consecutive failure to at most 8 times that) records
+      DeadlineExceeded. Synchronous uploads from UPLOAD_MODE_IMMEDIATE
+      checkpoints and PromoteSnapshot are recorded on
+      ate.actor.checkpoint.duration instead.
     annotations:
       substrate:
         emitted_by: [atelet]
         golden_signals: [latency, errors]
         code_anchor: cmd/atelet/internal/snapshottracker/metrics.go
-        buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60]
+        buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600]
         cuj: Are background snapshot uploads slow or failing on a node?
     attributes:
       - ref: ate.snapshot.fidelity
@@ -1351,10 +1364,11 @@ groups:
     note: >
       atelet reads the value on each collection as the sum of the allocated
       size of each entry in the cache. Compare it with the budget that the
-      cache's max-bytes flag sets, --sandbox-asset-cache-max-bytes for the
-      sandbox asset cache. A value that stays over the budget with shortfall
-      passes means that the cache's consumers hold more than the budget: for
-      the sandbox asset cache, the actors and the workers' default runtimes.
+      cache's max-bytes flag sets, --sandbox-asset-cache-max-bytes or
+      --snapshot-cache-max-bytes. A value that stays over the budget with
+      shortfall passes means that the cache's consumers hold more than the
+      budget: for the sandbox asset cache, the actors and the workers'
+      default runtimes; for the snapshot cache, the restores in progress.
       The budget is too small, or the node hosts too many runtimes.
     annotations:
       substrate:

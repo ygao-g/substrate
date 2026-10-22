@@ -22,11 +22,13 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "watch", "list"]
+# Tells a deleted node from a missing atelet, so revert and delete of an actor
+# on a node that is gone do not wait for that atelet forever.
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get"]
 - apiGroups: ["ate.dev"]
-  resources: ["workerpools", "sandboxconfigs", "csidriverconfigs"]
-  verbs: ["get", "watch", "list"]
-- apiGroups: ["ate.dev"]
-  resources: ["workerpools"]
+  resources: ["workerpools", "csidriverconfigs"]
   verbs: ["get", "watch", "list"]
 - apiGroups: ["storage.k8s.io"]
   resources: ["storageclasses"]

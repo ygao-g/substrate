@@ -50,11 +50,6 @@ const (
 	// the podcertificate controller's API rate limits to match.
 	ClusterSizeSize0  = "size0"
 	ClusterSizeSize10 = "size10"
-
-	// Ingress router authentication modes; see atenet router's
-	// --ingress-auth-mode.
-	IngressAuthDeprecatedInsecure = "deprecated-insecure"
-	IngressAuthStaticMTLS         = "static-mtls"
 )
 
 // DefaultRolloutTimeout is the default wait timeout for workload rollouts.
@@ -122,9 +117,6 @@ type Config struct {
 	// follows neither form.
 	ExpectedJWTIssuer string
 
-	// APIExperimentalEnableAuthz turns on ate-api-server's runtime
-	// authorization (ATE_API_EXPERIMENTAL_ENABLE_AUTHZ).
-	APIExperimentalEnableAuthz bool
 	// APIAuthzBootstrapOwners is the comma-separated principal list granted
 	// owner on global:root (ATE_API_AUTHZ_BOOTSTRAP_OWNERS).
 	APIAuthzBootstrapOwners string
@@ -218,10 +210,10 @@ type Config struct {
 	// (ATE_INSTALL_FAKE_DATA_PLANE), for control-plane benchmarks.
 	FakeDataPlane bool
 
-	// IngressAuthMode is how the ingress router authenticates its clients
-	// (ATE_INGRESS_AUTH_MODE): IngressAuthDeprecatedInsecure or
-	// IngressAuthStaticMTLS.
-	IngressAuthMode string
+	// IngressAllowedSPIFFEIDs are the SPIFFE IDs the ingress router lets
+	// reach actors over its TLS listeners (ATE_INGRESS_ALLOWED_SPIFFE_IDS).
+	// See RequireIngressAllowedSPIFFEIDs.
+	IngressAllowedSPIFFEIDs []string
 
 	// AdditionalEgressExtprocService is the optional NS/SVC:PORT external processor filter.
 	AdditionalEgressExtprocService string
@@ -277,6 +269,18 @@ func (c *Config) Resolved() *Resolved {
 		c.resolved = defaultsOnly()
 	}
 	return c.resolved
+}
+
+// RequireIngressAllowedSPIFFEIDs fails when the install would deploy the
+// Envoy ingress router without an allowlist. That router authenticates
+// clients on its TLS listeners, and refuses to start with no SPIFFE ID to
+// match them against. The agentgateway router is configured statically and
+// takes none.
+func (c *Config) RequireIngressAllowedSPIFFEIDs() error {
+	if c.Router == RouterAgentgateway || len(c.IngressAllowedSPIFFEIDs) > 0 {
+		return nil
+	}
+	return c.Resolved().Require("ingressAllowedSPIFFEIDs")
 }
 
 // SetResolved attaches resolved settings to a Config built directly. Load
@@ -480,9 +484,9 @@ func (c *Config) ScriptEnv() []string {
 	if c.FakeDataPlane {
 		merged["ATE_INSTALL_FAKE_DATA_PLANE"] = "true"
 	}
-	delete(merged, "ATE_INGRESS_AUTH_MODE")
-	if c.IngressAuthMode != "" && c.IngressAuthMode != IngressAuthDeprecatedInsecure {
-		merged["ATE_INGRESS_AUTH_MODE"] = c.IngressAuthMode
+	delete(merged, "ATE_INGRESS_ALLOWED_SPIFFE_IDS")
+	if len(c.IngressAllowedSPIFFEIDs) > 0 {
+		merged["ATE_INGRESS_ALLOWED_SPIFFE_IDS"] = strings.Join(c.IngressAllowedSPIFFEIDs, ",")
 	}
 	if c.AdditionalEgressExtprocService != "" {
 		merged["ATE_ADDITIONAL_EGRESS_EXTPROC_SERVICE"] = c.AdditionalEgressExtprocService

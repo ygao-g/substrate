@@ -41,7 +41,7 @@ spec:
   tls:
     enabled: true
     usePodIdentity: true
-    serverName: csi-nfs-controller.kube-system.svc.cluster.local
+    serverName: csi-nfs-controller.kube-system.svc
 ```
 
 ### Specification (`CSIDriverConfigSpec`)
@@ -84,12 +84,12 @@ volumes:
 - name: my-data-volume
   external:
     template:
-      capacity: 10Gi
+      capacityBytes: 10737418240 # 10Gi
       storageClassName: standard-rwx
 ```
 
 * `name`: Unique DNS-label-compliant volume name.
-* `external.template.capacity`: Quantity string representing the requested volume size (e.g. `1Gi`, `50Gi`).
+* `external.template.capacityBytes`: The requested volume size in bytes (e.g. `1073741824` for 1Gi).
 * `external.template.storageClassName`: Name of a Kubernetes `StorageClass` present in the cluster whose `provisioner` matches a registered `CSIDriverConfig`.
 
 #### `containers[].volumeMounts[]`
@@ -143,7 +143,7 @@ spec:
   tls:
     enabled: true
     usePodIdentity: true
-    serverName: csi-nfs-controller.kube-system.svc.cluster.local
+    serverName: csi-nfs-controller.kube-system.svc
 ```
 
 ### Step 3: Define WorkerPool and ActorTemplate
@@ -190,16 +190,14 @@ containers:
       port: 8080
 resources:
   limits:
-  - name: cpu
-    quantity: "1"
-  - name: memory
-    quantity: 1Gi
+    cpuMillicores: 1000
+    memoryBytes: 1073741824 # 1Gi
 snapshotConfig:
   storageLocation: gs://my-snapshots-bucket/stateful-agent
 volumes:
 - name: shared-storage
   external:
     template:
-      capacity: 5Gi
+      capacityBytes: 5368709120 # 5Gi
       storageClassName: csi-nfs-sc
 ```

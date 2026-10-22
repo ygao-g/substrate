@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/spf13/pflag"
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
 	"go.ate.dev/substrate/cmd/ate-setup/internal/images"
 	"go.ate.dev/substrate/internal/actoridjwt"
@@ -211,8 +212,8 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 	}
 	// kubectl-ate, ate-setup's demo steps and the e2e clients fall back to
 	// tokens minted from the client ServiceAccount, so making it the default
-	// bootstrap owner keeps them working with authorization on. The deploy
-	// warns whenever it is a bootstrap owner.
+	// bootstrap owner keeps them working. The deploy warns whenever it is a
+	// bootstrap owner.
 	bootstrapOwners := r.String("ateapi.authz.bootstrapOwners")
 	if bootstrapOwners == "" {
 		bootstrapOwners = installdefaults.ClientPrincipal(r.String("namespace"))
@@ -229,8 +230,7 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 		ClusterLocation:   r.String("gcp.clusterLocation"),
 		ExpectedJWTIssuer: r.String("ateapi.expectedJWTIssuer"),
 
-		APIExperimentalEnableAuthz: r.Bool("ateapi.authz.enabled"),
-		APIAuthzBootstrapOwners:    bootstrapOwners,
+		APIAuthzBootstrapOwners: bootstrapOwners,
 
 		BucketName:         r.String("storage.bucketName"),
 		SnapshotLocation:   r.String("storage.snapshotLocation"),
@@ -274,7 +274,7 @@ func buildConfig(root string, env map[string]string, r *Resolved) (*Config, erro
 		ClusterSize:                    r.String("clusterSize"),
 		CordonControlPlane:             r.Bool("cordonControlPlane"),
 		FakeDataPlane:                  r.Bool("fakeDataPlane.enabled"),
-		IngressAuthMode:                r.String("ingressAuthMode"),
+		IngressAllowedSPIFFEIDs:        splitList(r.String("ingressAllowedSPIFFEIDs")),
 		AdditionalEgressExtprocService: r.String("atenet.egress.additionalExtprocService"),
 		CredentialProviderJSON:         r.String("atenet.egress.credentialProvider"),
 		AnthropicAPIKey:                r.String("demo.anthropicAPIKey"),
@@ -410,16 +410,13 @@ func validateResolved(cfg *Config, r *Resolved) error {
 		return &InvalidError{Value: size, Want: ClusterSizeSize0 + " or " + ClusterSizeSize10}
 	}
 
-	authMode, _ := r.Value("ingressAuthMode")
-	switch cfg.IngressAuthMode {
-	case IngressAuthDeprecatedInsecure:
-	case IngressAuthStaticMTLS:
-		if cfg.Router != RouterEnvoy {
-			return &ConflictError{A: authMode, B: dataplane,
-				Why: IngressAuthStaticMTLS + " requires dataplane " + RouterEnvoy}
+	// The router rejects a malformed ID at startup; catch it before the
+	// rollout does.
+	for _, id := range cfg.IngressAllowedSPIFFEIDs {
+		if _, err := spiffeid.FromString(id); err != nil {
+			ids, _ := r.Value("ingressAllowedSPIFFEIDs")
+			return &InvalidError{Value: ids, Want: fmt.Sprintf("a comma-separated list of SPIFFE IDs (%q: %v)", id, err)}
 		}
-	default:
-		return &InvalidError{Value: authMode, Want: IngressAuthDeprecatedInsecure + " or " + IngressAuthStaticMTLS}
 	}
 
 	switch cfg.APILogLevel {
@@ -467,12 +464,11 @@ func validateResolved(cfg *Config, r *Resolved) error {
 			return fmt.Errorf("%w (from %s)", err, provider.From.Describe(provider.Setting))
 		}
 	}
-	// ate-api-server exits on this combination, so catch it before deploying.
-	if cfg.APIExperimentalEnableAuthz && strings.Trim(cfg.APIAuthzBootstrapOwners, " ,") == "" {
-		enabled, _ := r.Value("ateapi.authz.enabled")
+	// ate-api-server exits without a bootstrap owner, so catch it before
+	// deploying.
+	if strings.Trim(cfg.APIAuthzBootstrapOwners, " ,") == "" {
 		owners, _ := r.Value("ateapi.authz.bootstrapOwners")
-		return &ConflictError{A: enabled, B: owners,
-			Why: "enforced authorization needs at least one bootstrap owner"}
+		return &InvalidError{Value: owners, Want: "a list of at least one bootstrap owner"}
 	}
 	return nil
 }
