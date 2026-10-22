@@ -49,13 +49,14 @@ func marshalGolden(v any) ([]byte, error) {
 func scriptedStats() Stats {
 	const c = 4
 	s := Stats{
-		Scheme:        SchemeHTTPS,
-		Elapsed:       61200 * time.Millisecond,
-		OpeningDone:   350 * time.Millisecond,
-		LongestGap:    400 * time.Millisecond,
-		Errors:        map[string]int64{},
-		Endpoints:     make([]Endpoint, c),
-		Distributions: map[Distribution]Point{},
+		Scheme:                SchemeHTTPS,
+		Elapsed:               61200 * time.Millisecond,
+		OpeningDone:           350 * time.Millisecond,
+		RequestsAtOpeningDone: c,
+		LongestGap:            400 * time.Millisecond,
+		Errors:                map[string]int64{},
+		Endpoints:             make([]Endpoint, c),
+		Distributions:         map[Distribution]Point{},
 	}
 	opening, latency := Point{}, Point{}
 	for n := range 60 {

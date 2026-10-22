@@ -162,12 +162,21 @@ func decodeStats(t *testing.T, what string, rec *httptest.ResponseRecorder) *con
 	return &s
 }
 
-// The three reads of a running loop, each with the per-endpoint counts.
+// The poll and the stop of a running loop, each with the per-endpoint counts.
 const (
-	statsPath   = contract.StatsRoute + "?endpoints=1"
-	collectPath = contract.CollectRoute + "?endpoints=1"
-	stopPath    = contract.StopRoute + "?endpoints=1"
+	statsPath = contract.StatsRoute + "?endpoints=1"
+	stopPath  = contract.StopRoute + "?endpoints=1"
 )
+
+// collectPath is POST /collect's path for window id w, with the per-endpoint
+// counts when asked.
+func collectPath(w int64, endpoints bool) string {
+	path := fmt.Sprintf("%s?%s=%d", contract.CollectRoute, contract.WindowParam, w)
+	if endpoints {
+		path += "&endpoints=1"
+	}
+	return path
+}
 
 // readStats polls the counters.
 func readStats(t *testing.T, h http.Handler) *contract.Stats {
@@ -175,11 +184,11 @@ func readStats(t *testing.T, h http.Handler) *contract.Stats {
 	return decodeStats(t, "GET /stats", get(h, statsPath))
 }
 
-// collectStats cuts a window: the counters and the distributions since the
-// previous cut.
-func collectStats(t *testing.T, h http.Handler) *contract.Stats {
+// collectStats cuts window w, as the driver numbers them from 1: the counters
+// and the distributions since the previous cut.
+func collectStats(t *testing.T, h http.Handler, w int64) *contract.Stats {
 	t.Helper()
-	return decodeStats(t, "POST /collect", post(t, h, collectPath, nil))
+	return decodeStats(t, "POST /collect", post(t, h, collectPath(w, true), nil))
 }
 
 // stopLoop stops the loop and returns its final Stats, whose distributions
@@ -771,7 +780,7 @@ func TestPacingAndGapsAreExact(t *testing.T) {
 		start := time.Now()
 		h, _ := startPipeLoop(t, pn, contract.StartRequest{Endpoints: c, IntervalMs: int64(interval / time.Millisecond)})
 		var opening, latency uint64
-		for _, tc := range []struct {
+		for step, tc := range []struct {
 			at                       time.Duration
 			requests, opened, rounds int64
 			openingDone, longestGap  time.Duration
@@ -784,7 +793,7 @@ func TestPacingAndGapsAreExact(t *testing.T) {
 		} {
 			time.Sleep(tc.at - time.Since(start))
 			synctest.Wait()
-			st := collectStats(t, h)
+			st := collectStats(t, h, int64(step+1))
 			if st.Requests != tc.requests || st.Opened != tc.opened || st.Rounds != tc.rounds || st.OpeningDone != tc.openingDone || st.LongestGap != tc.longestGap {
 				t.Errorf("at %v: requests %d, opened %d, rounds %d, opening done %v, longest gap %v; want %d, %d, %d, %v, %v (%s)",
 					tc.at, st.Requests, st.Opened, st.Rounds, st.OpeningDone, st.LongestGap, tc.requests, tc.opened, tc.rounds, tc.openingDone, tc.longestGap, tc.why)
@@ -1029,14 +1038,14 @@ func TestTwoCutsPartitionTheRun(t *testing.T) {
 		defer pn.srv.Close()
 		start := time.Now()
 		h, _ := startPipeLoop(t, pn, contract.StartRequest{Endpoints: c, IntervalMs: int64(interval / time.Millisecond)})
-		cut := func(at time.Duration) *contract.Stats {
+		cut := func(w int64, at time.Duration) *contract.Stats {
 			time.Sleep(at - time.Since(start))
 			synctest.Wait()
-			return collectStats(t, h)
+			return collectStats(t, h, w)
 		}
 
 		// Two opens and one repeat each, all at the fast latency.
-		first := cut(350 * time.Millisecond)
+		first := cut(1, 350*time.Millisecond)
 		if op, l := first.Distributions[contract.Opening], first.Distributions[contract.Latency]; first.Successes != 4 || op.Count != 2 || l.Count != 2 || l.Min != fast.Seconds() || l.Max != fast.Seconds() {
 			t.Errorf("first window: %d successes, opening %d, latency %d in [%v, %v]; want 4, 2, 2 in [%v, %v]", first.Successes, op.Count, l.Count, l.Min, l.Max, fast.Seconds(), fast.Seconds())
 		}
@@ -1050,7 +1059,7 @@ func TestTwoCutsPartitionTheRun(t *testing.T) {
 		if polled := readStats(t, h); polled.Successes != 6 || polled.Distributions != nil {
 			t.Errorf("/stats inside the second window: %d successes, distributions %v; want 6 and none", polled.Successes, polled.Distributions)
 		}
-		second := cut(850 * time.Millisecond)
+		second := cut(2, 850*time.Millisecond)
 		if _, ok := second.Distributions[contract.Opening]; ok {
 			t.Errorf("second window has an opening distribution: %+v", second.Distributions[contract.Opening])
 		}
@@ -1098,12 +1107,12 @@ func TestSettledWindowHasNoDNSOrTLS(t *testing.T) {
 				t.Fatalf("POST /start = %d %s", rec.Code, rec.Body)
 			}
 			waitFor(t, tc.h, atLeast(2))
-			first := collectStats(t, tc.h)
+			first := collectStats(t, tc.h, 1)
 			if samples(first, tc.dist) == 0 {
 				t.Errorf("the window with the open has no %s sample: %+v", tc.dist, first.Distributions)
 			}
 			waitFor(t, tc.h, atLeast(first.Requests+2))
-			second := collectStats(t, tc.h)
+			second := collectStats(t, tc.h, 2)
 			if p, ok := second.Distributions[tc.dist]; ok {
 				t.Errorf("a window with no open carries %s: %+v", tc.dist, p)
 			}
@@ -1134,23 +1143,162 @@ func TestStopReturnsFinalStats(t *testing.T) {
 	if rec := post(t, h, contract.StartRoute, contract.StartRequest{Endpoints: 1}); rec.Code != http.StatusNoContent {
 		t.Fatalf("POST /start = %d %s", rec.Code, rec.Body)
 	}
+	waitFor(t, h, atLeast(1))
 	rec := post(t, h, contract.StopRoute, nil)
 	final := decodeStats(t, "POST /stop", rec)
-	if ct := rec.Header().Get("Content-Type"); ct != "application/json" || final.Scheme != contract.SchemeHTTP || final.Endpoints != nil {
-		t.Errorf("POST /stop answered %q with scheme %q and endpoints %v; want JSON, http and no endpoints unless asked", ct, final.Scheme, final.Endpoints)
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" || final.Scheme != contract.SchemeHTTP || final.Endpoints != nil || final.Requests == 0 {
+		t.Errorf("POST /stop answered %q with scheme %q, endpoints %v and %d requests; want JSON, http, no endpoints unless asked, and the requests made", ct, final.Scheme, final.Endpoints, final.Requests)
 	}
 	for _, tc := range []struct {
 		name string
 		rec  *httptest.ResponseRecorder
 	}{
 		{"GET /stats", get(h, contract.StatsRoute)},
-		{"POST /collect", post(t, h, contract.CollectRoute, nil)},
-		{"second POST /stop", post(t, h, contract.StopRoute, nil)},
+		{"POST /collect", post(t, h, collectPath(1, false), nil)},
 	} {
 		if tc.rec.Code != http.StatusNotFound {
 			t.Errorf("%s after stop = %d, want 404", tc.name, tc.rec.Code)
 		}
 	}
+
+	// The final report is kept: a /stop the driver did not hear is answered
+	// again, byte for byte, with or without the endpoints, until a new loop
+	// replaces it.
+	if again := post(t, h, contract.StopRoute, nil); again.Code != http.StatusOK || !bytes.Equal(again.Body.Bytes(), rec.Body.Bytes()) {
+		t.Errorf("second POST /stop = %d %s; want 200 and the first answer %s", again.Code, again.Body, rec.Body)
+	}
+	if withEP := decodeStats(t, "third POST /stop", post(t, h, stopPath, nil)); len(withEP.Endpoints) != 1 || withEP.Requests != final.Requests {
+		t.Errorf("POST /stop?endpoints=1 after stop: %d endpoints, %d requests; want 1 and %d", len(withEP.Endpoints), withEP.Requests, final.Requests)
+	}
+	if rec := post(t, h, contract.StartRoute, contract.StartRequest{Endpoints: 1, IntervalMs: 60_000, OffsetMs: 60_000}); rec.Code != http.StatusNoContent {
+		t.Fatalf("second POST /start = %d %s", rec.Code, rec.Body)
+	}
+	if next := stopLoop(t, h); next.Requests != 0 {
+		t.Errorf("the stop after a new /start reports %d requests; want 0, the new loop's own report", next.Requests)
+	}
+}
+
+// TestCollectWindowIDs drives /collect through the ids a driver sends and the
+// ones it must not: the first cut is 1, the last id is answered again, the
+// next id cuts, and anything else is refused with the next id named.
+func TestCollectWindowIDs(t *testing.T) {
+	t.Parallel()
+	h := serveTargets(t, 1)
+	if rec := post(t, h, contract.StartRoute, contract.StartRequest{Endpoints: 1, IntervalMs: 60_000, OffsetMs: 60_000}); rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /start = %d %s", rec.Code, rec.Body)
+	}
+	t.Cleanup(func() { stopLoop(t, h) })
+	route := contract.CollectRoute + "?" + contract.WindowParam + "="
+	// The steps run in order on one loop; each names the next id the body
+	// must carry when the cut is refused.
+	for _, tc := range []struct {
+		name string
+		path string
+		want int
+		next int64
+	}{
+		{"missing", contract.CollectRoute, http.StatusBadRequest, 1},
+		{"zero", route + "0", http.StatusBadRequest, 1},
+		{"negative", route + "-1", http.StatusBadRequest, 1},
+		{"non-numeric", route + "one", http.StatusBadRequest, 1},
+		{"skip ahead before the first", route + "2", http.StatusConflict, 1},
+		{"first cut is 1", route + "1", http.StatusOK, 0},
+		{"last again", route + "1", http.StatusOK, 0},
+		{"last again with endpoints", route + "1&endpoints=1", http.StatusOK, 0},
+		{"next cuts", route + "2", http.StatusOK, 0},
+		{"lower", route + "1", http.StatusConflict, 3},
+		{"zero after cuts", route + "0", http.StatusBadRequest, 3},
+		{"skip ahead", route + "4", http.StatusConflict, 3},
+		{"next cuts again", route + "3", http.StatusOK, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := post(t, h, tc.path, nil)
+			if rec.Code != tc.want {
+				t.Fatalf("POST %s = %d %s, want %d", tc.path, rec.Code, rec.Body, tc.want)
+			}
+			if tc.next == 0 {
+				decodeStats(t, "POST "+tc.path, rec)
+				return
+			}
+			if want := fmt.Sprintf("the next window is %d", tc.next); !strings.Contains(rec.Body.String(), want) {
+				t.Errorf("POST %s body %q does not say %q", tc.path, rec.Body, want)
+			}
+		})
+	}
+}
+
+// TestRepeatedCollectConsumesNothing pins the retry: the same id answered
+// again is the same bytes, the sample recorded between the two answers not
+// in it, and that sample is in the next window, not lost.
+func TestRepeatedCollectConsumesNothing(t *testing.T) {
+	t.Parallel()
+	run, err := newLoopRun(1, contract.SchemeHTTP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.rec.Shutdown(context.Background()) })
+	s := newServer()
+	s.run = run
+	h := s.handler()
+	run.record(0, 5*time.Millisecond, http.StatusOK, nil, &requestTrace{})
+	first := post(t, h, collectPath(1, false), nil)
+	run.record(0, 7*time.Millisecond, http.StatusOK, nil, &requestTrace{})
+	again := post(t, h, collectPath(1, false), nil)
+	if first.Code != http.StatusOK || again.Code != http.StatusOK || !bytes.Equal(first.Body.Bytes(), again.Body.Bytes()) {
+		t.Errorf("window 1 twice = %d %s and %d %s; want 200 and the same bytes", first.Code, first.Body, again.Code, again.Body)
+	}
+	withEP := decodeStats(t, "window 1 with endpoints", post(t, h, collectPath(1, true), nil))
+	if withEP.Requests != 1 || len(withEP.Endpoints) != 1 || samples(withEP, contract.Opening) != 1 {
+		t.Errorf("window 1 with endpoints: %d requests, %d endpoints, %d opening samples; want 1, 1, 1", withEP.Requests, len(withEP.Endpoints), samples(withEP, contract.Opening))
+	}
+	second := collectStats(t, h, 2)
+	if l := second.Distributions[contract.Latency]; second.Requests != 2 || l.Count != 1 || l.Min != 0.007 {
+		t.Errorf("window 2: %d requests, latency %d samples with min %v; want 2, 1 and 0.007: the sample between the two answers", second.Requests, l.Count, l.Min)
+	}
+}
+
+// TestRequestsAtOpeningDone pins the count the blended window prices: the
+// requests this actor had finished when its last endpoint opened, repeats on
+// the endpoints already open included, and fixed from then on.
+func TestRequestsAtOpeningDone(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const c, interval, openLatency = 2, 100 * time.Millisecond, 250 * time.Millisecond
+		var mu sync.Mutex
+		opened := map[string]bool{}
+		pn := newPipeNet(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			first := !opened[r.Host]
+			opened[r.Host] = true
+			mu.Unlock()
+			if first && r.Host == "endpoint-1" {
+				select {
+				case <-time.After(openLatency):
+				case <-r.Context().Done():
+					return
+				}
+			}
+			okHandler(w, r)
+		}))
+		defer pn.srv.Close()
+		start := time.Now()
+		h, stats := startPipeLoop(t, pn, contract.StartRequest{Endpoints: c, IntervalMs: int64(interval / time.Millisecond)})
+
+		// Endpoint 0 opens at 0 and repeats at 200; endpoint 1 opens at 100
+		// and finishes at 350: the third request. Its first repeat follows at
+		// once, since its period passed during the open.
+		time.Sleep(interval + openLatency - time.Since(start))
+		st := stats()
+		if st.Opened != c || st.OpeningDone != interval+openLatency || st.RequestsAtOpeningDone != 3 || st.Requests != 4 {
+			t.Errorf("at %v: opened %d at %v with %d requests, %d requests now; want %d at %v with 3, 4", time.Since(start), st.Opened, st.OpeningDone, st.RequestsAtOpeningDone, st.Requests, c, interval+openLatency)
+		}
+		time.Sleep(time.Second - time.Since(start))
+		if st = stats(); st.RequestsAtOpeningDone != 3 || st.Requests <= 4 {
+			t.Errorf("at %v: requestsAtOpeningDone %d with %d requests; want still 3 with more than 4", time.Since(start), st.RequestsAtOpeningDone, st.Requests)
+		}
+		if final := stopLoop(t, h); final.RequestsAtOpeningDone != 3 {
+			t.Errorf("final requestsAtOpeningDone = %d, want 3", final.RequestsAtOpeningDone)
+		}
+	})
 }
 
 // TestFreshRecorderPerLoop pins that a loop starts from nothing: the first
@@ -1167,7 +1315,7 @@ func TestFreshRecorderPerLoop(t *testing.T) {
 	if rec := post(t, h, contract.StartRoute, contract.StartRequest{Endpoints: 2, IntervalMs: 60_000, OffsetMs: 60_000}); rec.Code != http.StatusNoContent {
 		t.Fatalf("POST /start = %d %s", rec.Code, rec.Body)
 	}
-	second := collectStats(t, h)
+	second := collectStats(t, h, 1)
 	if second.Requests != 0 || second.Opened != 0 || len(second.Distributions) != 0 {
 		t.Errorf("second loop's first collect: %d requests, %d opened, distributions %v; want an empty window", second.Requests, second.Opened, second.Distributions)
 	}
@@ -1177,7 +1325,8 @@ func TestFreshRecorderPerLoop(t *testing.T) {
 // TestCollectInvariantUnderRace cuts windows while requests land: every
 // success records exactly one opening or latency sample, so each window's
 // samples equal the growth of Successes since the previous cut, and the
-// windows add up to the final count.
+// windows add up to the final count. Every tenth cut is asked for twice, as
+// a driver retries it, and must come back unchanged.
 func TestCollectInvariantUnderRace(t *testing.T) {
 	t.Parallel()
 	h := serveTargets(t, 8)
@@ -1202,9 +1351,15 @@ func TestCollectInvariantUnderRace(t *testing.T) {
 	}
 	var total uint64
 	var prev int64
-	var badCuts int
-	for range 200 {
-		w := collectStats(t, h)
+	var badCuts, badRetries int
+	for id := int64(1); id <= 200; id++ {
+		rec := post(t, h, collectPath(id, true), nil)
+		w := decodeStats(t, "POST /collect", rec)
+		if id%10 == 0 {
+			if again := post(t, h, collectPath(id, true), nil); !bytes.Equal(again.Body.Bytes(), rec.Body.Bytes()) {
+				badRetries++
+			}
+		}
 		got := samples(w, contract.Opening) + samples(w, contract.Latency)
 		if int64(got) != w.Successes-prev {
 			badCuts++
@@ -1214,17 +1369,17 @@ func TestCollectInvariantUnderRace(t *testing.T) {
 	wg.Wait()
 	final := stopLoop(t, h)
 	total += samples(final, contract.Opening) + samples(final, contract.Latency)
-	if badReads.Load() > 0 || badCuts > 0 {
-		t.Errorf("%d reads broke successes + errors = requests, %d cuts broke window = growth of successes", badReads.Load(), badCuts)
+	if badReads.Load() > 0 || badCuts > 0 || badRetries > 0 {
+		t.Errorf("%d reads broke successes + errors = requests, %d cuts broke window = growth of successes, %d retried cuts came back changed", badReads.Load(), badCuts, badRetries)
 	}
 	if int64(total) != final.Successes || final.Successes == 0 {
 		t.Errorf("windows hold %d samples for %d successes in all", total, final.Successes)
 	}
 }
 
-// TestCollectDuringStopIsNever500 races collects and reads against a stop:
-// each one answers 200 while the loop runs or 404 once it is stopped, never a
-// 500 from a shut-down reader.
+// TestCollectDuringStopIsNever500 races a driver's cuts and many reads
+// against a stop: each one answers 200 while the loop runs or 404 once it is
+// stopped, never a 500 from a shut-down reader.
 func TestCollectDuringStopIsNever500(t *testing.T) {
 	t.Parallel()
 	h := serveTargets(t, 8)
@@ -1236,10 +1391,12 @@ func TestCollectDuringStopIsNever500(t *testing.T) {
 	stopped := make(chan struct{})
 	for i := range 16 {
 		wg.Go(func() {
+			var window int64
 			for {
 				var rec *httptest.ResponseRecorder
-				if i%2 == 0 {
-					rec = post(t, h, contract.CollectRoute, nil)
+				if i == 0 {
+					window++
+					rec = post(t, h, collectPath(window, false), nil)
 				} else {
 					rec = get(h, contract.StatsRoute)
 				}
@@ -1264,7 +1421,7 @@ func TestCollectDuringStopIsNever500(t *testing.T) {
 	stopLoop(t, h)
 	close(stopped)
 	wg.Wait()
-	if rec := post(t, h, contract.CollectRoute, nil); rec.Code != http.StatusNotFound {
+	if rec := post(t, h, collectPath(1, false), nil); rec.Code != http.StatusNotFound {
 		t.Errorf("POST /collect after stop = %d, want 404", rec.Code)
 	}
 	if ok.Load() == 0 || other.Load() != 0 {
@@ -1274,9 +1431,13 @@ func TestCollectDuringStopIsNever500(t *testing.T) {
 
 // TestEveryRouteCarriesProtocolHeader checks the header a driver reads to
 // tell this actor from an image built before this contract, on every answer
-// the actor gives, errors and unknown routes included.
+// the actor gives, errors and unknown routes included. The value is 2: the
+// images that sent 1 took no window id on /collect.
 func TestEveryRouteCarriesProtocolHeader(t *testing.T) {
 	t.Parallel()
+	if contract.ProtocolVersion != "2" {
+		t.Errorf("ProtocolVersion = %q, want 2; a driver requires it", contract.ProtocolVersion)
+	}
 	h := newServer().handler()
 	for _, tc := range []struct {
 		name string
@@ -1286,7 +1447,7 @@ func TestEveryRouteCarriesProtocolHeader(t *testing.T) {
 		{"readyz", get(h, contract.ReadyzRoute), http.StatusOK},
 		{"start rejected", post(t, h, contract.StartRoute, map[string]int{"endpoints": 0}), http.StatusBadRequest},
 		{"stats without a loop", get(h, contract.StatsRoute), http.StatusNotFound},
-		{"collect without a loop", post(t, h, contract.CollectRoute, nil), http.StatusNotFound},
+		{"collect without a loop", post(t, h, collectPath(1, false), nil), http.StatusNotFound},
 		{"stop without a loop", post(t, h, contract.StopRoute, nil), http.StatusNotFound},
 		{"unknown route", get(h, "/metrics"), http.StatusNotFound},
 	} {
@@ -1330,9 +1491,9 @@ func TestPayloadBudget(t *testing.T) {
 	h := s.handler()
 
 	fill()
-	collect := post(t, h, contract.CollectRoute, nil)
+	collect := post(t, h, collectPath(1, false), nil)
 	fill()
-	collectEndpoints := post(t, h, collectPath, nil)
+	collectEndpoints := post(t, h, collectPath(2, true), nil)
 	stats := get(h, contract.StatsRoute)
 	t.Logf("at C=%d: /stats %d B, /collect %d B, /collect?endpoints=1 %d B", c, stats.Body.Len(), collect.Body.Len(), collectEndpoints.Body.Len())
 	for _, tc := range []struct {

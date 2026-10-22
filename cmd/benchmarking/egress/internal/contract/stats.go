@@ -18,7 +18,7 @@ import "time"
 
 // Stats is what one actor's loop measured. The counters are cumulative since
 // /start. GET /stats serves them alone; POST /collect and POST /stop add the
-// distributions recorded since the previous collect.
+// distributions recorded since the previous cut.
 type Stats struct {
 	// Scheme is the scheme the loop requested endpoints over.
 	Scheme  string        `json:"scheme,omitempty"`
@@ -37,6 +37,9 @@ type Stats struct {
 	// OpeningDone is Elapsed at the moment the last endpoint's first request
 	// completed; zero until every endpoint has opened.
 	OpeningDone time.Duration `json:"openingDone"`
+	// RequestsAtOpeningDone is Requests at that same moment, so a reader can
+	// price this actor's opening alone; zero until every endpoint has opened.
+	RequestsAtOpeningDone int64 `json:"requestsAtOpeningDone"`
 	// Rounds is the number of requests the least-visited endpoint has
 	// completed: whether this actor is still making progress.
 	Rounds int64 `json:"rounds"`

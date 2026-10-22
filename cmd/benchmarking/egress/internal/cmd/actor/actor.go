@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -100,6 +101,9 @@ type server struct {
 
 	mu  sync.Mutex
 	run *loopRun // nil when no loop is running
+	// final is the last stopped loop's Stats, endpoints included, kept until
+	// the next /start so a repeated /stop answers it again.
+	final *contract.Stats
 }
 
 func newServer() *server {
@@ -147,7 +151,7 @@ func (s *server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "starting loop: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.run = run
+	s.run, s.final = run, nil
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -155,6 +159,15 @@ func (s *server) handleStart(w http.ResponseWriter, r *http.Request) {
 // counts.
 func withEndpoints(r *http.Request) bool {
 	return r.URL.Query().Get("endpoints") == "1"
+}
+
+// view is a kept Stats as a request asked for it: the per-endpoint slice
+// stays only with ?endpoints=1. The kept value is not touched.
+func view(s contract.Stats, endpoints bool) contract.Stats {
+	if !endpoints {
+		s.Endpoints = nil
+	}
+	return s
 }
 
 // runOr404 returns the loop, or answers 404 and returns nil.
@@ -186,12 +199,21 @@ func (s *server) handleCollect(w http.ResponseWriter, r *http.Request) {
 	if run == nil {
 		return
 	}
-	st, ok, err := run.collect(withEndpoints(r))
+	raw := r.URL.Query().Get(contract.WindowParam)
+	window, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || window < 1 {
+		http.Error(w, fmt.Sprintf("%s must be a positive integer, got %q; the next window is %d", contract.WindowParam, raw, run.nextWindow()), http.StatusBadRequest)
+		return
+	}
+	st, err := run.collect(window, withEndpoints(r))
+	var seq *sequenceError
 	switch {
+	case errors.Is(err, errNoLoop):
+		http.Error(w, contract.NoLoopMessage, http.StatusNotFound)
+	case errors.As(err, &seq):
+		http.Error(w, err.Error(), http.StatusConflict)
 	case err != nil:
 		http.Error(w, "collecting: "+err.Error(), http.StatusInternalServerError)
-	case !ok:
-		http.Error(w, contract.NoLoopMessage, http.StatusNotFound)
 	default:
 		writeJSON(w, st)
 	}
@@ -202,16 +224,21 @@ func (s *server) handleStop(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.run == nil {
-		http.Error(w, contract.NoLoopMessage, http.StatusNotFound)
+		if s.final == nil {
+			http.Error(w, contract.NoLoopMessage, http.StatusNotFound)
+			return
+		}
+		writeJSON(w, view(*s.final, withEndpoints(r)))
 		return
 	}
-	st, err := s.run.stop(withEndpoints(r))
+	st, err := s.run.stop()
 	s.run = nil
 	if err != nil {
 		http.Error(w, "collecting: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, st)
+	s.final = &st
+	writeJSON(w, view(st, withEndpoints(r)))
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -236,6 +263,21 @@ type loopRun struct {
 	// Distributions at collect.
 	stats contract.Stats
 	last  []time.Time // start of each endpoint's most recent request
+	// window is the id of the last cut, 0 before the first, and cut its
+	// Stats with the endpoints, so the same id asked again is answered
+	// without a new cut.
+	window int64
+	cut    contract.Stats
+}
+
+// errNoLoop is a read of a loop that has been stopped.
+var errNoLoop = errors.New(contract.NoLoopMessage)
+
+// sequenceError is a window id that is neither the last cut nor the next.
+type sequenceError struct{ got, last int64 }
+
+func (e *sequenceError) Error() string {
+	return fmt.Sprintf("window %d is out of sequence: the last cut is %d, the next window is %d", e.got, e.last, e.last+1)
 }
 
 // newLoopRun is a loop over c endpoints with a fresh Recorder and no
@@ -329,6 +371,7 @@ func (r *loopRun) endpoint(ctx context.Context, client *http.Client, i int, u st
 	r.stats.Opened++
 	if r.stats.Opened == int64(len(r.stats.Endpoints)) {
 		r.stats.OpeningDone = time.Since(r.started)
+		r.stats.RequestsAtOpeningDone = r.stats.Requests
 	}
 	r.mu.Unlock()
 	for ctx.Err() == nil {
@@ -509,23 +552,42 @@ func (r *loopRun) snapshot(endpoints bool) (contract.Stats, bool) {
 	return r.snapshotLocked(endpoints), true
 }
 
-// collect answers POST /collect: the counters and the distributions since the
-// previous collect, cut under the lock every record takes, so no sample lands
-// between the two. ok is false once the loop is stopped.
-func (r *loopRun) collect(endpoints bool) (contract.Stats, bool, error) {
+// nextWindow is the id the next cut must carry.
+func (r *loopRun) nextWindow() int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.stopped {
-		return contract.Stats{}, false, nil
-	}
-	s, err := r.collectLocked(endpoints)
-	return s, true, err
+	return r.window + 1
 }
 
-// collectLocked is collect with r.mu held. The cut uses its own context: a
-// client that went away must not cost the driver a window.
-func (r *loopRun) collectLocked(endpoints bool) (contract.Stats, error) {
-	s := r.snapshotLocked(endpoints)
+// collect answers POST /collect for window id w, at least 1. The id after the
+// last cut's cuts a new window: the counters and the distributions since the
+// previous cut, under the lock every record takes, so no sample lands between
+// the two. The last cut's id answers that cut again, so a lost answer costs
+// the driver a retry rather than a window. Any other id is a sequenceError,
+// and a stopped loop errNoLoop.
+func (r *loopRun) collect(w int64, endpoints bool) (contract.Stats, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch {
+	case r.stopped:
+		return contract.Stats{}, errNoLoop
+	case w == r.window:
+		return view(r.cut, endpoints), nil
+	case w != r.window+1:
+		return contract.Stats{}, &sequenceError{got: w, last: r.window}
+	}
+	s, err := r.collectLocked()
+	if err != nil {
+		return contract.Stats{}, err
+	}
+	r.window, r.cut = w, s
+	return view(s, endpoints), nil
+}
+
+// collectLocked cuts a window with r.mu held, endpoints included. The cut uses
+// its own context: a client that went away must not cost the driver a window.
+func (r *loopRun) collectLocked() (contract.Stats, error) {
+	s := r.snapshotLocked(true)
 	d, err := r.rec.Collect(context.Background())
 	if err != nil {
 		return contract.Stats{}, err
@@ -535,9 +597,10 @@ func (r *loopRun) collectLocked(endpoints bool) (contract.Stats, error) {
 }
 
 // stop cancels the loop, waits for every endpoint's goroutine to exit, and
-// returns the final Stats: the counters and the tail window. It then releases
-// the Recorder; a collect that raced the stop answers 404.
-func (r *loopRun) stop(endpoints bool) (contract.Stats, error) {
+// returns the final Stats: the counters, endpoints included, and the tail
+// window. It then releases the Recorder; a collect that raced the stop
+// answers 404.
+func (r *loopRun) stop() (contract.Stats, error) {
 	if r.cancel != nil {
 		r.cancel()
 	}
@@ -548,7 +611,7 @@ func (r *loopRun) stop(endpoints bool) (contract.Stats, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.stopped = true
-	s, err := r.collectLocked(endpoints)
+	s, err := r.collectLocked()
 	// Nothing is attached to the provider, so there is nothing to flush and
 	// a failed shutdown loses nothing. Its own context, as for the collect: a
 	// client that hung up must not leave the provider running.

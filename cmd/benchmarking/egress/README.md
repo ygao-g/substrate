@@ -100,11 +100,12 @@ idle again with nothing kept.
 | `GET /readyz` | 200 | 200 |
 | `POST /start` | 204 | 409 |
 | `GET /stats` | 404 | 200, section 4 |
-| `POST /collect` | 404 | 200, section 4 |
-| `POST /stop` | 404 | 200 with the final report once every goroutine has exited |
+| `POST /collect?window=N` | 404 | 200, section 4; 400 or 409 for a bad `window`, section 4 |
+| `POST /stop` | 200 with the last loop's final report, 404 if none | 200 with the final report once every goroutine has exited |
 
-Every answer carries `Benchmark-Egress-Protocol: 1`; the driver refuses an
-actor without it as an image from before this contract.
+Every answer carries `Benchmark-Egress-Protocol: 2`; the driver requires that
+value. No header is an image from before this contract; `1` is the exposition
+images and the first JSON images, whose `/collect` took no `window`.
 
 `POST /start` takes one JSON object, at most 1 MiB; unknown fields are ignored.
 
@@ -139,6 +140,8 @@ The loop then runs one goroutine per endpoint:
    one returns.
 4. Stop on `POST /stop`, which waits for every goroutine and answers with the
    final report of section 4. A request cut off by the stop is not counted.
+   The actor keeps that report until the next `/start`, so a `/stop` whose
+   answer was lost is asked again and answered again.
 
 The client keeps one connection per endpoint and never closes it for idling,
 so a redial, one more in `newConns`, means the gateway cut the tunnel or a
@@ -167,12 +170,18 @@ and holds C tunnels.
 
 The actor answers every read with one JSON object, `Stats`. `GET /stats`
 carries the counters alone, cumulative since `/start`, a few hundred bytes:
-poll it. `POST /collect` carries the counters and the four distributions
-recorded since the previous `/collect`, or since `/start` for the first one.
-Each sample is served once, so the driver is the only collector; a second one
-would steal windows. `POST /stop` answers like a `/collect` for what is left,
+poll it. `POST /collect?window=N` cuts window N: the counters and the four
+distributions recorded since the previous cut, or since `/start` for the first
+one. Each sample is served once, so the driver is the only collector. The
+driver numbers the cuts from 1 and the actor keeps the last cut: asking for the
+same N again returns the same answer, byte for byte, and consumes nothing, so
+a `/collect` whose answer was lost is retried with the same N rather than
+dropped. N must be the last cut's id or the next; any other id, or a second
+driver's, is 409 and a missing or malformed `window` is 400, and the body
+names the next id. `POST /stop` answers like a `/collect` for what is left,
 then the loop is gone. Durations are Go `time.Duration` values, nanoseconds.
-The per-endpoint list comes only with `?endpoints=1`, on any of the three.
+The per-endpoint list comes only with `?endpoints=1`, on any of the three, a
+repeated `/collect` or `/stop` included.
 
 | Field | What it holds | Used for |
 |---|---|---|
@@ -182,6 +191,7 @@ The per-endpoint list comes only with `?endpoints=1`, on any of the three.
 | `newConns` | Requests sent on a freshly dialed connection. | One per endpoint is the tunnel. Any more is a reconnect after the gateway cut a tunnel or a request on it timed out. |
 | `opened` | Endpoints whose first request has completed. | Progress of this actor's opens. |
 | `openingDone` | Elapsed when the last endpoint opened; zero until then. | Added to this actor's `/start` time, the latest across actors ends the blended window. |
+| `requestsAtOpeningDone` | `requests` at that same moment; zero until then. | This actor's request count for its own opening, section 5. |
 | `rounds` | Requests completed by the least-visited endpoint. | Two means every tunnel has been reused. |
 | `longestGap` | Longest time between two consecutive requests on one endpoint. | Whether any tunnel went quiet long enough to be reset. |
 | `errors` | Failures by class, such as `timeout`, `connection reset`, `HTTP 403`; one entry per class seen. | One class per failure mode. |
@@ -206,13 +216,14 @@ bounds differ by about 12%, which sets the resolution: a quantile read from the
 buckets is the upper edge of the bucket holding its rank, so it is within about
 12% above the true value, and two runs whose quantiles fall within one bucket
 step are indistinguishable. `max` is exact. At C = 1024 a `/collect` is about
-7 KB, a `/stats` about 200 bytes, and the endpoint list about 60 KB more.
+7 KB, a `/stats` about 250 bytes, and the endpoint list about 60 KB more.
 
 ```json
 {
   "scheme": "https", "elapsed": 612000000000,
   "requests": 61440, "successes": 61437, "newConns": 1024, "opened": 1024,
-  "openingDone": 102400000000, "rounds": 60, "longestGap": 102600000000,
+  "openingDone": 102400000000, "requestsAtOpeningDone": 1536,
+  "rounds": 60, "longestGap": 102600000000,
   "errors": {"timeout": 3},
   "distributions": {
     "latency": {
@@ -236,7 +247,7 @@ the rule is:
 | Rule | Fields |
 |---|---|
 | sum | `requests`, `successes`, `newConns`, `opened`, `rounds`, `errors` per class, `endpoints` per endpoint |
-| max | `elapsed`, `openingDone`, `longestGap`, `endpoints[].longestGap` |
+| max | `elapsed`, `openingDone`, `requestsAtOpeningDone`, `longestGap`, `endpoints[].longestGap` |
 | bucket-wise add, `Point.Merge` | each of `distributions`: bounds must be equal; `bucketCounts`, `count` and `sum` are added, `min` and `max` taken |
 | first | `scheme` |
 
@@ -245,10 +256,11 @@ do not fit its bounds; the driver names the actor and leaves the sum untouched.
 A quantile is read from the merged buckets with `Point.Quantile`: the upper
 bound of the bucket that holds the rank, capped at `max`; a rank in the
 overflow bucket reads as `max`. A window is one `/collect` across every actor,
-and the first collect of a run covers everything since `/start`. A `/collect`
-that fails, or a `requests` that went down between two `/stats` polls, means
-the actor restarted or was out of reach: that window is dropped and the next
-starts from a fresh collect.
+with the same `window` id sent to each, and the first collect of a run covers
+everything since `/start`. A `/collect` that fails or times out is retried
+with the same id, and the retry is the same window; a `requests` that went
+down between two `/stats` polls, or a 404, means the actor restarted: that
+window is dropped.
 
 The results of a cell come from two windows. The blended window runs from the
 first `/start` to the latest `openingDone`, each actor's shifted by its own
@@ -294,7 +306,10 @@ rather than two every 100 ms; without it every send of actor 2 would coincide
 with one of actor 1's. The gateway's CPU in that window
 paid for four tunnel setups and for every request in it; the settled rate prices
 every request, the first on each tunnel included, and what is left is the
-setups.
+setups. The driver's first `/collect` of the cell is the edge it reads the
+gateway's CPU against, and that cut's `requests` is the window's request count;
+`requestsAtOpeningDone`, summed, is the count at each actor's own opening end,
+for the opening alone.
 
 | Result | Source | How it is computed |
 |---|---|---|

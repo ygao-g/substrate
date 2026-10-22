@@ -29,16 +29,28 @@ const (
 	// distributions: cheap enough to poll. ?endpoints=1 adds the
 	// per-endpoint counts.
 	StatsRoute = "/stats"
-	// CollectRoute, POST, serves the Stats with the distributions recorded
-	// since the previous collect, or since /start for the first. Each
-	// sample is served once, so the route has one consumer: the driver,
-	// which cuts the run into windows with it. ?endpoints=1 as on /stats.
+	// CollectRoute, POST, cuts a window: it serves the Stats with the
+	// distributions recorded since the previous cut, or since /start for the
+	// first. Each sample is served once, so the route has one consumer: the
+	// driver, which cuts the run into windows with it. The driver numbers the
+	// cuts with WindowParam so a cut it did not hear can be asked for again.
+	// ?endpoints=1 as on /stats.
 	CollectRoute = "/collect"
 	// StopRoute, POST, ends the loop and serves its final Stats: the counters
-	// and the distributions since the previous collect. ?endpoints=1 as on
-	// /stats.
+	// and the distributions since the previous cut. The actor keeps that
+	// final Stats once the loop is gone, so a repeated /stop answers it again
+	// with 200 until the next /start, while /stats and /collect answer 404.
+	// ?endpoints=1 as on /stats.
 	StopRoute = "/stop"
 )
+
+// WindowParam is the query parameter of POST /collect: the id of the window
+// the driver asks for, a positive integer. The first cut is 1 and each cut
+// is the previous id plus one. The actor keeps the last cut's Stats, so the
+// same id asked again is answered from it, byte for byte, and consumes
+// nothing. A missing or malformed value is 400; an id that is neither the
+// last cut nor the next is 409; either body names the next id.
+const WindowParam = "window"
 
 // NoLoopMessage is the body of the 404 that /stats, /collect and /stop answer
 // while no loop runs.
@@ -46,10 +58,12 @@ const NoLoopMessage = "no loop is running"
 
 // ProtocolHeader is on every answer the actor gives, ProtocolVersion its
 // value, so a driver can tell what it is talking to before it starts
-// anything: an image from before this contract sends no header.
+// anything. An image from before this contract sends no header; the first
+// JSON images, and before them the Prometheus exposition, sent 1, with a
+// /collect that took no window id. A driver must require 2.
 const (
 	ProtocolHeader  = "Benchmark-Egress-Protocol"
-	ProtocolVersion = "1"
+	ProtocolVersion = "2"
 )
 
 // DefaultRequestTimeoutMs applies when StartRequest.RequestTimeoutMs is zero.
