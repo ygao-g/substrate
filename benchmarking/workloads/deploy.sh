@@ -18,7 +18,6 @@ set -o errexit -o nounset -o pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "${ROOT}"
 
-# Source the environment variables if configured
 if [[ -f .ate-dev-env.sh ]]; then
   source .ate-dev-env.sh
 fi
@@ -63,6 +62,9 @@ ACTOR_CPU="1"
 # and limit. Empty leaves the pod unsized. The limit, less what the worker
 # keeps for itself, is the memory it reports as its actor capacity.
 WORKER_MEMORY=""
+# Worker pod CPU (WorkerPool spec.template.resources), set as both request
+# and limit. Empty leaves the pod unsized.
+WORKER_CPU=""
 # The StorageClass for the glutton-storage external volume. Empty means the
 # template is not deployed.
 STORAGE_CLASS_NAME="${STORAGE_CLASS_NAME:-}"
@@ -91,6 +93,8 @@ usage() {
   echo "  --actor-memory SIZE         Memory limit for the benchmark ActorTemplates (default: 256Mi)"
   echo "  --actor-cpu CPU             CPU limit for the benchmark ActorTemplates (default: 1)"
   echo "  --worker-memory SIZE        Memory request and limit for each WorkerPool pod"
+  echo "                              (default: unset, the pod is unsized)"
+  echo "  --worker-cpu CPU            CPU request and limit for each WorkerPool pod"
   echo "                              (default: unset, the pod is unsized)"
   echo "  --storage-class-name NAME   StorageClass for the glutton-storage external volume. Setting it"
   echo "                              deploys glutton-storage (default: not deployed). Env: STORAGE_CLASS_NAME."
@@ -181,9 +185,21 @@ memory_bytes() {
 substitute() {
   local manifest="$1"
   local worker_resources=""
-  # One flow-style line, so an unset WORKER_MEMORY leaves only a blank line.
+  local reqs=()
+  local limits=()
   if [[ -n "${WORKER_MEMORY}" ]]; then
-    worker_resources="resources: {requests: {memory: \"${WORKER_MEMORY}\"}, limits: {memory: \"${WORKER_MEMORY}\"}}"
+    reqs+=("memory: \"${WORKER_MEMORY}\"")
+    limits+=("memory: \"${WORKER_MEMORY}\"")
+  fi
+  if [[ -n "${WORKER_CPU}" ]]; then
+    reqs+=("cpu: \"${WORKER_CPU}\"")
+    limits+=("cpu: \"${WORKER_CPU}\"")
+  fi
+  if [[ ${#reqs[@]} -gt 0 ]]; then
+    local req_str limit_str
+    req_str="$(IFS=','; echo "${reqs[*]}")"
+    limit_str="$(IFS=','; echo "${limits[*]}")"
+    worker_resources="resources: {requests: {${req_str}}, limits: {${limit_str}}}"
   fi
   sed -e "s|\${WORKER_COUNT}|${WORKER_COUNT}|g" \
       -e "s|\${SANDBOX_CLASS}|${SANDBOX_CLASS}|g" \
@@ -194,6 +210,8 @@ substitute() {
       -e "s|\${WORKER_RESOURCES}|${worker_resources}|g" \
       -e "s|\${ATE_ENV_IMAGE}|${ATE_ENV_IMAGE:-}|g" \
       -e "s|\${STORAGE_CLASS_NAME}|${STORAGE_CLASS_NAME}|g" \
+      -e "s|\${ATESPACE}|benchmark-workloads|g" \
+      -e "s|\${WORKER_WORKLOAD}|${WORKER_WORKLOAD:-benchmark-worker}|g" \
       "${manifest}"
 }
 
@@ -302,7 +320,7 @@ deploy() {
   fi
   ACTOR_CPU_MILLICORES="$(cpu_millicores "${ACTOR_CPU}")"
   ACTOR_MEMORY_BYTES="$(memory_bytes "${ACTOR_MEMORY}")"
-  echo "Deploying workloads (worker_count=${WORKER_COUNT}, actor_memory=${ACTOR_MEMORY}, actor_cpu=${ACTOR_CPU}, worker_memory=${WORKER_MEMORY:-unset}, storage_class=${STORAGE_CLASS_NAME:-none}, otlp_endpoint=${OTLP_ENDPOINT})..."
+  echo "Deploying workloads (worker_count=${WORKER_COUNT}, actor_memory=${ACTOR_MEMORY}, actor_cpu=${ACTOR_CPU}, worker_memory=${WORKER_MEMORY:-unset}, worker_cpu=${WORKER_CPU:-unset}, storage_class=${STORAGE_CLASS_NAME:-none}, otlp_endpoint=${OTLP_ENDPOINT})..."
   substitute "${POOL_MANIFEST}" | hack/run-tool.sh ko apply -f -
   echo "Waiting for worker pool to be ready (timeout: ${WAIT_TIMEOUT_SECS}s)..."
   if fake_data_plane; then
@@ -411,6 +429,13 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --worker-memory=*)
       WORKER_MEMORY="${1#*=}"
+      ;;
+    --worker-cpu)
+      shift
+      WORKER_CPU="$1"
+      ;;
+    --worker-cpu=*)
+      WORKER_CPU="${1#*=}"
       ;;
     --storage-class-name)
       shift

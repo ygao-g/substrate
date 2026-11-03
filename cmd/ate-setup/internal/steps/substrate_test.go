@@ -47,6 +47,8 @@ func TestActorTemplateFromManifestDemos(t *testing.T) {
 		"${ACTOR_MEMORY}":         "256Mi",
 		"${ATE_ENV_IMAGE}":        "gcr.io/example/ate-env-guest@sha256:1d38934ef1dac71fcb1f1286de734e06ab2e19747279bccbd37bfe69e0d5bc72",
 		"${OTLP_ENDPOINT}":        "http://otel-collector.otel-system:4317",
+		"${ATESPACE}":             "benchmark-workloads",
+		"${WORKER_WORKLOAD}":      "benchmark-worker",
 	}
 
 	tests := []struct {
@@ -102,8 +104,9 @@ func TestActorTemplateFromManifestDemos(t *testing.T) {
 			want:    resources.ActorTemplateRef{Atespace: "benchmark-workloads", Name: "kernelmem"},
 		},
 		{
-			relPath: "benchmarking/nighthawk-egress/traffic-driver-template.yaml.tmpl",
-			want:    resources.ActorTemplateRef{Atespace: "nighthawk", Name: "traffic-driver"},
+			relPath: "benchmarking/workloads/manifests/traffic-driver-template.yaml.tmpl",
+			values:  benchmarkValues,
+			want:    resources.ActorTemplateRef{Atespace: "benchmark-workloads", Name: "traffic-driver"},
 		},
 	}
 	for _, tc := range tests {
