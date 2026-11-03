@@ -1,117 +1,223 @@
-# Nighthawk Egress Benchmark
+# Nighthawk Egress-Capacity Benchmark
 
-Benchmarks the Agent Substrate egress dataplane (`atunnel` -> `atenet-egress`) using [Nighthawk](https://github.com/envoyproxy/nighthawk).
+## Objective
 
-## Architecture
+Measure the scale and performance of Agent Substrate's egress gateway
+(`atenet-egress`). The concrete measurement, per CPU configuration:
+
+> **What is the maximum request rate the egress path sustains while tail
+> latency stays under the SLO?**
+
+The benchmark determines that capacity by executing open-loop load stages,
+evaluating threshold criteria, and reporting whether tail latency stays
+within the target objective.
+
+The SLO bounds latency **mean+2σ** (~p95 proxy for bell-shaped distributions).
+True p50, p90, p95, and p99 percentiles are reported per stage, while mean+2σ
+gates the capacity determination.
+
+## What It Measures
+
+Every benchmark request exercises the production egress dataplane: sandboxed
+actors running inside gVisor, `atunnel` HTTP/2 `CONNECT` transport, and the
+`atenet-egress` forward proxy.
+
+### Protocol Modes
+
+- `--mode http`: Plaintext HTTP forward proxy through `atenet-egress:80`.
+- `--mode https-mitm`: Two-stage TLS termination through `atenet-egress:443`.
+  The actor initiates TLS to the target hostname using the cluster's egress
+  MITM CA bundle. `atenet-egress` intercepts the handshake, requests a dynamic
+  leaf certificate from `sdsmint`, runs `ext-proc` header inspection, and
+  originates a new TLS connection to the destination with `servicedns` validation.
+- `--conn-mode keepalive`: Multiplexed persistent HTTP/1.1 connections.
+- `--conn-mode churn`: Single-request connections (`max_requests_per_connection: 1`)
+  measuring connection setup, TLS handshakes, and socket teardown overhead.
+
+### Threshold Table
+
+Capacity requires all three thresholds to hold simultaneously:
+
+| Threshold | Guards against | Failure symptom |
+|---|---|---|
+| `tailLatencySloMs` (mean+2σ ≤ X ms) | Gateway queueing delays | Envoy buffers fill, event loop delays push tail latency above SLO |
+| `successRateThreshold` (default: 0.998) | Dropped or rejected requests | 503 errors from pool overflow, 504 timeouts from backend stalls |
+| `sendRateThreshold` (default: 0.9) | Client harness saturation | Event loop pacing stalls when socket buffers or connections exhaust |
+
+## Dataflow Architecture
+
+`spec.py` generates the execution configuration for Nighthawk load clients.
+Responses gathered from `M` parallel actors pass to `output.py` for aggregation:
 
 ```mermaid
 flowchart LR
-    client["nighthawk_client<br/>(host)"]
-    invoker["traffic-driver-invoker<br/>(:19980, adds ate-target-actor)"]
-    router["atenet-router<br/>(:443)"]
-
-    subgraph worker["WorkerPod (ateworker-gvisor)"]
-        atunnel-ingress["ingress atunnel"]
-        actor["Actor: nighthawk/tester<br/>(nighthawk_service :80)"]
-        atunnel-egress["egress atunnel"]
+    subgraph spec["Specification (spec.py)"]
+        opts["build_command_line_options_dict() CommandLineOptions"]
+        req["build_execution_request() ExecutionRequest proto"]
+        opts --> req
     end
 
-    egress["atenet-egress<br/>(HTTP / HTTPS MITM / TLS passthrough)"]
-    server["nighthawk-server<br/>(:80, :443, :8443)"]
+    subgraph actors["Parallel Load Generators"]
+        actor1["traffic-driver 1 (nighthawk_service :80)"]
+        actor2["traffic-driver 2 (nighthawk_service :80)"]
+        actorM["traffic-driver M (nighthawk_service :80)"]
+    end
 
-    client -->|"start test"| invoker
-    invoker -->|"gRPC + ate-target-actor: nighthawk/tester"| router
-    router --> atunnel-ingress
-    atunnel-ingress --> actor
-    actor ==>|"test traffic"| atunnel-egress
-    atunnel-egress ==>|"mTLS"| egress
-    egress ==> server
+    subgraph output["Aggregation (output.py)"]
+        pool["aggregate_multi_actor_stage() pooled variance"]
+        summary["capacity_summary() SLO threshold evaluation"]
+        pool --> summary
+    end
+
+    subgraph artifacts["Artifacts"]
+        cap["capacity.json"]
+        stats["stats.jsonl"]
+        res["results.json"]
+        status["status.json"]
+    end
+
+    req --> actor1
+    req --> actor2
+    req --> actorM
+    actor1 --> pool
+    actor2 --> pool
+    actorM --> pool
+    summary --> cap
+    summary --> stats
+    summary --> res
+    summary --> status
 ```
 
-## Prerequisites
+## Key Design Decisions
 
-To measure single CPU performance characteristics of Envoy dataplane set E2E_ATE_ENVOY_CONCURRENCY=1 environment
-variable when deploying ATE.
+### 1. Right-Sized Connection Pools
 
-1. **Cluster with Agent Substrate deployed**:
-   - **Existing cluster** (with `.ate-dev-env.sh` configured):
-     ```bash
-     go run ./cmd/ate-setup deploy ate-system \
-       --credential-provider='{"name":"k8s.io"}' \
-       --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/nighthawk/sa/default
-     ```
-   - **Local `kind` cluster**:
-     ```bash
-     go run ./cmd/ate-setup --kind deploy ate-system \
-       --credential-provider='{"enabled":false}' \
-       --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/nighthawk/sa/default
-     ```
-   - To set the `atenet-egress` Envoy worker thread count (`--concurrency`), set `E2E_ATE_ENVOY_CONCURRENCY` when deploying:
-     ```bash
-     E2E_ATE_ENVOY_CONCURRENCY=1 go run ./cmd/ate-setup --kind deploy ate-system --credential-provider='{"name":"k8s.io"}' --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/nighthawk/sa/default
-     ```
-   - Provision CA bundle which includes cluster's trust bundle, so that egress gateway can trust nighhawk's test server cert, run:
-     ```bash
-     hack/setup-e2e-egress-tls-kind.sh
-     ```
-2. **`kubectl-ate` installed in `PATH`**:
-   ```bash
-   go install ./cmd/kubectl-ate
-   ```
-3. **Docker** running locally (used to run `nighthawk_client`).
+High-rate open-loop tests can cause connection storms at stage start. `spec.py`
+sizes connection pools per event loop:
 
-## Setup
+- `conn_mode == "keepalive"`: Defaults to 32 connections per worker loop to avoid
+  initial TLS handshake spikes during steady multiplexing.
+- `conn_mode == "churn"`: Sets 250 connections per loop and
+  `max_requests_per_connection: 1` to sustain connection churn without
+  premature pool overflow.
 
-### 1. Deploy `nighthawk-server` and `traffic-driver-invoker`
+[`spec.build_command_line_options_dict`](spec.py) configures connection limits,
+open-loop request pacing, and TLS transport socket settings for each stage.
+
+### 2. Pooled Latency Variance Across Actors
+
+When driving load across `M` parallel actors, combining latencies by averaging
+per-actor mean values produces statistical error.
+
+[`output.aggregate_multi_actor_stage`](output.py) applies parallel-group pooled
+variance across actor sample counts and latencies to compute the true multi-actor
+mean and standard deviation without averaging errors. Stage achieved RPS divides
+total sent requests across all actors by the measured stage execution duration.
+
+## Output Artifact Schemas
+
+The output module formats test executions into standard JSON and JSONL
+artifacts:
+
+| File | Contents |
+|---|---|
+| `capacity.json` | Final verdict, `slo_max_rps`, `slo_max_stage`, testing stage metrics, and latency percentiles. |
+| `stats.jsonl` | One JSON record per stage containing achieved RPS, send rate, success rate, error counts, pooled latency, and failed thresholds. |
+| `results.json` | Complete array of stage dictionaries including raw per-actor counters and percentiles. |
+| `status.json` | High-level execution status, error messages, and stage count. |
+
+---
+
+## Manual Standalone Invocation
+
+For interactive debugging, deploy the target server and traffic driver actor
+manually using standalone scripts.
+
+### 1. Prerequisites
+
+Deploy substrate with ingress permissions for the test runner:
+
+```bash
+go run ./cmd/ate-setup deploy ate-system \
+  --credential-provider='{"name":"k8s.io"}' \
+  --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/nighthawk/sa/default
+```
+
+Provision the cluster trust bundle so the egress gateway trusts test
+certificates:
+
+```bash
+hack/setup-e2e-egress-tls-kind.sh
+```
+
+Ensure `kubectl-ate` is installed:
+
+```bash
+go install ./cmd/kubectl-ate
+```
+
+### 2. Deploy Server and Invoker
+
+Deploy `nighthawk-server` and `traffic-driver-invoker` into the `nighthawk`
+namespace:
 
 ```bash
 ./benchmarking/nighthawk-egress/deploy.sh
 ```
 
-### 2. Deploy the worker pool, actor template, and `nighthawk/tester` actor
+### 3. Deploy Traffic Driver Actor
+
+Deploy the worker pool, actor template, and `nighthawk/tester` actor:
 
 ```bash
 ./benchmarking/nighthawk-egress/deploy-traffic-driver.sh
 ```
 
-### 3. Port-forward `traffic-driver-invoker`
+### 4. Port-Forward and Run
 
-In a separate terminal, forward local port `19980` to the `traffic-driver-invoker` service:
+In a separate terminal, forward local port 19980 to the invoker service:
 
 ```bash
 kubectl -n nighthawk port-forward svc/traffic-driver-invoker 19980:19980
 ```
 
-## Running the Benchmark
-
-Run `nighthawk_client` against the port-forwarded `traffic-driver-invoker` endpoint (`grpc://127.0.0.1:19980`), which routes the gRPC request to `nighthawk_service` inside the `nighthawk/tester` actor:
+Run `nighthawk_client` locally against the port-forwarded endpoint:
 
 ```bash
-docker run --rm --network=host --entrypoint /usr/local/bin/nighthawk_client envoyproxy/nighthawk-dev:latest --nighthawk-service grpc://127.0.0.1:19980 --rps 1000 --concurrency 1 --protocol http1 --duration 60  http://nighthawk-server.nighthawk.svc:80
+docker run --rm --network=host --entrypoint /usr/local/bin/nighthawk_client \
+  envoyproxy/nighthawk-dev@sha256:7729902afea9d83f593b240690ba7d6e8fff04f6215ada538cfb4c1452b2553e \
+  --nighthawk-service grpc://127.0.0.1:19980 \
+  --rps 1000 \
+  --concurrency 1 \
+  --protocol http1 \
+  --duration 60 \
+  http://nighthawk-server.nighthawk.svc:80
 ```
 
-See [Nighthawk CLI help](https://github.com/envoyproxy/nighthawk#using-the-nighthawk-client-cli) for all command line options.
-
-### Target URLs and Default Egress Policy
+Target URLs by mode:
 
 | Egress Mode | Target URL | Port |
 |---|---|---|
-| Plaintext HTTP | `http://nighthawk-server.nighthawk.svc:80` | `80` |
-| HTTPS (TLS MITM) | `https://nighthawk-server.nighthawk.svc:443` | `443` |
-| TLS Passthrough | `https://nighthawk-server.nighthawk.svc:8443` | `8443` |
+| Plaintext HTTP | `http://nighthawk-server.nighthawk.svc:80` | 80 |
+| HTTPS (TLS MITM) | `https://nighthawk-server.nighthawk.svc:443` | 443 |
+| TLS Passthrough | `https://nighthawk-server.nighthawk.svc:8443` | 8443 |
 
-## Cleanup
+### 5. Manual Cleanup
 
-Delete the `nighthawk/tester` actor, actor template, atespace, and worker pool:
+Delete the actor, template, and worker pool:
 
 ```bash
 ./benchmarking/nighthawk-egress/deploy-traffic-driver.sh --delete
 ```
 
-Delete `nighthawk-server` and `traffic-driver-invoker` from `nighthawk`:
+Delete the server and invoker:
 
 ```bash
 ./benchmarking/nighthawk-egress/deploy.sh --delete
 ```
 
-Neither script deletes the `nighthawk` namespace. Delete it with `kubectl delete namespace nighthawk` after `deploy-traffic-driver.sh --delete`, because the actor, template, and atespace live in the ate API, not in the namespace.
+Delete the remaining namespace:
+
+```bash
+kubectl delete namespace nighthawk
+```

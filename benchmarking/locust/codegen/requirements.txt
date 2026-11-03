@@ -21,7 +21,8 @@
 # It is pinned because the generated files stamp the version that produced
 # them ("Protobuf Python Version" in *_pb2.py, GRPC_GENERATED_VERSION in
 # *_pb2_grpc.py), and the protobuf runtime refuses to load gencode newer than
-# itself. When bumping this pin, keep the floors in ../requirements.txt and
-# ../../nighthawk-ingress/requirements.txt at or above the versions the new
+# itself. When bumping this pin, keep the floors in ../requirements.txt,
+# ../../nighthawk-ingress/requirements.txt, and
+# ../../nighthawk-egress/requirements.txt at or above the versions the new
 # gencode reports.
 grpcio-tools==1.84.1
