@@ -1,0 +1,53 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Strategic merge patch applied to atenet-egress for HTTPS MITM benchmark runs,
+# trusting servicedns roots for upstream nighthawk-server TLS re-origination.
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: egress-upstream-roots
+        image: ${ENVOY_IMAGE}
+        command:
+        - sh
+        - -ec
+        - cat /etc/ssl/certs/ca-certificates.crt /run/servicedns.podcert.ate.dev/trust-bundle.pem > /run/egress-roots/ca-certificates.crt
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        - name: servicedns
+          mountPath: /run/servicedns.podcert.ate.dev
+          readOnly: true
+        - name: egress-upstream-roots
+          mountPath: /run/egress-roots
+      containers:
+      - name: envoy
+        volumeMounts:
+        - name: egress-upstream-roots
+          mountPath: /etc/ssl/certs/ca-certificates.crt
+          subPath: ca-certificates.crt
+          readOnly: true
+      volumes:
+      - name: egress-upstream-roots
+        emptyDir: {}
