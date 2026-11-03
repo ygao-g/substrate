@@ -1,0 +1,202 @@
+{
+  "entries": {
+    "ingress_routercap_envoy_16cpu": "default",
+    "ingress_routercap_envoy_2cpu": "default",
+    "ingress_routercap_envoy_4cpu": "default",
+    "ingress_routercap_envoy_8cpu": "default"
+  },
+  "goldens": {
+    "default": {
+      "kwargs": {
+        "actor_names": [
+          "nh-000",
+          "nh-001",
+          "nh-002",
+          "nh-003",
+          "nh-004"
+        ],
+        "atespace": "ingress-benchmark",
+        "client_concurrency": 16,
+        "connections": 1000,
+        "convergence_deadline_s": 600,
+        "exponential_factor": 2.0,
+        "initial_total_rps": 500,
+        "max_pending_requests": 10000,
+        "measuring_period_s": 10,
+        "send_rate_threshold": 0.9,
+        "success_rate_threshold": 0.999,
+        "tail_latency_slo_ms": 25.0,
+        "testing_stage_duration_s": 60,
+        "uri": "http://atenet-router.ate-system.svc.cluster.local:80/ping"
+      },
+      "spec": {
+        "benchmark_cooldown_duration": "5s",
+        "convergence_deadline": "600s",
+        "informational_metric_specs": [
+          {
+            "metric_name": "attempted-rps",
+            "metrics_plugin_name": "nighthawk.builtin"
+          },
+          {
+            "metric_name": "achieved-rps",
+            "metrics_plugin_name": "nighthawk.builtin"
+          },
+          {
+            "metric_name": "send-rate",
+            "metrics_plugin_name": "nighthawk.builtin"
+          },
+          {
+            "metric_name": "latency-ns-mean",
+            "metrics_plugin_name": "nighthawk.builtin"
+          },
+          {
+            "metric_name": "latency-ns-mean-plus-2stdev",
+            "metrics_plugin_name": "nighthawk.builtin"
+          }
+        ],
+        "measuring_period": "10s",
+        "metric_thresholds": [
+          {
+            "metric_spec": {
+              "metric_name": "success-rate",
+              "metrics_plugin_name": "nighthawk.builtin"
+            },
+            "threshold_spec": {
+              "scoring_function": {
+                "name": "nighthawk.binary_scoring",
+                "typed_config": {
+                  "@type": "type.googleapis.com/nighthawk.adaptive_load.BinaryScoringFunctionConfig",
+                  "lower_threshold": 0.999
+                }
+              }
+            }
+          },
+          {
+            "metric_spec": {
+              "metric_name": "send-rate",
+              "metrics_plugin_name": "nighthawk.builtin"
+            },
+            "threshold_spec": {
+              "scoring_function": {
+                "name": "nighthawk.binary_scoring",
+                "typed_config": {
+                  "@type": "type.googleapis.com/nighthawk.adaptive_load.BinaryScoringFunctionConfig",
+                  "lower_threshold": 0.9
+                }
+              }
+            }
+          },
+          {
+            "metric_spec": {
+              "metric_name": "latency-ns-mean-plus-2stdev",
+              "metrics_plugin_name": "nighthawk.builtin"
+            },
+            "threshold_spec": {
+              "scoring_function": {
+                "name": "nighthawk.binary_scoring",
+                "typed_config": {
+                  "@type": "type.googleapis.com/nighthawk.adaptive_load.BinaryScoringFunctionConfig",
+                  "upper_threshold": 25000000.0
+                }
+              }
+            }
+          }
+        ],
+        "nighthawk_traffic_template": {
+          "concurrency": "16",
+          "connections": 1000,
+          "failure_predicates": {
+            "benchmark.http_4xx": "1000000000",
+            "benchmark.http_5xx": "1000000000",
+            "benchmark.pool_connection_failure": "1000000000",
+            "benchmark.stream_resets": "1000000000",
+            "requestsource.upstream_rq_5xx": "1000000000"
+          },
+          "max_pending_requests": 10000,
+          "open_loop": true,
+          "request_source_plugin_config": {
+            "name": "nighthawk.in-line-options-list-request-source-plugin",
+            "typed_config": {
+              "@type": "type.googleapis.com/nighthawk.request_source.InLineOptionsListRequestSourceConfig",
+              "num_requests": 0,
+              "options_list": {
+                "options": [
+                  {
+                    "request_headers": [
+                      {
+                        "append_action": "OVERWRITE_IF_EXISTS_OR_ADD",
+                        "header": {
+                          "key": "ate-target-actor",
+                          "value": "ingress-benchmark/nh-000"
+                        }
+                      }
+                    ],
+                    "request_method": "POST"
+                  },
+                  {
+                    "request_headers": [
+                      {
+                        "append_action": "OVERWRITE_IF_EXISTS_OR_ADD",
+                        "header": {
+                          "key": "ate-target-actor",
+                          "value": "ingress-benchmark/nh-001"
+                        }
+                      }
+                    ],
+                    "request_method": "POST"
+                  },
+                  {
+                    "request_headers": [
+                      {
+                        "append_action": "OVERWRITE_IF_EXISTS_OR_ADD",
+                        "header": {
+                          "key": "ate-target-actor",
+                          "value": "ingress-benchmark/nh-002"
+                        }
+                      }
+                    ],
+                    "request_method": "POST"
+                  },
+                  {
+                    "request_headers": [
+                      {
+                        "append_action": "OVERWRITE_IF_EXISTS_OR_ADD",
+                        "header": {
+                          "key": "ate-target-actor",
+                          "value": "ingress-benchmark/nh-003"
+                        }
+                      }
+                    ],
+                    "request_method": "POST"
+                  },
+                  {
+                    "request_headers": [
+                      {
+                        "append_action": "OVERWRITE_IF_EXISTS_OR_ADD",
+                        "header": {
+                          "key": "ate-target-actor",
+                          "value": "ingress-benchmark/nh-004"
+                        }
+                      }
+                    ],
+                    "request_method": "POST"
+                  }
+                ]
+              }
+            }
+          },
+          "uri": "http://atenet-router.ate-system.svc.cluster.local:80/ping"
+        },
+        "step_controller_config": {
+          "name": "nighthawk.exponential_search",
+          "typed_config": {
+            "@type": "type.googleapis.com/nighthawk.adaptive_load.ExponentialSearchStepControllerConfig",
+            "exponential_factor": 2.0,
+            "initial_value": 31.25
+          }
+        },
+        "testing_stage_duration": "60s"
+      }
+    }
+  }
+}

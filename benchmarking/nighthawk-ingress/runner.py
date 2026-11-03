@@ -112,6 +112,30 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def spec_kwargs(args: argparse.Namespace, actor_names: list[str]) -> dict:
+    """The build_spec_dict arguments for this run's flags and fleet."""
+    return dict(
+        uri=f"{args.router_url.rstrip('/')}/ping",
+        actor_names=actor_names,
+        atespace=args.atespace,
+        client_concurrency=args.client_concurrency,
+        connections=args.connections,
+        max_pending_requests=args.max_pending,
+        initial_total_rps=args.initial_rps,
+        exponential_factor=args.exp_factor,
+        measuring_period_s=parse_duration_seconds(args.measuring_period),
+        convergence_deadline_s=parse_duration_seconds(args.convergence_deadline),
+        testing_stage_duration_s=parse_duration_seconds(
+            args.testing_stage_duration
+        ),
+        success_rate_threshold=args.success_rate,
+        send_rate_threshold=args.send_rate,
+        tail_latency_slo_ms=(
+            args.tail_latency_slo_ms if args.tail_latency_slo_ms > 0 else None
+        ),
+    )
+
+
 def tee(logs: TextIO, msg: str) -> None:
     print(msg, flush=True)
     logs.write(msg + "\n")
@@ -269,28 +293,7 @@ def main() -> None:
             )
 
             spec_dict = spec_mod.build_spec_dict(
-                uri=f"{args.router_url.rstrip('/')}/ping",
-                actor_names=actor_names,
-                atespace=args.atespace,
-                client_concurrency=args.client_concurrency,
-                connections=args.connections,
-                max_pending_requests=args.max_pending,
-                initial_total_rps=args.initial_rps,
-                exponential_factor=args.exp_factor,
-                measuring_period_s=parse_duration_seconds(args.measuring_period),
-                convergence_deadline_s=parse_duration_seconds(
-                    args.convergence_deadline
-                ),
-                testing_stage_duration_s=parse_duration_seconds(
-                    args.testing_stage_duration
-                ),
-                success_rate_threshold=args.success_rate,
-                send_rate_threshold=args.send_rate,
-                tail_latency_slo_ms=(
-                    args.tail_latency_slo_ms
-                    if args.tail_latency_slo_ms > 0
-                    else None
-                ),
+                **spec_kwargs(args, actor_names)
             )
             spec_path.write_text(
                 spec_mod.spec_dict_to_textproto(spec_dict, DESC_PATH)
