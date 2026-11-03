@@ -14,10 +14,12 @@
 
 """Helpers shared by orchestrator.py and the per-test-type modules."""
 
+import json
 import re
 import shlex
 import subprocess
 import time
+from typing import Any
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -65,6 +67,39 @@ def parse_duration_seconds(s: str) -> int:
     n = int(m.group(1))
     unit = m.group(2) or "s"
     return n * {"s": 1, "m": 60, "h": 3600}[unit]
+
+
+def pin_deployment(
+    name: str,
+    namespace: str,
+    patch: dict[str, Any],
+) -> None:
+    """Strategic-merge `patch` into a Deployment and block on its rollout.
+    The benchmark types use it to size the proxy under test."""
+    run(
+        [
+            "kubectl",
+            "-n",
+            namespace,
+            "patch",
+            "deployment",
+            name,
+            "--type=strategic",
+            "-p",
+            json.dumps(patch),
+        ]
+    )
+    run(
+        [
+            "kubectl",
+            "-n",
+            namespace,
+            "rollout",
+            "status",
+            f"deployment/{name}",
+            "--timeout=300s",
+        ]
+    )
 
 
 # The keys of a tests.yaml isolate block and the fake-atelet tuning

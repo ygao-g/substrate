@@ -14,6 +14,7 @@
 
 """Unit tests for util.py: python3 benchmarking/automation/test_util.py"""
 
+import json
 import unittest
 from unittest import mock
 
@@ -51,6 +52,54 @@ class BuildAndPushTest(unittest.TestCase):
         self.assertEqual(build_cmd[build_cmd.index("-t") + 1], "gcr.io/p/repo/img:tag")
         self.assertEqual(build_cmd[build_cmd.index("-f") + 1], "path/Dockerfile")
         self.assertEqual(push_cmd, ["docker", "push", "gcr.io/p/repo/img:tag"])
+
+
+class PinDeploymentTest(unittest.TestCase):
+    @mock.patch("util.run")
+    def test_patches_then_waits_for_rollout(self, run_mock):
+        patch = {
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {"name": "envoy", "resources": {"limits": {"cpu": "2"}}},
+                            {"name": "ext-proc", "resources": {"limits": {"cpu": "2"}}},
+                        ]
+                    }
+                }
+            }
+        }
+        util.pin_deployment("atenet-egress", "ate-system", patch)
+
+        patch_cmd, rollout_cmd = (c.args[0] for c in run_mock.call_args_list)
+        self.assertEqual(
+            patch_cmd,
+            [
+                "kubectl",
+                "-n",
+                "ate-system",
+                "patch",
+                "deployment",
+                "atenet-egress",
+                "--type=strategic",
+                "-p",
+                json.dumps(patch),
+            ],
+        )
+        self.assertEqual(
+            rollout_cmd,
+            [
+                "kubectl",
+                "-n",
+                "ate-system",
+                "rollout",
+                "status",
+                "deployment/atenet-egress",
+                "--timeout=300s",
+            ],
+        )
+
+
 
 
 class IsolateTest(unittest.TestCase):
