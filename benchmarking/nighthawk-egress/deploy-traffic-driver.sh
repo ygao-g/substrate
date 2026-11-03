@@ -30,7 +30,10 @@ TEMPLATE_NAME="traffic-driver"
 ACTOR_NAME="tester"
 POOL_MANIFEST="${SCRIPT_DIR}/traffic-driver.yaml.tmpl"
 NAMESPACE_MANIFEST="${SCRIPT_DIR}/namespace.yaml"
-MANIFEST="${SCRIPT_DIR}/traffic-driver-template.yaml.tmpl"
+MANIFEST="${REPO_ROOT}/benchmarking/workloads/manifests/traffic-driver-template.yaml.tmpl"
+ACTOR_CPU_MILLICORES="${ACTOR_CPU_MILLICORES:-2000}"
+ACTOR_MEMORY_BYTES="${ACTOR_MEMORY_BYTES:-1073741824}"
+WORKER_WORKLOAD="${WORKER_WORKLOAD:-traffic-driver}"
 EGRESS_POLICY_MANIFEST="${SCRIPT_DIR}/egress-policy.yaml"
 KUBECTL_ATE_BIN="kubectl-ate"
 WAIT_TIMEOUT_SECS=300
@@ -168,7 +171,11 @@ deploy() {
   run_kubectl_ate delete actor-template "${TEMPLATE_NAME}" -a "${ATESPACE}" >/dev/null 2>&1 || true
 
   echo "Creating actor template ${ATESPACE}/${TEMPLATE_NAME} from ${MANIFEST}..."
-  run_kubectl_ate create actor-template -f "${MANIFEST}"
+  sed -e "s|\${ATESPACE}|${ATESPACE}|g" \
+      -e "s|\${WORKER_WORKLOAD}|${WORKER_WORKLOAD}|g" \
+      -e "s|\${ACTOR_CPU_MILLICORES}|${ACTOR_CPU_MILLICORES}|g" \
+      -e "s|\${ACTOR_MEMORY_BYTES}|${ACTOR_MEMORY_BYTES}|g" \
+      "${MANIFEST}" | run_kubectl_ate create actor-template -f -
 
   wait_template_ready
 

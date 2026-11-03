@@ -13,24 +13,21 @@
 # limitations under the License.
 
 # Substrate ActorTemplate resource (protojson-shaped ateapi.ActorTemplate,
-# NOT the ate.dev/v1 CRD) for the Nighthawk egress traffic-driver actor.
-# Applied with `kubectl-ate create actor-template -f` by
-# deploy-traffic-driver.sh; the `nighthawk` atespace must exist.
+# NOT the ate.dev/v1 CRD) for the Nighthawk traffic-driver actor workload,
+# deployed into the ${ATESPACE} atespace.
 #
-# Runs Envoy's `nighthawk_service` gRPC server on port 80 (the default actor
+# Runs Envoy's stock nighthawk_service gRPC server on port 80 (the default actor
 # ingress port forwarded by atunnel) so benchmark runners can invoke
-# ExecutionStream through atenet-router to drive HTTP/HTTPS egress load from
-# inside the gVisor actor sandbox.
+# ExecutionStream through atenet-router to drive HTTP/HTTPS load from inside
+# the gVisor actor sandbox.
 metadata:
-  atespace: nighthawk
+  atespace: "${ATESPACE}"
   name: traffic-driver
 workerSelector:
   matchLabels:
-    workload: traffic-driver
+    workload: "${WORKER_WORKLOAD}"
 containers:
 - name: nighthawk-service
-  # Same envoyproxy/nighthawk-dev digest as nighthawk-server.yaml and
-  # benchmarking/nighthawk-ingress/Dockerfile.
   image: envoyproxy/nighthawk-dev@sha256:7729902afea9d83f593b240690ba7d6e8fff04f6215ada538cfb4c1452b2553e
   command:
   - /usr/local/bin/nighthawk_service
@@ -39,11 +36,6 @@ containers:
   - 0.0.0.0:80
   - --service
   - traffic-generator-service
-  env:
-  - name: SSL_CERT_FILE
-    value: /run/ate/egress-trust-bundle/trust-bundle.pem
-  - name: SSL_CERT_DIR
-    value: /run/ate/egress-trust-bundle/
   volumeMounts:
   - name: system-info
     mountPath: /run/ate
@@ -58,10 +50,9 @@ volumes:
         - egress-mitm.ate.dev
         - system-roots.ate.dev
         path: egress-trust-bundle/trust-bundle.pem
-# Sandbox size: headroom so the load generator is not the bottleneck.
 resources:
   limits:
-    cpuMillicores: 2000
-    memoryBytes: 1073741824 # 1Gi
+    cpuMillicores: "${ACTOR_CPU_MILLICORES}"
+    memoryBytes: "${ACTOR_MEMORY_BYTES}"
 snapshotConfig:
   preferredFidelity: SNAPSHOT_FIDELITY_MEMORY

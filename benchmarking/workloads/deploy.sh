@@ -210,6 +210,8 @@ substitute() {
       -e "s|\${WORKER_RESOURCES}|${worker_resources}|g" \
       -e "s|\${ATE_ENV_IMAGE}|${ATE_ENV_IMAGE:-}|g" \
       -e "s|\${STORAGE_CLASS_NAME}|${STORAGE_CLASS_NAME}|g" \
+      -e "s|\${ATESPACE}|benchmark-workloads|g" \
+      -e "s|\${WORKER_WORKLOAD}|${WORKER_WORKLOAD:-benchmark-worker}|g" \
       "${manifest}"
 }
 
