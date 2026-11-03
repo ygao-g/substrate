@@ -1,0 +1,122 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# RBAC for runner.py --sample-resources. Not applied by the orchestrator;
+# apply by hand on the benchmark cluster before enabling the flag, after
+# the ate-system, benchmarking and benchmark-workloads namespaces exist.
+#
+# nodes/proxy get reaches every kubelet endpoint through the API server,
+# not just /metrics/cadvisor. The kubelet authorizes websocket-upgraded
+# /exec, /attach and /run as nodes/proxy get too, so this grant lets
+# benchmark-runner run commands in any pod on any node. Grant it only on
+# benchmark clusters, and delete it when the benchmark is done.
+#
+# Pod listing is namespaced to the three namespaces the sampler reads.
+#
+# The Envoy snapshot needs nothing new: pod IPs come from the atenet-router
+# EndpointSlices, which Role atelet-endpointslices already grants to
+# benchmark-runner.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: benchmark-runner-resource-sampler
+rules:
+- apiGroups: [""]
+  resources: ["nodes/proxy"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: benchmark-runner-resource-sampler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: benchmark-runner-resource-sampler
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: ate-system
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: ate-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: benchmark-runner-resource-sampler
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: benchmarking
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: benchmarking
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: benchmark-runner-resource-sampler
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: benchmark-workloads
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: benchmark-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: benchmark-runner-resource-sampler
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking

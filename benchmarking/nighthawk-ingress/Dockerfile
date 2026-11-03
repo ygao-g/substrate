@@ -96,6 +96,11 @@ COPY benchmarking/nighthawk-ingress/runner.py \
      benchmarking/nighthawk-ingress/spec.py \
      benchmarking/nighthawk-ingress/output.py \
      benchmarking/nighthawk-ingress/actors.py \
+     benchmarking/nighthawk-ingress/kubeapi.py \
+     benchmarking/nighthawk-ingress/resources_common.py \
+     benchmarking/nighthawk-ingress/resource_sampler.py \
+     benchmarking/nighthawk-ingress/envoy_stats.py \
+     benchmarking/nighthawk-ingress/fetch_run_resources.py \
      /app/
 COPY benchmarking/nighthawk-ingress/tests /app/tests
 
