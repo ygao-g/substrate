@@ -17,7 +17,7 @@
 #
 # Fields shared by every entry:
 #
-#   type           Required. Selects the runner: "locust" | "nighthawk-ingress".
+#   type           Required. Selects the runner: "locust" | "nighthawk-ingress" | "nighthawk-egress".
 #                  Each type's own fields are described in its section.
 #   targetCluster  Required. Names a config file under
 #                  /etc/orchestrator/target-clusters/ (e.g. `targetCluster:
@@ -45,6 +45,10 @@
 #                  node needs more than half the node's allocatable memory.
 #                  The limit, less what the worker keeps for itself, is
 #                  the memory it reports as its actor capacity.
+#   workerCPU      Optional (default unset: the worker pods have no requests
+#                  or limits). CPU request and limit on each WorkerPool pod.
+#                  The limit, less what the worker keeps for itself, is the
+#                  CPU capacity it reports to the scheduler.
 #   workerWaitTimeout
 #                  Optional (default 300, set by workloads/deploy.sh).
 #                  Whole seconds to wait after the WorkerPool deploy for
@@ -698,6 +702,66 @@ tests:
     nighthawk-ingress:
       envoyCpu: 16
       tailLatencySloMs: 25
+  # ---- type: nighthawk-egress ---------------------------------------------------------
+  #
+  # Runs Nighthawk adaptive search for atenet-egress capacity (Envoy + ext-proc).
+  # Covers plaintext HTTP (:80) and HTTPS MITM (:443) with keepalive and churn modes.
+  # Pre-test deploys nighthawk-server, pins atenet-egress, applies the servicedns
+  # trust patch for HTTPS MITM runs, and warms actors across ready workers.
+  - name: egress_cap_http_keepalive_envoy_2cpu
+    description: "Egress capacity: HTTP (:80) keepalive adaptive search, Envoy at 2 CPUs, ext-proc at 2 CPUs, 4 actors"
+    type: nighthawk-egress
+    targetCluster: dev
+    duration: 30m
+    workerCount: 4
+    workerCPU: "6"
+    workerMemory: "4Gi"
+    actorCPU: "4"
+    actorMemory: "2Gi"
+    nighthawk-egress:
+      mode: http
+      connMode: keepalive
+      envoyCpu: 2
+      extProcCpu: 2
+      actors: 4
+      initialTotalRps: 2000
+      tailLatencySloMs: 25
+  - name: egress_cap_https_mitm_keepalive_envoy_2cpu
+    description: "Egress capacity: HTTPS MITM (:443) keepalive adaptive search, Envoy at 2 CPUs, ext-proc at 2 CPUs, 4 actors"
+    type: nighthawk-egress
+    targetCluster: dev
+    duration: 30m
+    workerCount: 4
+    workerCPU: "6"
+    workerMemory: "4Gi"
+    actorCPU: "4"
+    actorMemory: "2Gi"
+    nighthawk-egress:
+      mode: https-mitm
+      connMode: keepalive
+      envoyCpu: 2
+      extProcCpu: 2
+      actors: 4
+      initialTotalRps: 2000
+      tailLatencySloMs: 25
+  - name: egress_cap_https_mitm_churn_envoy_2cpu
+    description: "Egress capacity: HTTPS MITM (:443) churn adaptive search, Envoy at 2 CPUs, ext-proc at 2 CPUs, 4 actors"
+    type: nighthawk-egress
+    targetCluster: dev
+    duration: 30m
+    workerCount: 4
+    workerCPU: "6"
+    workerMemory: "4Gi"
+    actorCPU: "4"
+    actorMemory: "2Gi"
+    nighthawk-egress:
+      mode: https-mitm
+      connMode: churn
+      envoyCpu: 2
+      extProcCpu: 2
+      actors: 4
+      initialTotalRps: 500
+      tailLatencySloMs: 40
   # ate-api-server and Postgres cold resume ceiling on the fake data plane.
   # Each user owns one actor: its first iteration creates the actor and
   # makes it cold, in the step that adds the user, and every later one

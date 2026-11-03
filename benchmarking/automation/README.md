@@ -4,9 +4,11 @@ Scheduled, repeatable benchmark runs of a substrate branch. A CronJob on an
 **orchestration cluster** drives the full build/deploy/run/teardown cycle
 against a separate **test cluster**, once per entry in [tests.yaml](tests.yaml).
 Each run uploads results to GCS via `benchmarking/locust/runner.py`
-(`type: locust`) or `benchmarking/nighthawk-ingress/runner.py` (`type: nighthawk-ingress`,
+(`type: locust`), `benchmarking/nighthawk-ingress/runner.py` (`type: nighthawk-ingress`,
 the router capacity benchmark — see
-[benchmarking/nighthawk-ingress/README.md](../nighthawk-ingress/README.md)).
+[benchmarking/nighthawk-ingress/README.md](../nighthawk-ingress/README.md)), or
+`benchmarking/nighthawk-egress/runner.py` (`type: nighthawk-egress`, the egress gateway
+capacity benchmark; see [benchmarking/nighthawk-egress/README.md](../nighthawk-egress/README.md)).
 To run the cold resume tests from your workstation instead, see
 [ateapi-cold-resume.md](ateapi-cold-resume.md).
 
@@ -18,8 +20,9 @@ To run the cold resume tests from your workstation instead, see
    `gcloud container clusters get-credentials` for the test cluster.
 3. Shallow-clones `--repo` at `--branch`, captures the commit hash.
 4. `docker build && docker push` builds the runner image for each test type
-   in use, tagged with the commit hash: `${KO_DOCKER_REPO}/locust-test:<commit>`
-   and/or `${KO_DOCKER_REPO}/nighthawk-ingress-test:<commit>`.
+   in use, tagged with the commit hash: `${KO_DOCKER_REPO}/locust-test:<commit>`,
+   `${KO_DOCKER_REPO}/nighthawk-ingress-test:<commit>`, and/or
+   `${KO_DOCKER_REPO}/nighthawk-egress-test:<commit>`.
 5. `go run ./cmd/ate-setup deploy ate-system` (with `ATE_CREDENTIAL_PROVIDER`
    in `.ate-dev-env.sh`, or `--credential-provider` in the test's
    `ateArgs`; passes `--sandbox-classes=<class>` so `deploy ate-system`
@@ -40,10 +43,14 @@ To run the cold resume tests from your workstation instead, see
    requests=limits and Envoy's thread count to its own `envoyCpu`, then
    waits for the rollout before deploying workloads. The teardown after
    each test redeploys substrate, so the pin never outlives its run.
+   For a `nighthawk-egress` test the orchestrator deploys `nighthawk-server`,
+   pins `atenet-egress` (`envoy` CPU/concurrency and `ext-proc` CPU), applies
+   the servicedns trust patch for `https-mitm` mode, and deploys `traffic-driver`.
 6. For each test in `tests.yaml`, or only those named by `--test-name`:
    - Submits a Job using the just-built image for the test's type
      (`runner-job.yaml.tmpl` for locust,
-     `nighthawk-ingress-runner-job.yaml.tmpl` for nighthawk-ingress).
+     `nighthawk-ingress-runner-job.yaml.tmpl` for nighthawk-ingress, or
+     `nighthawk-egress-runner-job.yaml.tmpl` for nighthawk-egress).
      A locust Job also gets `--metadata` with the target cluster's name,
      location and project, merged with the `BENCHMARK_METADATA` environment
      variable (a JSON object) if set. A `--metadata` in the test's own
@@ -51,6 +58,47 @@ To run the cold resume tests from your workstation instead, see
    - Polls until complete/failed/timeout; tails logs; deletes the Job.
    - Tears down workloads + substrate.
    - If not the last test, redeploys them so the next run starts clean.
+
+## Nighthawk Egress Capacity (`type: nighthawk-egress`)
+
+`type: nighthawk-egress` tests evaluate the open-loop request capacity and tail
+latency of the `atenet-egress` gateway under forward proxy (`:80`) and HTTPS
+MITM (`:443`) traffic.
+
+### Lifecycle and Dependencies
+
+```mermaid
+flowchart TD
+    orch["orchestrator.py (--test-name egress_cap_...)"]
+    subst["deploy_substrate() installs ate-system"]
+    pre["testtypes/nighthawk_egress.py: pre_test() deploys nighthawk-server, pins atenet-egress via util.pin_deployment (envoyCpu, extProcCpu, servicedns trust patch)"]
+    workloads["deploy_workloads() (workloads/deploy.sh with WORKLOAD_TEMPLATES, --worker-cpu, --actor-cpu)"]
+    run["run_test() renders nighthawk-egress-runner-job.yaml.tmpl via job_tmpl() + job_subs()"]
+    cleanup["Cleanup: type_post_test() (deletes nighthawk ns & RBAC) + teardown_workloads() + teardown_substrate()"]
+
+    orch --> subst
+    subst --> pre
+    pre --> workloads
+    workloads --> run
+    run --> cleanup
+```
+
+### Design Decisions
+
+1. **CPU Pinning**: `util.pin_deployment` configures CPU requests and limits for
+   both `envoy` and `ext-proc` containers in `atenet-egress`, and aligns Envoy
+   `--concurrency` with `envoyCpu`. This prevents CPU starvation between
+   Envoy's networking threads and the Go policy engine.
+2. **Upstream MITM Trust Configuration**: In `https-mitm` mode, `pre_test`
+   mounts the cluster's `servicedns` CA bundle into Envoy. This allows
+   `atenet-egress` to re-originate TLS and validate the leaf certificate of
+   `nighthawk-server.nighthawk.svc` on port 443 without certificate errors.
+
+### Configuration and Invocation
+
+Egress benchmark scenarios are configured in [tests.yaml](tests.yaml). See
+[benchmarking/nighthawk-egress/README.md](../nighthawk-egress/README.md) for
+standalone and local dev invocations.
 
 ## Choosing a sandbox class
 

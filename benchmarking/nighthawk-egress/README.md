@@ -11,8 +11,8 @@ Measure the scale and performance of Agent Substrate's egress gateway
 The benchmark determines that capacity using an adaptive load driver:
 it ramps open-loop load until a threshold breaks, bisects the boundary, and
 confirms with a 60s testing stage. Run it across `envoyCpu` and `extProcCpu`
-configurations to map throughput, or continuously to prevent networking
-regressions.
+configurations to map throughput, or continuously in CI to prevent
+networking regressions.
 
 The SLO bounds latency **mean+2σ** (~p95 proxy for bell-shaped distributions).
 True p50, p90, p95, and p99 percentiles are reported per stage, while mean+2σ
@@ -79,7 +79,7 @@ HTTP response return path.
 
 Capacity requires all three thresholds to hold simultaneously:
 
-| Threshold | Guards against | Failure symptom |
+| Threshold (tests.yaml knob) | Guards against | Failure symptom |
 |---|---|---|
 | `tailLatencySloMs` (mean+2σ ≤ X ms) | Gateway queueing delays | Envoy buffers fill, event loop delays push tail latency above SLO |
 | `successRateThreshold` (default: 0.998) | Dropped or rejected requests | 503 errors from pool overflow, 504 timeouts from backend stalls |
@@ -91,7 +91,10 @@ The benchmark executes as a Kubernetes Job running `runner.py`:
 
 ```mermaid
 flowchart TD
-    cli["run-dev.sh (CLI)"]
+    subgraph entry["Invocation Layer"]
+        ci["orchestrator.py (CI)"]
+        cli["run-dev.sh (CLI)"]
+    end
 
     subgraph runner_mod["runner.py"]
         main["main loop"]
@@ -110,6 +113,7 @@ flowchart TD
         kube["kubeapi.py"]
     end
 
+    ci --> main
     cli --> main
     main --> controller
     main --> actors
@@ -248,6 +252,30 @@ and `ext-proc` (`:9090/metrics`).
 
 ## How to Run It
 
+### In CI
+
+Add a `type: nighthawk-egress` entry to `benchmarking/automation/tests.yaml`:
+
+```yaml
+- name: egress_cap_2cpu_keepalive
+  type: nighthawk-egress
+  targetCluster: dev
+  duration: 30m
+  workerCount: 4
+  workerCPU: "6"
+  workerMemory: "4Gi"
+  actorCPU: "4"
+  actorMemory: "2Gi"
+  nighthawk-egress:
+    mode: http
+    connMode: keepalive
+    envoyCpu: 2
+    extProcCpu: 2
+    actors: 4
+    initialTotalRps: 1000
+    tailLatencySloMs: 25
+```
+
 ### On a Dev Cluster
 
 Deploy substrate and workload prerequisites:
@@ -305,40 +333,45 @@ Artifacts save to the directory specified by `--dest` or local output path:
 
 ## Configuration Knobs
 
-CLI arguments supported by `runner.py` (a subset is exposed by `run-dev.sh` flags):
+Top-level test fields in `tests.yaml` configure the test infrastructure:
+`workerCount` sets the worker pool size (which must be at least `actors`),
+while `workerCPU`, `workerMemory`, `actorCPU`, and `actorMemory` configure
+worker pod and actor sandbox sizing.
 
-| Flag | Default | Description |
+Settings defined under the `nighthawk-egress:` block in `tests.yaml`:
+
+| Knob | Default | Description |
 |---|---|---|
-| `--envoy-cpu` | 2 | CPU request and limit for Envoy; sets `--concurrency`. |
-| `--ext-proc-cpu` | same as envoy | CPU request and limit for the `ext-proc` sidecar container. |
-| `--mode` | `http` | Protocol mode: `http` or `https-mitm`. |
-| `--conn-mode` | `keepalive` | Connection mode: `keepalive` or `churn`. |
-| `--actors` | 1 | Number of warm `traffic-driver` actors driving load. |
-| `--client-concurrency` | 4 | Event loops per actor container. |
-| `--connections` | 32 / 250 | Connections per event loop (32 for keepalive, 250 for churn). |
-| `--max-pending-requests` | 1000 | Maximum pending request queue per loop. |
-| `--initial-total-rps` | 1000 | Initial aggregate RPS for Stage 0 across all actors. |
-| `--exponential-factor` | 2.0 | Multiplier for exponential search ramp. |
-| `--measuring-period-s` | 20 | Duration of each adjusting stage in seconds. |
-| `--convergence-deadline-s` | 600 | Maximum time allowed for bisection to converge in seconds. |
-| `--testing-stage-duration-s` | 60 | Confirmation run duration at converged RPS in seconds. |
-| `--success-rate-threshold` | 0.998 | Minimum fraction of successful 2xx responses. |
-| `--send-rate-threshold` | 0.9 | Minimum fraction of scheduled requests sent. |
-| `--tail-latency-slo-ms` | 25.0 | Maximum allowed mean+2σ latency in milliseconds. |
-| `--atespace` | `benchmark-workloads` | Atespace holding benchmark actors. |
+| `envoyCpu` | required | CPU request and limit for Envoy; sets `--concurrency`. |
+| `extProcCpu` | `envoyCpu` | CPU request and limit for the `ext-proc` sidecar container. |
+| `mode` | `http` | Protocol mode: `http` or `https-mitm`. |
+| `connMode` | `keepalive` | Connection mode: `keepalive` or `churn`. |
+| `actors` | 4 | Number of warm `traffic-driver` actors driving load. |
+| `clientConcurrency` | 4 | Event loops per actor container. |
+| `connections` | 32 / 250 | Connections per event loop (32 for keepalive, 250 for churn). |
+| `maxPendingRequests` | 1000 | Maximum pending request queue per loop. |
+| `initialTotalRps` | 1000 | Initial aggregate RPS for Stage 0 across all actors. |
+| `exponentialFactor` | 2.0 | Multiplier for exponential search ramp. |
+| `measuringPeriod` | `20s` | Duration of each adjusting stage. |
+| `convergenceDeadline` | `600s` | Maximum time allowed for bisection to converge. |
+| `testingStageDuration` | `60s` | Confirmation run duration at converged RPS. |
+| `successRateThreshold` | 0.998 | Minimum fraction of successful 2xx responses. |
+| `sendRateThreshold` | 0.9 | Minimum fraction of scheduled requests sent. |
+| `tailLatencySloMs` | 25.0 | Maximum allowed mean+2σ latency in milliseconds. |
+| `atespace` | `benchmark-workloads` | Atespace holding benchmark actors. |
 
 ## Sizing and Troubleshooting
 
 To ensure the benchmark measures `atenet-egress` rather than test harness
 limitations:
 
-- **Worker Sizing**: Set adequate worker and actor CPU allocation. Actors
-  generate network load and process TLS handshakes; under-provisioned actor
-  pods will bottleneck before the gateway saturates.
+- **Worker Sizing**: Set `workerCPU: "6"` and `actorCPU: "4"` in `tests.yaml`.
+  Actors generate network load and process TLS handshakes; under-provisioned
+  actor pods will bottleneck before the gateway saturates.
 - **Client Harness Saturation**: If `send-rate` falls below `0.9` during early
   stages, check if actor CPU is pegged. Raise `actors` or worker CPU allocation.
-- **Backend Saturation**: Scale `nighthawk-server` replicas to `max(envoyCpu, 2)`
-  to prevent the echo server from becoming the bottleneck.
+- **Backend Saturation**: `pre_test` scales `nighthawk-server` replicas to
+  `max(envoyCpu, 2)` to prevent the echo server from becoming the bottleneck.
 - **Diagnosis via `capacity.json`**: Inspect `bottleneck_component`. If it reports
   `"worker"` or `"origin"`, increase worker or server resources before
   attributing capacity limits to the gateway.
