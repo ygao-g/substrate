@@ -30,8 +30,14 @@ Each module implements the TestType hooks, called in lifecycle order:
                         orchestrator renders the template, submits the
                         Job, waits, tails logs, deletes it.
 
-No post_test hook: teardown is type-independent today. Name it here when
-a type needs one.
+Two optional hooks, looked up with getattr:
+
+  workload_templates(test)
+                        actor templates the workloads deploy must create
+                        besides its defaults (nighthawk-egress adds `traffic-driver`).
+  post_test(test)       after the Job, before the teardowns: undo what
+                        pre_test did outside substrate's own namespaces
+                        (nighthawk-egress deletes nighthawk namespace and resource-sampler RBAC).
 
 Adding a test type = one new module here + one entry in TYPES.
 """
@@ -39,6 +45,7 @@ Adding a test type = one new module here + one entry in TYPES.
 from typing import Any, Protocol
 
 from testtypes import locust
+from testtypes import nighthawk_egress
 from testtypes import nighthawk_ingress
 
 
@@ -54,6 +61,7 @@ class TestType(Protocol):
 
 TYPES: dict[str, TestType] = {
     locust.TEST_TYPE: locust,
+    nighthawk_egress.TEST_TYPE: nighthawk_egress,
     nighthawk_ingress.TEST_TYPE: nighthawk_ingress,
 }
 
