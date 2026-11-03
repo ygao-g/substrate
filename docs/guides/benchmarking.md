@@ -1041,11 +1041,12 @@ Once installed:
 
 ### Generating gRPC Python clients
 
-The clients are not checked in. The locust and nighthawk-ingress images
-generate them at build time, and `hack/verify/python-protos.sh` compiles them
-on every PR, so a proto change needs no extra step. For local use, such as
-editor completion, run `benchmarking/locust/codegen/generate.sh`. It manages
-its own virtual environment under `locust/codegen/venv`.
+The clients are not checked in. The locust, nighthawk-ingress, and
+nighthawk-egress images generate them at build time, and
+`hack/verify/python-protos.sh` compiles them on every PR, so a proto change
+needs no extra step. For local use, such as editor completion, run
+`benchmarking/locust/codegen/generate.sh`. It manages its own virtual
+environment under `locust/codegen/venv`.
 
 ### Unit tests
 
@@ -1062,3 +1063,11 @@ aggregation:
 ```bash
 python3 -m unittest discover -s benchmarking/analysis
 ```
+
+`nighthawk-egress/tests` covers the egress capacity runner, Envoy stats, and
+resource sampler. Run all benchmark test suites via:
+
+```bash
+hack/verify/benchmarking-python.sh
+```
+
