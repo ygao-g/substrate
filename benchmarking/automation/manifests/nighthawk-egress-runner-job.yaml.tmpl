@@ -1,0 +1,268 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Per-test Job manifest for `type: nighthawk-egress` tests. Rendered by
+# orchestrator.py (placeholders substituted before kubectl apply);
+# mirrors nighthawk-ingress-runner-job.yaml.tmpl structure, RBAC, and volumes.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: benchmarking
+  labels:
+    # ate-system admits API clients only from namespaces with this label.
+    ate.dev/api-access: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: benchmark-runner
+  namespace: benchmarking
+---
+# RBAC for runner.py --sample-resources on egress benchmark clusters.
+# nodes/proxy get reaches kubelet /metrics/cadvisor.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: benchmark-runner-resource-sampler
+rules:
+- apiGroups: [""]
+  resources: ["nodes/proxy"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: benchmark-runner-resource-sampler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: benchmark-runner-resource-sampler
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: ate-system
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: ate-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: benchmark-runner-resource-sampler
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: benchmarking
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: benchmarking
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: benchmark-runner-resource-sampler
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: benchmark-workloads
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: benchmark-workloads
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: benchmark-runner-resource-sampler
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: nighthawk
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-runner-resource-sampler
+  namespace: nighthawk
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: benchmark-runner-resource-sampler
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: benchmarking
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: substrate-benchmark-runner
+        test-name: ${NAME}
+        tag: ${TAG}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: benchmark-runner
+      # Lets the runner land on a node pool reserved for load generators
+      # with the taint ate.dev/benchmarking=true:NoSchedule.
+      tolerations:
+      - key: ate.dev/benchmarking
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      containers:
+      - name: runner
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - "python3"
+        - "/app/runner.py"
+        args:
+        - "--mode"
+        - "${MODE}"
+        - "--conn-mode"
+        - "${CONN_MODE}"
+        - "--name"
+        - "${NAME}"
+        - "--tag"
+        - "${TAG}"
+        - "--dest"
+        - "${DEST}"
+        - "--envoy-cpu"
+        - "${ENVOY_CPU}"
+        - "--ext-proc-cpu"
+        - "${EXT_PROC_CPU}"
+        - "--actors"
+        - "${ACTORS}"
+        - "--atespace"
+        - "${ATESPACE}"
+        - "--client-concurrency"
+        - "${CLIENT_CONCURRENCY}"
+        - "--connections"
+        - "${CONNECTIONS}"
+        - "--max-pending-requests"
+        - "${MAX_PENDING}"
+        - "--initial-total-rps"
+        - "${INITIAL_TOTAL_RPS}"
+        - "--exponential-factor"
+        - "${EXP_FACTOR}"
+        - "--measuring-period-s"
+        - "${MEASURING_PERIOD_S}"
+        - "--testing-stage-duration-s"
+        - "${TESTING_STAGE_DURATION_S}"
+        - "--convergence-deadline-s"
+        - "${CONVERGENCE_DEADLINE_S}"
+        - "--success-rate-threshold"
+        - "${SUCCESS_RATE}"
+        - "--send-rate-threshold"
+        - "${SEND_RATE}"
+        - "--tail-latency-slo-ms"
+        - "${TAIL_LATENCY_SLO_MS}"
+        - "--out-dir"
+        - "${OUT_DIR}"
+        env:
+        - name: ATE_ATEAPI_CLIENT_AUTH
+          value: "${ATE_ATEAPI_CLIENT_AUTH}"
+        volumeMounts:
+        - name: servicedns-ca
+          mountPath: /run/servicedns-ca
+          readOnly: true
+        - name: ateapi-token
+          mountPath: /run/ateapi-token
+          readOnly: true
+        - name: podidentity
+          mountPath: /run/podidentity.podcert.ate.dev
+          readOnly: true
+        # Coordinator + 2s cAdvisor/Prometheus sampler; nighthawk_client runs inside actors.
+        resources:
+          requests:
+            cpu: "${RUNNER_CPU}"
+            memory: "1Gi"
+      volumes:
+      - name: servicedns-ca
+        projected:
+          sources:
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: ca.crt
+      - name: ateapi-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: api.ate-system.svc
+              expirationSeconds: 3600
+              path: token
+      - name: podidentity
+        projected:
+          sources:
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem

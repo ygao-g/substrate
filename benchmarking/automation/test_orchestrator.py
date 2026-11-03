@@ -16,6 +16,7 @@
 
 import json
 import os
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -180,6 +181,66 @@ class DeployWorkloadsTest(unittest.TestCase):
             ]
         )
 
+    @mock.patch("orchestrator.run")
+    def test_worker_cpu_arg_passed_to_deploy_sh(self, run):
+        orchestrator.deploy_workloads(worker_cpu=6)
+        cmd = run.call_args.args[0]
+        i = cmd.index("--worker-cpu")
+        self.assertEqual(cmd[i + 1], "6")
+
+    @mock.patch("orchestrator.run")
+    def test_worker_cpu_empty_not_passed(self, run):
+        orchestrator.deploy_workloads()
+        cmd = run.call_args.args[0]
+        self.assertNotIn("--worker-cpu", cmd)
+
+    def test_default_workload_templates_exist_on_disk(self):
+        root = Path(__file__).resolve().parents[2]
+        manifest_dir = root / "benchmarking" / "workloads" / "manifests"
+        all_templates = ["sleep", "glutton", "glutton-durdir-data", "glutton-durdir-full"]
+        from testtypes import nighthawk_egress
+        all_templates.extend(nighthawk_egress.workload_templates({"nighthawk-egress": {}}))
+
+        for name in all_templates:
+            with self.subTest(template=name):
+                tmpl_file = manifest_dir / f"{name}-template.yaml.tmpl"
+                self.assertTrue(tmpl_file.is_file(), f"Template manifest missing: {tmpl_file}")
+
+    @mock.patch("orchestrator.run")
+    def test_templates_none_leaves_env_untouched(self, run):
+        orchestrator.deploy_workloads()
+        self.assertNotIn("env", run.call_args.kwargs)
+
+    @mock.patch("orchestrator.run")
+    def test_templates_sets_workload_templates_env(self, run):
+        orchestrator.deploy_workloads(templates=["traffic-driver"])
+        env = run.call_args.kwargs["env"]
+        self.assertIn("WORKLOAD_TEMPLATES", env)
+        self.assertEqual(env["WORKLOAD_TEMPLATES"], "traffic-driver")
+
+    @mock.patch("orchestrator.run_no_check")
+    def test_teardown_workloads_passes_templates_env(self, run_no_check):
+        orchestrator.teardown_workloads(templates=["traffic-driver"])
+        env = run_no_check.call_args.kwargs["env"]
+        self.assertIn("WORKLOAD_TEMPLATES", env)
+        self.assertEqual(env["WORKLOAD_TEMPLATES"], "traffic-driver")
+
+
+class TypeHooksTest(unittest.TestCase):
+    def test_type_templates(self):
+        self.assertEqual(orchestrator.type_templates({"type": "nighthawk-egress"}), ["traffic-driver"])
+        self.assertIsNone(orchestrator.type_templates({"type": "nighthawk-ingress"}))
+        self.assertIsNone(orchestrator.type_templates({"type": "locust"}))
+
+    @mock.patch("testtypes.nighthawk_egress.post_test")
+    def test_type_post_test_called_when_present(self, mock_post):
+        test = {"type": "nighthawk-egress"}
+        orchestrator.type_post_test(test)
+        mock_post.assert_called_once_with(test)
+
+    def test_type_post_test_noop_when_absent(self):
+        orchestrator.type_post_test({"type": "locust"})
+
 
 class RunnerSizingTest(unittest.TestCase):
     TMPL = os.path.join(os.path.dirname(__file__), "manifests", "runner-job.yaml.tmpl")
@@ -228,7 +289,7 @@ class RunnerNamespaceTest(unittest.TestCase):
 
     def test_namespace_has_api_access_label(self):
         want = self.api_client_labels()
-        for name in ("runner-job.yaml.tmpl", "nighthawk-ingress-runner-job.yaml.tmpl"):
+        for name in ("runner-job.yaml.tmpl", "nighthawk-ingress-runner-job.yaml.tmpl", "nighthawk-egress-runner-job.yaml.tmpl"):
             with self.subTest(template=name):
                 text = open(os.path.join(self.HERE, "manifests", name)).read()
                 ns = next(
@@ -317,6 +378,7 @@ class RunMetadataTest(unittest.TestCase):
 
     def test_other_types_do_not(self):
         self.assertEqual(self.submitted_args("nighthawk-ingress"), ["--x"])
+        self.assertEqual(self.submitted_args("nighthawk-egress"), ["--x"])
 
     def test_test_metadata_is_merged_not_overridden(self):
         for own in (["--metadata", '{"cluster_name": "mine", "suite": "s"}'],
@@ -345,6 +407,22 @@ class RunMetadataTest(unittest.TestCase):
                 "flags": ["--metadata", "{bad"]}
         with self.assertRaisesRegex(ValueError, "not valid JSON"):
             orchestrator.validate_and_normalize_tests([test])
+
+    def test_validate_worker_cpu(self):
+        valid = {
+            "name": "n",
+            "type": "locust",
+            "targetCluster": "t",
+            "file": "f",
+            "duration": "1m",
+            "users": 1,
+            "workerCPU": "6",
+        }
+        orchestrator.validate_and_normalize_tests([valid])
+
+        for bad in ("", "   ", None, []):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "workerCPU"):
+                orchestrator.validate_and_normalize_tests([{**valid, "workerCPU": bad}])
 
     def test_metadata_survives_yaml(self):
         md = json.dumps({"cluster_name": "c: d", "q": "\"'"})

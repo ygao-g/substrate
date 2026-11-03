@@ -406,6 +406,12 @@ def validate_and_normalize_tests(tests: list[dict[str, Any]]) -> None:
         if ttype == "locust":
             # A malformed --metadata fails here rather than mid-sweep.
             split_metadata_flag(t)
+        if "workerCPU" in t:
+            worker_cpu = t["workerCPU"]
+            if not isinstance(worker_cpu, (int, str)) or (isinstance(worker_cpu, str) and not worker_cpu.strip()):
+                raise ValueError(
+                    f"test {name!r} has invalid workerCPU {worker_cpu!r}"
+                )
         isolate_block(t)
 
 
@@ -445,6 +451,17 @@ def teardown_substrate() -> None:
     run_no_check(["go", "run", "./cmd/ate-setup", "delete", "ate-system"])
 
 
+
+
+def workload_env(templates: Iterable[str] | None = None) -> dict[str, Any]:
+    """Keyword arguments for the workloads/deploy.sh run: with templates,
+    an environment whose WORKLOAD_TEMPLATES names the actor templates to
+    create or delete. None leaves the process environment untouched."""
+    if templates is None:
+        return {}
+    return {"env": {**os.environ, "WORKLOAD_TEMPLATES": " ".join(templates)}}
+
+
 def deploy_workloads(
     worker_count: int = 1,
     sandbox_class: str = "gvisor",
@@ -453,6 +470,8 @@ def deploy_workloads(
     worker_memory: str = "",
     fake_atelet_args: Iterable[str] = (),
     actor_cpu: str = "",
+    templates: Iterable[str] | None = None,
+    worker_cpu: int | str = "",
 ) -> None:
     cmd = [
         "benchmarking/workloads/deploy.sh",
@@ -476,6 +495,10 @@ def deploy_workloads(
     # control how many workers the scheduler packs onto a node.
     if worker_memory:
         cmd += ["--worker-memory", worker_memory]
+    # Empty leaves the worker pods unsized; set workerCPU in tests.yaml to
+    # control worker pod CPU requests and limits.
+    if worker_cpu != "":
+        cmd += ["--worker-cpu", str(worker_cpu)]
     # Empty keeps deploy.sh's own default; large fleets set workerWaitTimeout
     # (whole seconds).
     if wait_timeout_secs != "":
@@ -483,11 +506,25 @@ def deploy_workloads(
     # An isolate block's tuning of fake-atelet, on the fake data plane.
     cmd += list(fake_atelet_args)
     # deploy.sh itself blocks until every template's golden snapshot exists.
-    run(cmd)
+    run(cmd, **workload_env(templates))
 
 
-def teardown_workloads() -> None:
-    run_no_check(["benchmarking/workloads/deploy.sh", "--delete"])
+def teardown_workloads(templates: Iterable[str] | None = None) -> None:
+    run_no_check(["benchmarking/workloads/deploy.sh", "--delete"], **workload_env(templates))
+
+
+def type_templates(test: dict[str, Any]) -> list[str] | None:
+    """The actor templates the test's type adds to the workloads deploy;
+    the hook is optional."""
+    hook = getattr(TYPES[test_type(test)], "workload_templates", None)
+    return list(hook(test)) if hook else None
+
+
+def type_post_test(test: dict[str, Any]) -> None:
+    """Undo what the type's pre_test did; the hook is optional."""
+    hook = getattr(TYPES[test_type(test)], "post_test", None)
+    if hook:
+        hook(test)
 
 
 def run_test(
@@ -644,7 +681,8 @@ def main() -> None:
             # state behind) would otherwise leak its substrate + workloads
             # into this run. All teardowns use --ignore-not-found, so
             # this is cheap on a clean cluster.
-            teardown_workloads()
+            templates = type_templates(test)
+            teardown_workloads(templates)
             teardown_substrate()
 
             sandbox_class = test.get("sandboxClass", "gvisor")
@@ -662,6 +700,8 @@ def main() -> None:
                     test.get("workerMemory", ""),
                     isolate_workload_args(test),
                     test.get("actorCPU", ""),
+                    templates,
+                    worker_cpu=test.get("workerCPU", ""),
                 )
                 try:
                     status = run_test(
@@ -682,7 +722,11 @@ def main() -> None:
             finally:
                 # Always tear down, even if deploy or run failed, so the
                 # next test (and the next CronJob fire) starts clean.
-                teardown_workloads()
+                try:
+                    type_post_test(test)
+                except Exception as e:
+                    print(f"Test {test['name']} post_test failed: {e}", flush=True)
+                teardown_workloads(templates)
                 teardown_substrate()
             duration = time.time() - start_time
             results.append((test["name"], status, duration, failure_msg))
