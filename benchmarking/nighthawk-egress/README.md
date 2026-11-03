@@ -88,6 +88,57 @@ flowchart LR
     summary --> status
 ```
 
+## Saturation Attribution and Telemetry
+
+The telemetry subsystem captures infrastructure resource consumption and
+gateway counters across test stages to attribute performance bottlenecks:
+
+```mermaid
+flowchart TD
+    subgraph cadvisor["Periodic Resource Sampling (2s interval)"]
+        kube["kubeapi.py queries API server node proxy /metrics/cadvisor"]
+        rc["resources_common.py Prometheus text parser"]
+        sampler["resource_sampler.py stage utilization aggregator"]
+        raw["resources-raw.jsonl"]
+        by_stage["resources-by-stage.json"]
+        kube --> rc --> sampler
+        sampler --> raw
+        sampler --> by_stage
+    end
+
+    subgraph boundary["Stage Boundary Scraping"]
+        estats["envoy_stats.py Envoy :15090 & ext-proc :9090"]
+        envoy_json["envoy-stats.json"]
+        estats --> envoy_json
+    end
+
+    subgraph verdict["Verdict Generation (output.py)"]
+        output["output.py gateway_saturated & bottleneck_component"]
+        by_stage --> output
+        envoy_json --> output
+    end
+```
+
+### Telemetry Pipeline Details
+
+- **cAdvisor Polling**: `resource_sampler.py` polls `/api/v1/nodes/<node>/proxy/metrics/cadvisor`
+  in Prometheus text format via the Kubernetes API server every 2 seconds,
+  collecting CPU rate and memory working set for `egress` (`envoy`, `ext-proc`, `sdsmint`),
+  `atelet` (`atelet`, `objectstore-plugin`), `runner`, `workers`, and `server`.
+- **Gateway Stage Boundaries**: `envoy_stats.py` scrapes Envoy
+  `:15090/stats/prometheus` and `ext-proc` `:9090/metrics` before and after each
+  stage, computing counter deltas for:
+  - `http.<prefix>.downstream_rq_2xx`: 2xx responses on ingress and MITM HTTP listeners.
+  - `listener.<addr>.ssl_handshake`: TLS handshakes completed per listener address.
+  - `cluster.<name>.upstream_rq_total`: Total requests proxied per upstream cluster.
+  - `cluster.<name>.upstream_cx_overflow`: Connection pool overflow drops.
+  - `server.memory_allocated`: Envoy heap memory allocation gauge.
+  - `ext_proc.process_cpu_seconds_total`: CPU consumption of the ext-proc container.
+  - `ext_proc.process_resident_memory_bytes`: Resident set size of the ext-proc container.
+- **Saturation Diagnosis**: `output.py` marks `gateway_saturated: true` when
+  `max(envoy_cpu_util, ext_proc_cpu_util) >= 0.80` while
+  `max(worker_max_cpu_util, origin_max_cpu_util) < 0.80`.
+
 ## Key Design Decisions
 
 ### 1. Right-Sized Connection Pools
@@ -121,8 +172,11 @@ artifacts:
 
 | File | Contents |
 |---|---|
-| `capacity.json` | Final verdict, `slo_max_rps`, `slo_max_stage`, testing stage metrics, and latency percentiles. |
+| `capacity.json` | Final verdict, `slo_max_rps`, `gateway_saturated`, `bottleneck_component`, testing stage metrics, and latency percentiles. |
 | `stats.jsonl` | One JSON record per stage containing achieved RPS, send rate, success rate, error counts, pooled latency, and failed thresholds. |
+| `resources-by-stage.json` | Mean, peak, and p95 CPU and memory utilization aggregated by stage for Envoy, ext-proc, workers, and test server. |
+| `resources-raw.jsonl` | Raw 2-second periodic cAdvisor samples collected during the run. |
+| `envoy-stats.json` | Prometheus counter deltas scraped from Envoy :15090 and ext-proc :9090 at stage boundaries. |
 | `results.json` | Complete array of stage dictionaries including raw per-actor counters and percentiles. |
 | `status.json` | High-level execution status, error messages, and stage count. |
 
