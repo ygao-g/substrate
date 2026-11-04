@@ -526,10 +526,46 @@ def run_test(
     result = wait_for_job(job, timeout)
     print(f"Job {job} result: {result}", flush=True)
     run_no_check(
-        ["kubectl", "logs", f"job/{job}", "-n", NAMESPACE, "--tail=500"]
+        [
+            "kubectl",
+            "logs",
+            f"job/{job}",
+            "-n",
+            NAMESPACE,
+            "--all-containers=true",
+            "--prefix=true",
+            "--tail=500",
+        ]
     )
     run_no_check(["kubectl", "delete", "job", job, "-n", NAMESPACE])
     return result
+
+
+def prepare_cluster(test: dict[str, Any]) -> None:
+    """Set the cluster up for one test: Substrate and the benchmark workloads
+    around the type's pre_test, or pre_test alone for a type that needs no
+    Substrate."""
+    mod = TYPES[test_type(test)]
+    if mod.NEEDS_SUBSTRATE:
+        deploy_substrate(substrate_args(test))
+    mod.pre_test(test)
+    if mod.NEEDS_SUBSTRATE:
+        deploy_workloads(
+            test.get("workerCount", 1),
+            test.get("sandboxClass", "gvisor"),
+            test.get("actorMemory", ""),
+            test.get("workerWaitTimeout", ""),
+            test.get("workerMemory", ""),
+            isolate_workload_args(test),
+            test.get("actorCPU", ""),
+        )
+
+
+def teardown_cluster(test: dict[str, Any]) -> None:
+    """Undo prepare_cluster, whether or not it got all the way."""
+    if TYPES[test_type(test)].NEEDS_SUBSTRATE:
+        teardown_workloads()
+        teardown_substrate()
 
 
 def write_junit_xml(
@@ -647,22 +683,11 @@ def main() -> None:
             teardown_workloads()
             teardown_substrate()
 
-            sandbox_class = test.get("sandboxClass", "gvisor")
             status = "error"
             failure_msg = None
             start_time = time.time()
             try:
-                deploy_substrate(substrate_args(test))
-                TYPES[ttype].pre_test(test)
-                deploy_workloads(
-                    test.get("workerCount", 1),
-                    sandbox_class,
-                    test.get("actorMemory", ""),
-                    test.get("workerWaitTimeout", ""),
-                    test.get("workerMemory", ""),
-                    isolate_workload_args(test),
-                    test.get("actorCPU", ""),
-                )
+                prepare_cluster(test)
                 try:
                     status = run_test(
                         test,
@@ -682,8 +707,7 @@ def main() -> None:
             finally:
                 # Always tear down, even if deploy or run failed, so the
                 # next test (and the next CronJob fire) starts clean.
-                teardown_workloads()
-                teardown_substrate()
+                teardown_cluster(test)
             duration = time.time() - start_time
             results.append((test["name"], status, duration, failure_msg))
         finally:
