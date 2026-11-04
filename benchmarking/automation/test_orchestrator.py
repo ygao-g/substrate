@@ -355,5 +355,66 @@ class RunMetadataTest(unittest.TestCase):
         self.assertEqual(job["spec"]["template"]["spec"]["containers"][0]["args"][-1], md)
 
 
+class ClusterPrepTest(unittest.TestCase):
+    def test_type_without_substrate_runs_only_pre_test(self):
+        events = []
+        fake = mock.Mock(
+            NEEDS_SUBSTRATE=False,
+            pre_test=mock.Mock(side_effect=lambda t: events.append("pre_test")),
+        )
+        test = {"name": "n", "type": "fake"}
+        with mock.patch.dict(orchestrator.TYPES, {"fake": fake}), \
+             mock.patch.object(orchestrator, "deploy_substrate", side_effect=lambda *a: events.append("deploy_substrate")), \
+             mock.patch.object(orchestrator, "deploy_workloads", side_effect=lambda *a: events.append("deploy_workloads")), \
+             mock.patch.object(orchestrator, "teardown_workloads", side_effect=lambda: events.append("teardown_workloads")), \
+             mock.patch.object(orchestrator, "teardown_substrate", side_effect=lambda: events.append("teardown_substrate")):
+            orchestrator.prepare_cluster(test)
+            orchestrator.teardown_cluster(test)
+        self.assertEqual(events, ["pre_test"])
+
+    def test_type_with_substrate_runs_deploy_and_teardown_in_order(self):
+        events = []
+        fake = mock.Mock(
+            NEEDS_SUBSTRATE=True,
+            pre_test=mock.Mock(side_effect=lambda t: events.append("pre_test")),
+        )
+        test = {"name": "n", "type": "fake"}
+        with mock.patch.dict(orchestrator.TYPES, {"fake": fake}), \
+             mock.patch.object(orchestrator, "deploy_substrate", side_effect=lambda *a: events.append("deploy_substrate")), \
+             mock.patch.object(orchestrator, "deploy_workloads", side_effect=lambda *a: events.append("deploy_workloads")), \
+             mock.patch.object(orchestrator, "teardown_workloads", side_effect=lambda: events.append("teardown_workloads")), \
+             mock.patch.object(orchestrator, "teardown_substrate", side_effect=lambda: events.append("teardown_substrate")):
+            orchestrator.prepare_cluster(test)
+            orchestrator.teardown_cluster(test)
+        self.assertEqual(
+            events,
+            [
+                "deploy_substrate",
+                "pre_test",
+                "deploy_workloads",
+                "teardown_workloads",
+                "teardown_substrate",
+            ],
+        )
+
+    def test_run_test_tails_all_containers_with_prefix(self):
+        fake = mock.Mock(
+            job_tmpl=mock.Mock(return_value="t"),
+            job_subs=mock.Mock(return_value={}),
+        )
+        test = {"name": "n", "type": "fake", "duration": "1m"}
+        with mock.patch.dict(orchestrator.TYPES, {"fake": fake}), \
+             mock.patch.object(orchestrator, "render_template", return_value="yaml"), \
+             mock.patch.object(orchestrator, "wait_for_no_active_runners"), \
+             mock.patch.object(orchestrator.subprocess, "run"), \
+             mock.patch.object(orchestrator, "wait_for_job", return_value="complete"), \
+             mock.patch.object(orchestrator, "run_no_check") as run_no_check:
+            orchestrator.run_test(test, "img", "dest", "abcdef0123")
+        logs_cmd = run_no_check.call_args_list[0].args[0]
+        self.assertEqual(logs_cmd[:2], ["kubectl", "logs"])
+        self.assertIn("--all-containers=true", logs_cmd)
+        self.assertIn("--prefix=true", logs_cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

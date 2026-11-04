@@ -13,7 +13,9 @@
 # limitations under the License.
 
 # The orchestrator deploys + tears down substrate + workloads around each
-# test so runs don't pollute each other.
+# test so runs don't pollute each other; types with NEEDS_SUBSTRATE = False
+# skip the deploy and post-test teardown while the pre-test cleanup sweep
+# still runs.
 #
 # Fields shared by every entry:
 #

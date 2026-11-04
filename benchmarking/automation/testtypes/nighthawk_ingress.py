@@ -28,6 +28,7 @@ from typing import Any
 from util import build_and_push, parse_duration_seconds, run
 
 TEST_TYPE = "nighthawk-ingress"
+NEEDS_SUBSTRATE = True
 
 # Defaults for the tests.yaml `nighthawk-ingress:` block; envoyCpu has no default —
 # it is the benchmark's independent variable. Documented in
