@@ -30,6 +30,7 @@ source hack/util/venv.sh
 # requirements.txt gets pytest alone.
 SUITES=(
   "benchmarking/analysis ."
+  "benchmarking/atunnel ."
   "benchmarking/automation ."
   "benchmarking/locust unit_tests"
   "benchmarking/nighthawk-ingress tests"

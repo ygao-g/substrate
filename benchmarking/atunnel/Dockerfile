@@ -15,6 +15,7 @@
 # Build context is the repository root:
 #
 #   docker build --target bench -f benchmarking/atunnel/Dockerfile .
+#   docker build -f benchmarking/atunnel/Dockerfile .
 FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS build
 ARG TARGETARCH
 WORKDIR /src
@@ -33,3 +34,16 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS bench
 COPY --from=build /out/atunnel-bench /usr/local/bin/atunnel-bench
+
+FROM python:3.11-slim@sha256:db20d8506e2f15b6db39b40b6015ca46bae855dec6dd326d462cfe79ae972893 AS pydeps
+WORKDIR /app
+COPY benchmarking/atunnel/requirements.txt .
+RUN pip install --no-cache-dir --target=/app/deps -r requirements.txt
+
+FROM gcr.io/distroless/python3-debian12:nonroot@sha256:7d1042ce588ab97019fe95c24ffca7bc5a82ccdac572511d5e09bda4435c89c5 AS runner
+WORKDIR /app
+COPY --from=build /out/atunnel-bench /usr/local/bin/atunnel-bench
+COPY --from=pydeps /app/deps /app/deps
+COPY benchmarking/atunnel/output.py benchmarking/atunnel/runner.py /app/
+ENV PYTHONPATH=/app:/app/deps
+ENV PYTHONUNBUFFERED=1
