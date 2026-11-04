@@ -32,13 +32,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"go.ate.dev/substrate/benchmarking/atunnel/internal/fakeatelet"
 	"go.ate.dev/substrate/benchmarking/atunnel/internal/workerhost"
+	"go.ate.dev/substrate/internal/ateworker/cgroup"
 	"go.ate.dev/substrate/internal/nodepath"
 )
-
-const cgroupRoot = "/sys/fs/cgroup"
 
 // workerCommand plays the rest of a worker pod around atunnel, in a
 // privileged container: it serves the fake atelet on the node-local socket,
@@ -87,7 +87,13 @@ func (s *supervisor) run(ctx context.Context, pkiDir string) error {
 			slog.Error("fake atelet stopped", slog.Any("err", err))
 		}
 	}()
-	if err := delegateCgroups(); err != nil {
+	// Unprivileged pods mount /proc/sys and /sys/fs/cgroup read-only, and
+	// the sandbox helpers write /proc/sys from separate processes. In a
+	// privileged container /proc/sys is not a separate mount point (EINVAL).
+	if err := unix.Mount("none", "/proc/sys", "", unix.MS_BIND|unix.MS_REMOUNT, ""); err != nil && !errors.Is(err, unix.EINVAL) {
+		return fmt.Errorf("remounting /proc/sys read-write: %w", err)
+	}
+	if err := cgroup.Delegate(ctx); err != nil {
 		return fmt.Errorf("setting up cgroups: %w", err)
 	}
 	for incarnation := 1; ctx.Err() == nil; incarnation++ {
@@ -111,7 +117,7 @@ type supervisor struct {
 // runOnce runs one atunnel, with its sandbox processes, until it exits. It
 // returns nil when atunnel died and should be replaced.
 func (s *supervisor) runOnce(ctx context.Context, incarnation int) error {
-	dir := filepath.Join(cgroupRoot, "tunnel-"+strconv.Itoa(incarnation))
+	dir := filepath.Join(cgroup.Root, "tunnel-"+strconv.Itoa(incarnation))
 	fd, err := s.createCgroup(dir)
 	if err != nil {
 		return err
@@ -254,24 +260,6 @@ func (s *supervisor) logDeath(dir string, exitErr error) {
 	}
 	defer f.Close()
 	_, _ = f.WriteString(line)
-}
-
-// delegateCgroups moves every process out of the container's root cgroup, so
-// its controllers can be handed to child cgroups (cgroup v2 allows processes
-// only in leaves), and enables the CPU and memory controllers for them.
-func delegateCgroups() error {
-	leaf := filepath.Join(cgroupRoot, "supervisor")
-	if err := os.MkdirAll(leaf, 0o755); err != nil {
-		return err
-	}
-	procs, err := os.ReadFile(filepath.Join(cgroupRoot, "cgroup.procs"))
-	if err != nil {
-		return err
-	}
-	for _, pid := range strings.Fields(string(procs)) {
-		_ = os.WriteFile(filepath.Join(leaf, "cgroup.procs"), []byte(pid), 0o644)
-	}
-	return os.WriteFile(filepath.Join(cgroupRoot, "cgroup.subtree_control"), []byte("+cpu +memory"), 0o644)
 }
 
 // createCgroup makes a cgroup with atunnel's limits and returns a descriptor to

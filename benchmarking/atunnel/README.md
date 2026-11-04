@@ -19,7 +19,8 @@ table per scenario.
 
 Linux containers only: atunnel creates real network namespaces and nftables
 rules, so its container is privileged. On macOS, Docker Desktop provides the
-Linux.
+Linux. In a pod, the worker container runs unprivileged with the gVisor
+worker's capabilities and remounts `/sys/fs/cgroup` and `/proc/sys` read-write.
 
 ### Commands
 
