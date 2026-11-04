@@ -39,6 +39,38 @@ per rung), and `logs/`. Only `results.txt`, and a `report.md` if you write
 one, are kept in git. Open a profile with
 `go tool pprof -http=: runs/.../profiles/IngressH1-4000.cpu.pb.gz`.
 
+## Running on a cluster
+
+The benchmark pipeline in [`benchmarking/automation`](../automation/README.md)
+runs the bench as `type: atunnel`: one Job pod with `pki` first, the sink and
+the worker as sidecars, and `runner.py` driving `load` and uploading the
+results. The worker container is unprivileged, with the gVisor worker's
+security context, the pod is pinned to the `ate.dev/benchmarking` node pool,
+and the cluster needs no Substrate: the orchestrator skips the install and
+teardown and only sweeps leftovers before the test. `tests.yaml` carries one
+entry, `atunnel_1cpu_1g`. For a quick run from a working tree against the
+cluster in `.ate-dev-env.sh`:
+
+```sh
+benchmarking/atunnel/run-dev.sh --tunnel-cpus 1 --tunnel-memory 1g -- --scenarios IngressH1 --rungs 1000,2000
+```
+
+The run's files land under `<dest>/runs/<name>/run_date=…/run_ts=…/run_tag=…/`:
+`results.txt` and `results.json` as `run-docker.sh` writes them, plus
+`stats.jsonl` (a row per rung named `atunnel_<Scenario>_<offered>`, a summary
+row per scenario named `atunnel_<Scenario>`, and the sink's counters as
+`atunnel_<Scenario>_sink_counters`), `status.json` with the verdict histogram,
+atunnel's deaths and OOM kills, `tunnel-deaths.log`, `worker.log`, `sink.log`,
+and the profiles. Verdicts, deaths and OOM kills are data: the Job fails only
+on a harness fault, when `load` fails, leaves no usable `results.json`, or the
+upload fails.
+
+Cluster numbers are a baseline of their own, not a continuation of `runs/`.
+In the pod every connection crosses loopback, with no veth, bridge or MTU in
+between, no CPU is pinned, and `--network-delay` and the per-container TCP
+buffer sysctls of `run-docker.sh` do not apply. Every row and `status.json`
+carries `rig: "pod"` to tell the two apart.
+
 ## How it works
 
 The benchmark is one program, `atunnel-bench`, with a subcommand per process.
