@@ -745,6 +745,16 @@ the router. In `tests.yaml`, an `isolate` block selects the mode, and its
 keys become `deploy.sh --fake-atelet-env` entries: `delay` sets
 `FAKE_ATELET_DELAY`, and so on.
 
+### atunnel Benchmark
+
+The self-contained `atunnel` component benchmark measures the per-worker
+ingress and egress tunnel's CPU, memory, and socket-buffer footprint across
+HTTP, CONNECT, and egress scenarios without deploying `ate-system` or
+workloads. Run it locally in Docker with `benchmarking/atunnel/run-docker.sh`,
+against a cluster from the working tree with `benchmarking/atunnel/run-dev.sh`,
+or via `type: atunnel` in `benchmarking/automation/tests.yaml`. See
+[benchmarking/atunnel/README.md](../../benchmarking/atunnel/README.md).
+
 ### Viewing Traces
 You must have enabled otel tracing for your cluster to view traces.
 

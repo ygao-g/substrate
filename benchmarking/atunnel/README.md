@@ -89,6 +89,29 @@ per rung), and `logs/`. Only `results.txt`, and a `report.md` if you write
 one, are kept in git. Open a profile with
 `go tool pprof -http=: runs/.../profiles/IngressH1-4000.cpu.pb.gz`.
 
+### Running on a cluster
+
+`run-dev.sh` builds the `runner` image from the working tree, submits the
+benchmark Job (`pki` init container, `sink` and `worker` sidecars, and `runner`)
+to the cluster in `.ate-dev-env.sh`, streams `runner` logs, and prints
+`results.txt` and `status.json` from GCS. No `ate-system` or workload
+deployment is needed:
+
+```sh
+# Default sweep at 1 CPU and 1 GiB:
+benchmarking/atunnel/run-dev.sh
+
+# Custom sizing and load flags:
+benchmarking/atunnel/run-dev.sh --tunnel-cpus 2 --tunnel-memory 2g -- \
+  --scenarios IngressH1 --rungs 2000,4000,8000
+```
+
+In a pod (`rig: "pod"` in `status.json` and `stats.jsonl`), the generator,
+worker, and sink share the pod's loopback network rather than a Docker bridge
+and the containers are scheduled by the kubelet without `--cpuset-cpus`
+pinning, so cluster runs form a separate baseline from the CPU-pinned
+`run-docker.sh` runs under `runs/`.
+
 ## How it works
 
 The benchmark is one program, `atunnel-bench`, with a subcommand per process.
