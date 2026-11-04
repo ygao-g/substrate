@@ -40,6 +40,7 @@ Adding a test type = one new module here + one entry in TYPES.
 
 from typing import Any, Protocol
 
+from testtypes import atunnel
 from testtypes import locust
 from testtypes import nighthawk_ingress
 
@@ -56,6 +57,7 @@ class TestType(Protocol):
 
 
 TYPES: dict[str, TestType] = {
+    atunnel.TEST_TYPE: atunnel,
     locust.TEST_TYPE: locust,
     nighthawk_ingress.TEST_TYPE: nighthawk_ingress,
 }

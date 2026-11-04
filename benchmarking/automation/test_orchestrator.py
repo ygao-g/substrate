@@ -228,7 +228,11 @@ class RunnerNamespaceTest(unittest.TestCase):
 
     def test_namespace_has_api_access_label(self):
         want = self.api_client_labels()
-        for name in ("runner-job.yaml.tmpl", "nighthawk-ingress-runner-job.yaml.tmpl"):
+        for name in (
+            "runner-job.yaml.tmpl",
+            "nighthawk-ingress-runner-job.yaml.tmpl",
+            "atunnel-runner-job.yaml.tmpl",
+        ):
             with self.subTest(template=name):
                 text = open(os.path.join(self.HERE, "manifests", name)).read()
                 ns = next(
@@ -316,7 +320,9 @@ class RunMetadataTest(unittest.TestCase):
         self.assertEqual(json.loads(args[2])["cluster_name"], "c")
 
     def test_other_types_do_not(self):
-        self.assertEqual(self.submitted_args("nighthawk-ingress"), ["--x"])
+        for ttype in ("nighthawk-ingress", "atunnel"):
+            with self.subTest(type=ttype):
+                self.assertEqual(self.submitted_args(ttype), ["--x"])
 
     def test_test_metadata_is_merged_not_overridden(self):
         for own in (["--metadata", '{"cluster_name": "mine", "suite": "s"}'],

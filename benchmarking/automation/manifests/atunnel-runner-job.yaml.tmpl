@@ -1,0 +1,247 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Per-test Job manifest for `type: atunnel` tests. Rendered by
+# orchestrator.py (${...} placeholders substituted before kubectl apply).
+# Runs pki, sink and worker sidecars, and the rig runner in a single pod with
+# no ate-system dependencies.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: benchmarking
+  labels:
+    # ate-system admits API clients only from namespaces with this label.
+    ate.dev/api-access: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: benchmark-runner
+  namespace: benchmarking
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: benchmark-runner-pod-logs
+  namespace: benchmarking
+rules:
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: benchmark-runner-pod-logs
+  namespace: benchmarking
+subjects:
+- kind: ServiceAccount
+  name: benchmark-runner
+  namespace: benchmarking
+roleRef:
+  kind: Role
+  name: benchmark-runner-pod-logs
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "${JOB_NAME}"
+  namespace: benchmarking
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  activeDeadlineSeconds: ${ACTIVE_DEADLINE}
+  template:
+    metadata:
+      labels:
+        app: substrate-benchmark-runner
+        test-name: "${NAME}"
+        tag: "${TAG}"
+      annotations:
+        kubectl.kubernetes.io/default-container: runner
+    spec:
+      restartPolicy: Never
+      serviceAccountName: benchmark-runner
+      tolerations:
+      - key: ate.dev/benchmarking
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      hostAliases:
+      - ip: "127.0.0.1"
+        hostnames:
+        - "atunnel-worker"
+        - "atunnel-sink"
+      securityContext:
+        sysctls:
+        - name: net.ipv4.ip_unprivileged_port_start
+          value: "0"
+        - name: net.ipv4.ip_local_port_range
+          value: "1024 65535"
+        - name: net.ipv4.ip_local_reserved_ports
+          value: "8443,9090,9091,9443,15001"
+      initContainers:
+      - name: pki
+        image: "${IMAGE}"
+        imagePullPolicy: IfNotPresent
+        command:
+        - "atunnel-bench"
+        - "pki"
+        - "--dir"
+        - "/pki"
+        securityContext:
+          runAsUser: 65532
+        volumeMounts:
+        - name: pki
+          mountPath: /pki
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "64Mi"
+      - name: sink
+        image: "${IMAGE}"
+        imagePullPolicy: IfNotPresent
+        restartPolicy: Always
+        command:
+        - "atunnel-bench"
+        - "sink"
+        - "--pki-dir"
+        - "/pki"
+        - "--body-bytes"
+        - "${BODY_BYTES}"
+        securityContext:
+          runAsUser: 65532
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 9091
+          periodSeconds: 2
+          failureThreshold: 30
+        volumeMounts:
+        - name: pki
+          mountPath: /pki
+          readOnly: true
+        resources:
+          requests:
+            cpu: "${RIG_CPU}"
+            memory: "2Gi"
+      - name: worker
+        image: "${IMAGE}"
+        imagePullPolicy: IfNotPresent
+        restartPolicy: Always
+        command:
+        - "atunnel-bench"
+        - "worker"
+        - "--pki-dir"
+        - "/pki"
+        - "--shared-dir"
+        - "/shared"
+        - "--tunnel-cpus"
+        - "${TUNNEL_CPUS}"
+        - "--tunnel-memory"
+        - "${TUNNEL_MEMORY}"
+        - "--body-bytes"
+        - "${BODY_BYTES}"
+        - "--"
+        - "--actors"
+        - "${ACTORS}"
+        - "--dns-egress-policy"
+        - "enforce-in-atunnel"
+        - "--atunnel-credential-bundle"
+        - "/pki/worker.pem"
+        - "--atunnel-trust-bundle"
+        - "/pki/ca.pem"
+        - "--atunnel-egress-trust-bundle"
+        - "/pki/ca.pem"
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          privileged: false
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - NET_ADMIN
+            - SYS_ADMIN
+            - SETUID
+            - SETGID
+            - DAC_OVERRIDE
+            - FOWNER
+            - CHOWN
+            - NET_RAW
+            - SETFCAP
+          appArmorProfile:
+            type: Unconfined
+          seccompProfile:
+            type: Unconfined
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 9090
+          periodSeconds: 2
+          failureThreshold: 60
+        volumeMounts:
+        - name: pki
+          mountPath: /pki
+          readOnly: true
+        - name: shared
+          mountPath: /shared
+        # Requests only (no limits): the worker sets atunnel's own cpu.max
+        # and memory.max inside /sys/fs/cgroup, and a container limit would
+        # throttle the actors together with the tunnel.
+        resources:
+          requests:
+            cpu: "${WORKER_CPU}"
+            memory: "${WORKER_MEMORY}"
+      containers:
+      - name: runner
+        image: "${IMAGE}"
+        imagePullPolicy: IfNotPresent
+        command:
+        - "python3"
+        - "/app/runner.py"
+        args:
+        - "--name"
+        - "${NAME}"
+        - "--tag"
+        - "${TAG}"
+        - "--dest"
+        - "${DEST}"
+        - "--tunnel-cpus"
+        - "${TUNNEL_CPUS}"
+        - "--tunnel-memory"
+        - "${TUNNEL_MEMORY}"
+        - "--actors"
+        - "${ACTORS}"
+        securityContext:
+          runAsUser: 65532
+        volumeMounts:
+        - name: pki
+          mountPath: /pki
+          readOnly: true
+        - name: shared
+          mountPath: /shared
+          readOnly: true
+        resources:
+          requests:
+            cpu: "${RIG_CPU}"
+            memory: "2Gi"
+      volumes:
+      - name: pki
+        emptyDir: {}
+      - name: shared
+        emptyDir: {}

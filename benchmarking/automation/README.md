@@ -4,9 +4,12 @@ Scheduled, repeatable benchmark runs of a substrate branch. A CronJob on an
 **orchestration cluster** drives the full build/deploy/run/teardown cycle
 against a separate **test cluster**, once per entry in [tests.yaml](tests.yaml).
 Each run uploads results to GCS via `benchmarking/locust/runner.py`
-(`type: locust`) or `benchmarking/nighthawk-ingress/runner.py` (`type: nighthawk-ingress`,
-the router capacity benchmark — see
-[benchmarking/nighthawk-ingress/README.md](../nighthawk-ingress/README.md)).
+(`type: locust`), `benchmarking/nighthawk-ingress/runner.py`
+(`type: nighthawk-ingress`, the router capacity benchmark — see
+[benchmarking/nighthawk-ingress/README.md](../nighthawk-ingress/README.md)),
+or `benchmarking/atunnel/runner.py` (`type: atunnel`, the self-contained
+`atunnel` component benchmark — see
+[benchmarking/atunnel/README.md](../atunnel/README.md)).
 To run the cold resume tests from your workstation instead, see
 [ateapi-cold-resume.md](ateapi-cold-resume.md).
 
@@ -18,8 +21,9 @@ To run the cold resume tests from your workstation instead, see
    `gcloud container clusters get-credentials` for the test cluster.
 3. Shallow-clones `--repo` at `--branch`, captures the commit hash.
 4. `docker build && docker push` builds the runner image for each test type
-   in use, tagged with the commit hash: `${KO_DOCKER_REPO}/locust-test:<commit>`
-   and/or `${KO_DOCKER_REPO}/nighthawk-ingress-test:<commit>`.
+   in use, tagged with the commit hash: `${KO_DOCKER_REPO}/locust-test:<commit>`,
+   `${KO_DOCKER_REPO}/nighthawk-ingress-test:<commit>`, and/or
+   `${KO_DOCKER_REPO}/atunnel-bench-test:<commit>`.
 5. `go run ./cmd/ate-setup deploy ate-system` (with `ATE_CREDENTIAL_PROVIDER`
    in `.ate-dev-env.sh`, or `--credential-provider` in the test's
    `ateArgs`; passes `--sandbox-classes=<class>` so `deploy ate-system`
@@ -28,9 +32,11 @@ To run the cold resume tests from your workstation instead, see
    `SandboxConfig`) + `benchmarking/workloads/deploy.sh
    --deploy --sandbox-class <class>` (these build & push substrate / workload
    images via `ko` as part of their deploy steps — there's no separate
-   image build step). The install sets `ATE_API_AUTHZ_BOOTSTRAP_OWNERS` to
-   the `ate-client` and `benchmarking/benchmark-runner` ServiceAccounts so the
-   runner's calls pass [authorization](../../docs/guides/authorization.md), and sets
+   image build step). `atunnel` tests need no Substrate install and skip this
+   step (`NEEDS_SUBSTRATE = False`). The install sets
+   `ATE_API_AUTHZ_BOOTSTRAP_OWNERS` to the `ate-client` and
+   `benchmarking/benchmark-runner` ServiceAccounts so the runner's calls pass
+   [authorization](../../docs/guides/authorization.md), and sets
    `ATE_INGRESS_ALLOWED_SPIFFE_IDS` to `benchmarking/benchmark-runner` for the
    Envoy ingress router.
    For a `nighthawk-ingress` test the orchestrator additionally patches the
@@ -43,13 +49,14 @@ To run the cold resume tests from your workstation instead, see
 6. For each test in `tests.yaml`, or only those named by `--test-name`:
    - Submits a Job using the just-built image for the test's type
      (`runner-job.yaml.tmpl` for locust,
-     `nighthawk-ingress-runner-job.yaml.tmpl` for nighthawk-ingress).
+     `nighthawk-ingress-runner-job.yaml.tmpl` for nighthawk-ingress,
+     `atunnel-runner-job.yaml.tmpl` for atunnel).
      A locust Job also gets `--metadata` with the target cluster's name,
      location and project, merged with the `BENCHMARK_METADATA` environment
      variable (a JSON object) if set. A `--metadata` in the test's own
      `flags` is merged in too, its keys winning on conflict.
    - Polls until complete/failed/timeout; tails logs; deletes the Job.
-   - Tears down workloads + substrate.
+   - Tears down workloads + substrate (when `NEEDS_SUBSTRATE = True`).
    - If not the last test, redeploys them so the next run starts clean.
 
 ## Choosing a sandbox class

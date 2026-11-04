@@ -18,8 +18,8 @@
 #
 # Fields shared by every entry:
 #
-#   type           Required. Selects the runner: "locust" | "nighthawk-ingress".
-#                  Each type's own fields are described in its section.
+#   type           Required. Selects the runner: "locust" | "nighthawk-ingress" |
+#                  "atunnel". Each type's own fields are described in its section.
 #   targetCluster  Required. Names a config file under
 #                  /etc/orchestrator/target-clusters/ (e.g. `targetCluster:
 #                  dev` -> /etc/orchestrator/target-clusters/dev.sh). The
@@ -140,6 +140,20 @@
 # the "Configuration knobs" table in benchmarking/nighthawk-ingress/README.md.
 # `workerCount` is required: the benchmark warms one actor per worker, so
 # it is also the actor fleet size.
+#
+# ---- type: atunnel ------------------------------------------------------------------
+#
+# Runs the self-contained atunnel component benchmark in a single multi-container
+# Job pod (pki init container, sink and worker sidecars, and rig runner),
+# skipping the Substrate and workload deploy (`NEEDS_SUBSTRATE = False`).
+# `duration` is the job-wait budget and sets the Job's `activeDeadlineSeconds`;
+# optional `flags` are forwarded to `atunnel-bench load` (e.g. `--scenarios`,
+# `--rungs`, `--step`, `--warmup`). Optional `atunnel:` block knobs:
+#   tunnelCpus     Optional (default 1). CPU quota for the atunnel cgroup.
+#   tunnelMemory   Optional (default "1g"). Memory limit for the atunnel cgroup.
+#   actors         Optional (default 10). Actor netns count on the worker.
+#   bodyBytes      Optional (default 16). Response body size in bytes.
+#   rigCpu         Optional (default 4). CPU request for the sink and runner containers.
 
 tests:
   - name: glutton_baseline_1_user
@@ -764,3 +778,12 @@ tests:
       - "50"
       - "--ladder"
       - "50:2m@20,50:2m@50"
+  - name: atunnel_1cpu_1g
+    type: atunnel
+    targetCluster: dev
+    duration: 15m
+    atunnel:
+      tunnelCpus: 1
+      tunnelMemory: 1g
+      actors: 10
+    flags: ["--rungs", "1000,2000,4000,8000"]
