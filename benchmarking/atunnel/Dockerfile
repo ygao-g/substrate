@@ -12,12 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# One image holding the benchmark's one program; each container picks its
-# subcommand. The program is built outside, statically for linux, so the build
-# context is just it (run-docker.sh does this):
+# Build context is the repository root:
 #
-#   CGO_ENABLED=0 GOOS=linux go build -o ctx/ ./benchmarking/atunnel/cmd/...
-#   docker build -f benchmarking/atunnel/Dockerfile ctx/
-FROM gcr.io/distroless/static-debian12:nonroot
+#   docker build --target bench -f benchmarking/atunnel/Dockerfile .
+FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS build
+ARG TARGETARCH
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY vendor ./vendor
+COPY api ./api
+COPY cmd ./cmd
+COPY internal ./internal
+COPY pkg ./pkg
+COPY benchmarking/atunnel/cmd ./benchmarking/atunnel/cmd
+COPY benchmarking/atunnel/internal ./benchmarking/atunnel/internal
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" GOFLAGS=-mod=vendor \
+    go build -o /out/atunnel-bench ./benchmarking/atunnel/cmd/atunnel-bench
 
-COPY atunnel-bench /usr/local/bin/
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS bench
+COPY --from=build /out/atunnel-bench /usr/local/bin/atunnel-bench

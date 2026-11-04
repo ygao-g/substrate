@@ -71,24 +71,16 @@ repo="$(cd "${here}/../.." && pwd)"
 out="${here}/runs/$(date +%Y%m%d-%H%M%S)"
 # Under runs/ rather than /tmp so Docker Desktop can always mount it.
 work="${here}/runs/.work-$$"
-ctx="${work}/image"
 pki="${work}/pki"
-mkdir -p "${ctx}" "${pki}" "${out}/profiles" "${out}/logs"
+mkdir -p "${pki}" "${out}/profiles" "${out}/logs"
 image=atunnel-bench:local
 network=atunnel-bench
 # The egress actor and the ingress actors serve on Unix sockets here. A named
 # volume, because sockets do not work on Docker Desktop's host mounts.
 shared=atunnel-bench-shared
-arch="$(docker info --format '{{.Architecture}}')"
-case "${arch}" in
-  x86_64) goarch=amd64 ;;
-  aarch64 | arm64) goarch=arm64 ;;
-  *) echo "unsupported docker architecture ${arch}" >&2; exit 1 ;;
-esac
 
-echo "building linux/${goarch} binaries and ${image}"
-(cd "${repo}" && CGO_ENABLED=0 GOOS=linux GOARCH="${goarch}" go build -o "${ctx}/" ./benchmarking/atunnel/cmd/...)
-docker build --quiet -t "${image}" -f "${here}/Dockerfile" "${ctx}" >/dev/null
+echo "building ${image}"
+docker build --quiet --target bench -t "${image}" -f "${here}/Dockerfile" "${repo}" >/dev/null
 
 containers=(atunnel-load atunnel-worker atunnel-sink)
 remove_all() {
