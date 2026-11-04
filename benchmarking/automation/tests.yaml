@@ -13,7 +13,8 @@
 # limitations under the License.
 
 # The orchestrator deploys + tears down substrate + workloads around each
-# test so runs don't pollute each other.
+# test so runs don't pollute each other; types that need no Substrate skip
+# the deploy.
 #
 # Fields shared by every entry:
 #

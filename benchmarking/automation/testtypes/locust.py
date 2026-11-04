@@ -29,6 +29,7 @@ import controlplane
 from util import build_and_push
 
 TEST_TYPE = "locust"
+NEEDS_SUBSTRATE = True
 
 
 def control_plane_config(test: dict[str, Any]) -> dict[str, Any] | None:
