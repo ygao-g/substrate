@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# One image holding the benchmark's one program; each container picks its
-# subcommand. The build context is the repo root; BuildKit transfers only the
-# paths the COPY lines name. The build stage compiles natively for the target
-# architecture, so an arm64 host cross-compiles amd64 without emulation.
+# The benchmark's one program, atunnel-bench, in two images from one build:
+# `bench` for run-docker.sh, where each container picks its subcommand, and
+# the final `runner`, which adds runner.py for the Kubernetes Job. The build
+# context is the repo root; BuildKit transfers only the paths the COPY lines
+# name. The build stage compiles natively for the target architecture, so an
+# arm64 host cross-compiles amd64 without emulation.
 #
 #   docker build --target bench -t atunnel-bench:local -f benchmarking/atunnel/Dockerfile .   # run-docker.sh
 #   docker build --platform linux/amd64 -f benchmarking/atunnel/Dockerfile .                  # the cluster image
@@ -36,3 +38,17 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS bench
 COPY --from=build /out/atunnel-bench /usr/local/bin/
+
+FROM python:3.11-slim@sha256:db20d8506e2f15b6db39b40b6015ca46bae855dec6dd326d462cfe79ae972893 AS pydeps
+WORKDIR /app
+COPY benchmarking/atunnel/requirements.txt .
+RUN pip install --no-cache-dir --target=/app/deps -r requirements.txt
+
+# Debian 12's Python is 3.11, which the pydeps stage's wheels match. The
+# entrypoint is python3.11, so the Job's Go containers set their command.
+FROM gcr.io/distroless/python3-debian12:nonroot@sha256:7d1042ce588ab97019fe95c24ffca7bc5a82ccdac572511d5e09bda4435c89c5 AS runner
+COPY --from=build /out/atunnel-bench /usr/local/bin/
+COPY --from=pydeps /app/deps /app/deps
+COPY benchmarking/atunnel/runner.py benchmarking/atunnel/output.py /app/
+ENV PYTHONPATH=/app:/app/deps
+ENV PYTHONUNBUFFERED=1
