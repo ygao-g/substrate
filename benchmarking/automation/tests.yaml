@@ -13,7 +13,9 @@
 # limitations under the License.
 
 # The orchestrator deploys + tears down substrate + workloads around each
-# test so runs don't pollute each other.
+# test so runs don't pollute each other. A type that needs no substrate
+# (NEEDS_SUBSTRATE = False in its testtypes module) skips both; the sweep of
+# leftovers before each test still runs.
 #
 # Fields shared by every entry:
 #

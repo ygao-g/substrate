@@ -14,8 +14,13 @@
 
 """One module per tests.yaml `type`; orchestrator.py dispatches via TYPES.
 
-Each module implements the TestType hooks, called in lifecycle order:
+Each module declares NEEDS_SUBSTRATE and implements the TestType hooks,
+called in lifecycle order:
 
+  NEEDS_SUBSTRATE       whether the orchestrator installs Substrate and the
+                        benchmark workloads around the test. False for a
+                        type whose Job is self-contained; the pre-test sweep
+                        of leftovers still runs.
   validate(test)        preflight, before any cluster work. Raises
                         ValueError on a malformed entry; may normalize it
                         (nighthawk-ingress requires workerCount).
@@ -44,6 +49,7 @@ from testtypes import nighthawk_ingress
 
 class TestType(Protocol):
     TEST_TYPE: str
+    NEEDS_SUBSTRATE: bool
 
     def validate(self, test: dict[str, Any]) -> None: ...
     def build_image(self, commit: str) -> str: ...
@@ -64,3 +70,6 @@ TYPES: dict[str, TestType] = {
 for _name, _mod in TYPES.items():
     for _hook in ("validate", "build_image", "pre_test", "job_tmpl", "job_subs"):
         assert hasattr(_mod, _hook), f"test type {_name!r} missing hook {_hook!r}"
+    assert isinstance(getattr(_mod, "NEEDS_SUBSTRATE", None), bool), (
+        f"test type {_name!r} must set NEEDS_SUBSTRATE to a bool"
+    )
