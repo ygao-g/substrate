@@ -12,12 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# One image holding the benchmark's one program; each container picks its
-# subcommand. The program is built outside, statically for linux, so the build
-# context is just it (run-docker.sh does this):
+# The benchmark's one program, atunnel-bench, in two images from one build:
+# `bench` for run-docker.sh, where each container picks its subcommand, and
+# the final `runner`, which adds runner.py for the Kubernetes Job. The build
+# context is the repo root; BuildKit transfers only the paths the COPY lines
+# name. The build stage compiles natively for the target architecture, so an
+# arm64 host cross-compiles amd64 without emulation.
 #
-#   CGO_ENABLED=0 GOOS=linux go build -o ctx/ ./benchmarking/atunnel/cmd/...
-#   docker build -f benchmarking/atunnel/Dockerfile ctx/
-FROM gcr.io/distroless/static-debian12:nonroot
+#   docker build --target bench -t atunnel-bench:local -f benchmarking/atunnel/Dockerfile .   # run-docker.sh
+#   docker build --platform linux/amd64 -f benchmarking/atunnel/Dockerfile .                  # the cluster image
 
-COPY atunnel-bench /usr/local/bin/
+FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS build
+ARG TARGETARCH
+WORKDIR /src
+# Only what the program imports: a developer's runs/ or venv/ never enters.
+COPY go.mod go.sum ./
+COPY vendor ./vendor
+COPY api ./api
+COPY internal ./internal
+COPY pkg ./pkg
+COPY benchmarking/atunnel/cmd ./benchmarking/atunnel/cmd
+COPY benchmarking/atunnel/internal ./benchmarking/atunnel/internal
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH GOFLAGS=-mod=vendor go build -o /out/ ./benchmarking/atunnel/cmd/...
+
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS bench
+COPY --from=build /out/atunnel-bench /usr/local/bin/
+
+FROM python:3.11-slim@sha256:db20d8506e2f15b6db39b40b6015ca46bae855dec6dd326d462cfe79ae972893 AS pydeps
+WORKDIR /app
+COPY benchmarking/atunnel/requirements.txt .
+RUN pip install --no-cache-dir --target=/app/deps -r requirements.txt
+
+# Debian 12's Python is 3.11, which the pydeps stage's wheels match. The
+# entrypoint is python3.11, so the Job's Go containers set their command.
+FROM gcr.io/distroless/python3-debian12:nonroot@sha256:7d1042ce588ab97019fe95c24ffca7bc5a82ccdac572511d5e09bda4435c89c5 AS runner
+COPY --from=build /out/atunnel-bench /usr/local/bin/
+COPY --from=pydeps /app/deps /app/deps
+COPY benchmarking/atunnel/runner.py benchmarking/atunnel/output.py /app/
+ENV PYTHONPATH=/app:/app/deps
+ENV PYTHONUNBUFFERED=1

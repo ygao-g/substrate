@@ -32,20 +32,21 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"go.ate.dev/substrate/benchmarking/atunnel/internal/fakeatelet"
 	"go.ate.dev/substrate/benchmarking/atunnel/internal/workerhost"
+	"go.ate.dev/substrate/internal/ateworker/cgroup"
 	"go.ate.dev/substrate/internal/nodepath"
 )
 
-const cgroupRoot = "/sys/fs/cgroup"
-
-// workerCommand plays the rest of a worker pod around atunnel, in a
-// privileged container: it serves the fake atelet on the node-local socket,
-// starts atunnel (the tunnel subcommand) in a cgroup of its own with the CPU
-// and memory limits, places an ingress actor in every actor's sandbox and the
-// egress actor in the first, and replaces atunnel if it dies, logging why.
-// Arguments after -- go to tunnel.
+// workerCommand plays the rest of a worker pod around atunnel, in a container
+// with the worker's capabilities and a private cgroup namespace: it serves
+// the fake atelet on the node-local socket, starts atunnel (the tunnel
+// subcommand) in a cgroup of its own with the CPU and memory limits, places
+// an ingress actor in every actor's sandbox and the egress actor in the
+// first, and replaces atunnel if it dies, logging why. Arguments after -- go
+// to tunnel.
 func workerCommand() *cobra.Command {
 	var pkiDir, memory, shared, admin string
 	var cpus float64
@@ -87,7 +88,10 @@ func (s *supervisor) run(ctx context.Context, pkiDir string) error {
 			slog.Error("fake atelet stopped", slog.Any("err", err))
 		}
 	}()
-	if err := delegateCgroups(); err != nil {
+	if err := remountProcSysWritable(); err != nil {
+		return fmt.Errorf("remounting /proc/sys read-write: %w", err)
+	}
+	if err := cgroup.Delegate(ctx); err != nil {
 		return fmt.Errorf("setting up cgroups: %w", err)
 	}
 	for incarnation := 1; ctx.Err() == nil; incarnation++ {
@@ -111,7 +115,7 @@ type supervisor struct {
 // runOnce runs one atunnel, with its sandbox processes, until it exits. It
 // returns nil when atunnel died and should be replaced.
 func (s *supervisor) runOnce(ctx context.Context, incarnation int) error {
-	dir := filepath.Join(cgroupRoot, "tunnel-"+strconv.Itoa(incarnation))
+	dir := filepath.Join(cgroup.Root, "tunnel-"+strconv.Itoa(incarnation))
 	fd, err := s.createCgroup(dir)
 	if err != nil {
 		return err
@@ -231,22 +235,20 @@ func (s *supervisor) logDeath(dir string, exitErr error) {
 	_, _ = f.WriteString(line)
 }
 
-// delegateCgroups moves every process out of the container's root cgroup, so
-// its controllers can be handed to child cgroups (cgroup v2 allows processes
-// only in leaves), and enables the CPU and memory controllers for them.
-func delegateCgroups() error {
-	leaf := filepath.Join(cgroupRoot, "supervisor")
-	if err := os.MkdirAll(leaf, 0o755); err != nil {
+// remountProcSysWritable makes /proc/sys writable for the life of the
+// container. An unprivileged pod mounts it read-only; atunnel's sandbox setup
+// and the actors then write sysctls there from separate processes, and a
+// remount around each write would race with the others. Under docker
+// --privileged it is writable already and not a mount point.
+func remountProcSysWritable() error {
+	var st unix.Statfs_t
+	if err := unix.Statfs("/proc/sys", &st); err != nil {
 		return err
 	}
-	procs, err := os.ReadFile(filepath.Join(cgroupRoot, "cgroup.procs"))
-	if err != nil {
-		return err
+	if st.Flags&unix.ST_RDONLY == 0 {
+		return nil
 	}
-	for _, pid := range strings.Fields(string(procs)) {
-		_ = os.WriteFile(filepath.Join(leaf, "cgroup.procs"), []byte(pid), 0o644)
-	}
-	return os.WriteFile(filepath.Join(cgroupRoot, "cgroup.subtree_control"), []byte("+cpu +memory"), 0o644)
+	return unix.Mount("none", "/proc/sys", "", unix.MS_BIND|unix.MS_REMOUNT, "")
 }
 
 // createCgroup makes a cgroup with atunnel's limits and returns a descriptor to

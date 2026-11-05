@@ -13,11 +13,14 @@
 # limitations under the License.
 
 # The orchestrator deploys + tears down substrate + workloads around each
-# test so runs don't pollute each other.
+# test so runs don't pollute each other. A type that needs no substrate
+# (NEEDS_SUBSTRATE = False in its testtypes module) skips both; the sweep of
+# leftovers before each test still runs.
 #
 # Fields shared by every entry:
 #
-#   type           Required. Selects the runner: "locust" | "nighthawk-ingress".
+#   type           Required. Selects the runner: "locust" | "nighthawk-ingress" |
+#                  "atunnel".
 #                  Each type's own fields are described in its section.
 #   targetCluster  Required. Names a config file under
 #                  /etc/orchestrator/target-clusters/ (e.g. `targetCluster:
@@ -139,6 +142,18 @@
 # the "Configuration knobs" table in benchmarking/nighthawk-ingress/README.md.
 # `workerCount` is required: the benchmark warms one actor per worker, so
 # it is also the actor fleet size.
+#
+# ---- type: atunnel ------------------------------------------------------------
+#
+# Runs benchmarking/atunnel, atunnel's isolation benchmark, as one Job pod
+# with no Substrate on the cluster; the orchestrator still sweeps leftovers
+# before the test. `duration` is the job-wait budget and the
+# Job's activeDeadlineSeconds. An `atunnel:` block shapes the pod: tunnelCpus
+# (default 1), tunnelMemory (default 1g), actors (default 10), bodyBytes
+# (default 16), rigCpu (default 4, the CPU request of the generator and of the
+# sink). `flags` go to `atunnel-bench load`, e.g. --scenarios and --rungs; see
+# benchmarking/atunnel/README.md. Results are a baseline of their own: the pod
+# shares one network namespace and pins no CPUs, unlike run-docker.sh.
 
 tests:
   - name: glutton_baseline_1_user
@@ -763,3 +778,15 @@ tests:
       - "50"
       - "--ladder"
       - "50:2m@20,50:2m@50"
+  # atunnel in isolation at 1 CPU and 1 GiB, every regular scenario over
+  # load's default ladder. Verdicts, deaths and OOM kills are data in
+  # stats.jsonl and status.json; the Job fails only on a harness fault.
+  - name: atunnel_1cpu_1g
+    type: atunnel
+    description: "atunnel isolation benchmark: 1 CPU, 1 GiB, 10 actors"
+    targetCluster: dev
+    duration: 15m
+    atunnel:
+      tunnelCpus: 1
+      tunnelMemory: 1g
+      actors: 10

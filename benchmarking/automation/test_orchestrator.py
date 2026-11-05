@@ -228,7 +228,7 @@ class RunnerNamespaceTest(unittest.TestCase):
 
     def test_namespace_has_api_access_label(self):
         want = self.api_client_labels()
-        for name in ("runner-job.yaml.tmpl", "nighthawk-ingress-runner-job.yaml.tmpl"):
+        for name in ("runner-job.yaml.tmpl", "nighthawk-ingress-runner-job.yaml.tmpl", "atunnel-runner-job.yaml.tmpl"):
             with self.subTest(template=name):
                 text = open(os.path.join(self.HERE, "manifests", name)).read()
                 ns = next(
@@ -239,6 +239,57 @@ class RunnerNamespaceTest(unittest.TestCase):
                 self.assertEqual(ns["metadata"]["name"], "benchmarking")
                 for k, v in want.items():
                     self.assertEqual(ns["metadata"].get("labels", {}).get(k), v)
+
+
+class ClusterPrepTest(unittest.TestCase):
+    """prepare_cluster and teardown_cluster follow the type's NEEDS_SUBSTRATE;
+    pre_test runs either way."""
+
+    def prep(self, needs_substrate):
+        fake = mock.Mock(NEEDS_SUBSTRATE=needs_substrate)
+        test = {"name": "n", "type": "fake", "duration": "1m"}
+        calls = mock.Mock()
+        calls.attach_mock(fake.pre_test, "pre_test")
+        with mock.patch.dict(orchestrator.TYPES, {"fake": fake}), \
+             mock.patch.object(orchestrator, "deploy_substrate") as deploy_substrate, \
+             mock.patch.object(orchestrator, "deploy_workloads") as deploy_workloads, \
+             mock.patch.object(orchestrator, "teardown_workloads") as teardown_workloads, \
+             mock.patch.object(orchestrator, "teardown_substrate") as teardown_substrate:
+            for name, m in (
+                ("deploy_substrate", deploy_substrate),
+                ("deploy_workloads", deploy_workloads),
+                ("teardown_workloads", teardown_workloads),
+                ("teardown_substrate", teardown_substrate),
+            ):
+                calls.attach_mock(m, name)
+            orchestrator.prepare_cluster(test)
+            orchestrator.teardown_cluster(test)
+        return [c[0] for c in calls.mock_calls]
+
+    def test_without_substrate_only_pre_test(self):
+        self.assertEqual(self.prep(False), ["pre_test"])
+
+    def test_with_substrate_in_order(self):
+        self.assertEqual(
+            self.prep(True),
+            ["deploy_substrate", "pre_test", "deploy_workloads", "teardown_workloads", "teardown_substrate"],
+        )
+
+
+class RunTestLogsTest(unittest.TestCase):
+    def test_logs_every_container(self):
+        fake = mock.Mock(job_tmpl=mock.Mock(return_value="t"), job_subs=mock.Mock(return_value={}))
+        test = {"name": "n", "type": "fake", "duration": "1m"}
+        with mock.patch.dict(orchestrator.TYPES, {"fake": fake}), \
+             mock.patch.object(orchestrator, "render_template", return_value="m"), \
+             mock.patch.object(orchestrator, "wait_for_no_active_runners"), \
+             mock.patch.object(orchestrator.subprocess, "run"), \
+             mock.patch.object(orchestrator, "wait_for_job", return_value="complete"), \
+             mock.patch.object(orchestrator, "run_no_check") as run_no_check:
+            self.assertEqual(orchestrator.run_test(test, "img", "dest", "abcdef0123"), "complete")
+        logs = next(c.args[0] for c in run_no_check.call_args_list if c.args[0][1] == "logs")
+        self.assertIn("--all-containers=true", logs)
+        self.assertIn("--prefix=true", logs)
 
 
 class JobNameTest(unittest.TestCase):
@@ -316,7 +367,9 @@ class RunMetadataTest(unittest.TestCase):
         self.assertEqual(json.loads(args[2])["cluster_name"], "c")
 
     def test_other_types_do_not(self):
-        self.assertEqual(self.submitted_args("nighthawk-ingress"), ["--x"])
+        for ttype in ("nighthawk-ingress", "atunnel"):
+            with self.subTest(type=ttype):
+                self.assertEqual(self.submitted_args(ttype), ["--x"])
 
     def test_test_metadata_is_merged_not_overridden(self):
         for own in (["--metadata", '{"cluster_name": "mine", "suite": "s"}'],
