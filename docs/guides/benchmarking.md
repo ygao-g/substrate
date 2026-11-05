@@ -671,6 +671,36 @@ gcloud storage cat "$RUN/stats.jsonl" | grep '"metric": "ladder_step_'
 `<dest>` is the orchestrator's `--dest`, and its log has the full `RUN` path
 on each `Uploaded ... -> gs://...` line.
 
+### atunnel Benchmark
+
+`type: atunnel` runs [benchmarking/atunnel](../../benchmarking/atunnel/README.md),
+atunnel's isolation benchmark, as one self-contained Job pod on the
+`ate.dev/benchmarking` node pool; the orchestrator skips the Substrate install
+and teardown around it and only sweeps leftovers first. The `atunnel:` block in
+`tests.yaml` shapes the pod (`tunnelCpus`, `tunnelMemory`, `actors`,
+`bodyBytes`, `rigCpu`) and `flags` go to `atunnel-bench load`, such as
+`--scenarios` and `--rungs`.
+
+#### atunnel Reported Metrics
+
+Every `stats.jsonl` row carries `rig: "pod"`, because the pod measures a
+different network than `run-docker.sh` (see "Running on a cluster" in the
+bench's README).
+
+* `atunnel_<Scenario>_<offered>`: one row per rung, the scenario report
+  flattened: `verdict`, `reason`, `load_*` (offered, achieved, latency
+  percentiles, errors), `tunnel_*` (cores, `cpu_us_per_unit`, RSS and cgroup
+  memory), `generator_*` and `sink_*` cores.
+* `atunnel_<Scenario>`: `max_ok_offered`, `first_not_ok_offered`,
+  `first_not_ok_verdict`, `down_rungs`, `rig_limited_rungs`, and
+  `tunnel_cpu_us_per_unit_at_max_ok`. `RIG-LIMITED` rungs count in neither
+  `max_ok_offered` nor `first_not_ok_offered`.
+* `atunnel_<Scenario>_sink_counters`: the fake actors' and gateway's counters.
+
+`status.json` holds `load_exit_code`, the verdict histogram, `tunnel_deaths`
+and `oom_kills`. A `DOWN` rung, a death or an OOM kill is data, not a failure;
+a `DOWN` row carries no `tunnel_*` measurements.
+
 ### Isolate Mode
 
 A real cold resume is limited by the node's restore capacity, which hides the
