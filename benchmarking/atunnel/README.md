@@ -18,8 +18,10 @@ table per scenario.
 ## Running
 
 Linux containers only: atunnel creates real network namespaces and nftables
-rules, so its container is privileged. On macOS, Docker Desktop provides the
-Linux.
+rules. `run-docker.sh` gives its container `--privileged`; the worker also
+runs with just the gVisor worker's capabilities in a private cgroup namespace,
+remounting `/proc/sys` and `/sys/fs/cgroup` read-write itself as the real
+worker does. On macOS, Docker Desktop provides the Linux.
 
 ```sh
 benchmarking/atunnel/run-docker.sh                                 # atunnel at 1 CPU, 1 GiB
