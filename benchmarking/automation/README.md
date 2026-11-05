@@ -4,9 +4,14 @@ Scheduled, repeatable benchmark runs of a substrate branch. A CronJob on an
 **orchestration cluster** drives the full build/deploy/run/teardown cycle
 against a separate **test cluster**, once per entry in [tests.yaml](tests.yaml).
 Each run uploads results to GCS via `benchmarking/locust/runner.py`
-(`type: locust`) or `benchmarking/nighthawk-ingress/runner.py` (`type: nighthawk-ingress`,
+(`type: locust`), `benchmarking/nighthawk-ingress/runner.py` (`type: nighthawk-ingress`,
 the router capacity benchmark — see
-[benchmarking/nighthawk-ingress/README.md](../nighthawk-ingress/README.md)).
+[benchmarking/nighthawk-ingress/README.md](../nighthawk-ingress/README.md)),
+or `benchmarking/atunnel/runner.py` (`type: atunnel`, atunnel's isolation
+benchmark, see [benchmarking/atunnel/README.md](../atunnel/README.md)).
+An `atunnel` test is one self-contained pod, so the orchestrator skips the
+Substrate install and teardown around it; the sweep of leftovers before each
+test still runs.
 To run the cold resume tests from your workstation instead, see
 [ateapi-cold-resume.md](ateapi-cold-resume.md).
 
@@ -18,8 +23,9 @@ To run the cold resume tests from your workstation instead, see
    `gcloud container clusters get-credentials` for the test cluster.
 3. Shallow-clones `--repo` at `--branch`, captures the commit hash.
 4. `docker build && docker push` builds the runner image for each test type
-   in use, tagged with the commit hash: `${KO_DOCKER_REPO}/locust-test:<commit>`
-   and/or `${KO_DOCKER_REPO}/nighthawk-ingress-test:<commit>`.
+   in use, tagged with the commit hash: `${KO_DOCKER_REPO}/locust-test:<commit>`,
+   `${KO_DOCKER_REPO}/nighthawk-ingress-test:<commit>` and/or
+   `${KO_DOCKER_REPO}/atunnel-bench-test:<commit>`.
 5. `go run ./cmd/ate-setup deploy ate-system` (with `ATE_CREDENTIAL_PROVIDER`
    in `.ate-dev-env.sh`, or `--credential-provider` in the test's
    `ateArgs`; passes `--sandbox-classes=<class>` so `deploy ate-system`
