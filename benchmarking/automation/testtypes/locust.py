@@ -30,7 +30,6 @@ from util import build_and_push
 
 TEST_TYPE = "locust"
 USES_SHARED_WORKLOADS = True
-EXTRA_INGRESS_SPIFFE_IDS: tuple[str, ...] = ()
 
 
 def teardown_workloads() -> None:

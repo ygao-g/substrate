@@ -93,7 +93,7 @@ class DeploySubstrateTest(unittest.TestCase):
     # denies it unless the install makes it an owner, and the Envoy ingress
     # router refuses to deploy without an allowed SPIFFE ID.
     @mock.patch("orchestrator.run")
-    def test_deploy_substrate_auth(self, run):
+    def test_runner_and_client_are_bootstrap_owners(self, run):
         orchestrator.deploy_substrate(["--credential-provider={}"])
         cmd = run.call_args.args[0]
         self.assertEqual(cmd, ["go", "run", "./cmd/ate-setup", "deploy", "ate-system", "--credential-provider={}"])
@@ -109,13 +109,6 @@ class DeploySubstrateTest(unittest.TestCase):
         self.assertEqual(
             env["ATE_INGRESS_ALLOWED_SPIFFE_IDS"],
             "spiffe://cluster.local/ns/benchmarking/sa/benchmark-runner",
-        )
-
-        orchestrator.deploy_substrate([], extra_ingress_spiffe_ids=("spiffe://cluster.local/ns/foo/sa/bar",))
-        env = run.call_args.kwargs["env"]
-        self.assertEqual(
-            env["ATE_INGRESS_ALLOWED_SPIFFE_IDS"],
-            "spiffe://cluster.local/ns/benchmarking/sa/benchmark-runner,spiffe://cluster.local/ns/foo/sa/bar",
         )
 
     @mock.patch("orchestrator.run")
@@ -269,10 +262,6 @@ class NighthawkEgressTest(unittest.TestCase):
 
         self.assertIn("nighthawk-egress", orchestrator.TYPES)
         self.assertFalse(nighthawk_egress.USES_SHARED_WORKLOADS)
-        self.assertEqual(
-            nighthawk_egress.EXTRA_INGRESS_SPIFFE_IDS,
-            ("spiffe://cluster.local/ns/nighthawk/sa/traffic-driver-invoker",),
-        )
 
     def test_job_template_renders_args_labels_and_toleration(self):
         from testtypes import nighthawk_egress

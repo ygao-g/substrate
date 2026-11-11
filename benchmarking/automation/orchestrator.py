@@ -432,15 +432,11 @@ BENCHMARK_RUNNER_PRINCIPAL = "spiffe://cluster.local/ns/benchmarking/sa/benchmar
 CLIENT_PRINCIPAL = "system:serviceaccount:ate-system:ate-client"
 
 
-def deploy_substrate(
-    ate_args: Iterable[str] = (),
-    extra_ingress_spiffe_ids: Iterable[str] = (),
-) -> None:
-    allowed_ids = [BENCHMARK_RUNNER_PRINCIPAL, *extra_ingress_spiffe_ids]
+def deploy_substrate(ate_args: Iterable[str] = ()) -> None:
     env = {
         **os.environ,
         "ATE_API_AUTHZ_BOOTSTRAP_OWNERS": f"{CLIENT_PRINCIPAL},{BENCHMARK_RUNNER_PRINCIPAL}",
-        "ATE_INGRESS_ALLOWED_SPIFFE_IDS": ",".join(allowed_ids),
+        "ATE_INGRESS_ALLOWED_SPIFFE_IDS": BENCHMARK_RUNNER_PRINCIPAL,
     }
     run(["go", "run", "./cmd/ate-setup", "deploy", "ate-system", *(str(a) for a in ate_args)], env=env)
 
@@ -662,10 +658,7 @@ def main() -> None:
             failure_msg = None
             start_time = time.time()
             try:
-                deploy_substrate(
-                    substrate_args(test),
-                    extra_ingress_spiffe_ids=TYPES[ttype].EXTRA_INGRESS_SPIFFE_IDS,
-                )
+                deploy_substrate(substrate_args(test))
                 TYPES[ttype].pre_test(test)
                 if TYPES[ttype].USES_SHARED_WORKLOADS:
                     deploy_workloads(

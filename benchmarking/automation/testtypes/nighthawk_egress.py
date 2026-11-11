@@ -23,7 +23,6 @@ from util import build_and_push, parse_duration_seconds, run, run_no_check
 TEST_TYPE = "nighthawk-egress"
 DOCKERFILE = "benchmarking/nighthawk-egress/Dockerfile"
 USES_SHARED_WORKLOADS = False
-EXTRA_INGRESS_SPIFFE_IDS = ("spiffe://cluster.local/ns/nighthawk/sa/traffic-driver-invoker",)
 
 DEFAULTS: dict[str, Any] = {
     "mode": "http",

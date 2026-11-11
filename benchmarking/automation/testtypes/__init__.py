@@ -36,9 +36,6 @@ Each module implements the TestType hooks, called in lifecycle order:
                         True when the type uses benchmarking/workloads
                         (deploy_workloads runs and the shared delete runs
                         at teardown).
-  EXTRA_INGRESS_SPIFFE_IDS
-                        extra ids appended to ATE_INGRESS_ALLOWED_SPIFFE_IDS
-                        by deploy_substrate.
 
 Adding a test type = one new module here + one entry in TYPES.
 """
@@ -53,7 +50,6 @@ from testtypes import nighthawk_ingress
 class TestType(Protocol):
     TEST_TYPE: str
     USES_SHARED_WORKLOADS: bool
-    EXTRA_INGRESS_SPIFFE_IDS: tuple[str, ...]
 
     def validate(self, test: dict[str, Any]) -> None: ...
     def build_image(self, commit: str) -> str: ...
@@ -82,6 +78,5 @@ for _name, _mod in TYPES.items():
         "job_subs",
         "teardown_workloads",
         "USES_SHARED_WORKLOADS",
-        "EXTRA_INGRESS_SPIFFE_IDS",
     ):
         assert hasattr(_mod, _hook), f"test type {_name!r} missing hook {_hook!r}"
