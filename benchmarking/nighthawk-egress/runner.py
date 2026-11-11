@@ -51,7 +51,7 @@ from spec import (
 )
 
 ADAPTIVE_CLIENT = "nighthawk_adaptive_load_client"
-DEFAULT_INVOKER_ADDR = "traffic-driver-invoker.nighthawk.svc:19980"
+DEFAULT_INVOKER_ADDR = "127.0.0.1:19980"
 DEFAULT_GATEWAY_METRICS_URL = "http://atenet-egress-metrics.ate-system.svc:15090/stats/prometheus"
 DEFAULT_SERVICEDNS_CA_CERT = "/run/servicedns-ca/ca.crt"
 DEFAULT_DESC_PATH = os.environ.get("NIGHTHAWK_DESC", "/app/nighthawk.desc")

@@ -49,7 +49,7 @@ To run the cold resume tests from your workstation instead, see
    pins `deployment/atenet-egress` to 1 replica with `envoy` and `ext-proc` CPU
    requests and limits set to `envoyCpu` and Envoy `--concurrency` set to `envoyCpu`,
    runs `hack/setup-e2e-egress-tls-kind.sh`, and deploys `nighthawk-server`,
-   `traffic-driver-invoker`, `atenet-egress-metrics`, and the `nighthawk/tester`
+   `atenet-egress-metrics`, and the `nighthawk/tester`
    actor. The teardown after each test runs `teardown_workloads` and redeploys
    Substrate, so the pin never outlives its run.
 6. For each test in `tests.yaml`, or only those named by `--test-name`:

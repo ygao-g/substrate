@@ -15,10 +15,10 @@ flowchart LR
     subgraph runner_job["nighthawk-egress-runner Job (benchmarking ns)"]
         runner["runner.py"]
         alc["nighthawk_adaptive_load_client<br/>exponential ramp + binary search"]
+        invoker["invoker sidecar<br/>(Envoy :19980, adds ate-target-actor)"]
         runner --> alc
     end
 
-    invoker["traffic-driver-invoker<br/>(:19980, adds ate-target-actor)"]
     router["atenet-router<br/>(:443)"]
 
     subgraph worker["WorkerPod (ateworker-gvisor)"]
@@ -67,7 +67,7 @@ sequenceDiagram
     participant Job as runner.py (K8s Job)
     participant Prom as atenet-egress (:15090)
     participant ALC as nighthawk_adaptive_load_client
-    participant Inv as traffic-driver-invoker (:19980)
+    participant Inv as invoker sidecar (:19980)
     participant Actor as nighthawk/tester (nighthawk_service)
     participant Srv as nighthawk-server (:80/:443/:8443)
     participant GCS as GCS / Local Artifacts
@@ -144,9 +144,9 @@ The actor, the worker pool, and `nighthawk-server` are sized to outscale `atenet
    ```bash
    go run ./cmd/ate-setup deploy ate-system \
      --credential-provider='{"name":"k8s.io"}' \
-     --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/nighthawk/sa/traffic-driver-invoker
+     --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/benchmarking/sa/benchmark-runner
    ```
-   - `traffic-driver-invoker` runs under ServiceAccount `nighthawk/traffic-driver-invoker` (`traffic-driver-invoker.yaml`), so `atenet-router` requires `spiffe://cluster.local/ns/nighthawk/sa/traffic-driver-invoker` in `--ingress-allowed-spiffe-ids`.
+   - The `invoker` sidecar of the runner Job (`nighthawk-egress-runner-job.yaml.tmpl`) presents the pod certificate of ServiceAccount `benchmarking/benchmark-runner`, so `atenet-router` requires `spiffe://cluster.local/ns/benchmarking/sa/benchmark-runner` in `--ingress-allowed-spiffe-ids`.
    - For manual runs without `run-dev.sh`, provision the CA bundle in `ate-system` so `atenet-egress` trusts `nighthawk-server`'s `servicedns` certificate on `:443` (`run-dev.sh` and `orchestrator.py` run this automatically unless `--skip-deploy` is passed):
      ```bash
      KUBECTL_CONTEXT="$(kubectl config current-context)" hack/setup-e2e-egress-tls-kind.sh
@@ -213,12 +213,12 @@ Each run writes its artifacts under `<dest>/runs/<name>/run_date=YYYY-MM-DD/run_
 
 ### Manual Setup and Single-Rate Check
 
-To deploy the workload components manually and drive a single fixed-rate `nighthawk_client` run:
+To deploy the workload components manually and drive a single fixed-rate `nighthawk_client` run, forward a local port to `nighthawk_service` in the actor. `kubectl-ate proxy actor` connects as `spiffe://cluster.local/ns/ate-system/sa/atenet-client`, so `--ingress-allowed-spiffe-ids` must list that ID too (see `cmd/atenet/internal/router/README.md`):
 
 ```bash
 ./benchmarking/nighthawk-egress/deploy.sh
 ./benchmarking/nighthawk-egress/deploy-traffic-driver.sh
-kubectl -n nighthawk port-forward svc/traffic-driver-invoker 19980:19980
+go run ./cmd/kubectl-ate proxy actor tester -a nighthawk 19980:80
 ```
 
 In a second terminal, run `nighthawk_client` against `grpc://127.0.0.1:19980`:
@@ -237,7 +237,7 @@ Delete the `nighthawk/tester` actor, actor template, atespace, and worker pool:
 ./benchmarking/nighthawk-egress/deploy-traffic-driver.sh --delete
 ```
 
-Delete `nighthawk-server`, `traffic-driver-invoker`, and the `atenet-egress-metrics` Service:
+Delete `nighthawk-server` and the `atenet-egress-metrics` Service:
 
 ```bash
 ./benchmarking/nighthawk-egress/deploy.sh --delete

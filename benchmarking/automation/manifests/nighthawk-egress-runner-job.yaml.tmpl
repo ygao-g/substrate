@@ -30,6 +30,127 @@ metadata:
   name: benchmark-runner
   namespace: benchmarking
 ---
+# Envoy config of the `invoker` sidecar in the Job below. It listens for
+# plaintext HTTP/1.1 and HTTP/2 (h2c/gRPC) on :19980, injects
+# `ate-target-actor: nighthawk/tester` on every request, and forwards upstream
+# over mTLS to atenet-router.ate-system.svc.cluster.local:443 using the SPIFFE
+# client certificate that podidentity.podcert.ate.dev/identity issues to
+# benchmark-runner.
+#
+# TODO(yanavlasov): this is a temporary workaround for nighthawk's cli's inability
+# to add headers when invoking traffic driver gRPC service. So this Envoy adds the
+# `ate-target-actor: nighthawk/tester` header so that cli can reach the traffic driver.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traffic-driver-invoker
+  namespace: benchmarking
+data:
+  envoy.yaml: |
+    # SDS requires a node id and cluster.
+    node:
+      id: traffic-driver-invoker
+      cluster: traffic-driver-invoker
+
+    static_resources:
+      listeners:
+      - name: listener_http_19980
+        address:
+          socket_address:
+            address: "::"
+            ipv4_compat: true
+            port_value: 19980
+        listener_filters:
+        - name: envoy.filters.listener.http_inspector
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.listener.http_inspector.v3.HttpInspector
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: ingress_http_19980
+              codec_type: AUTO
+              route_config:
+                name: local_route
+                request_headers_to_add:
+                - header:
+                    key: ate-target-actor
+                    value: nighthawk/tester
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                virtual_hosts:
+                - name: backend
+                  domains: ["*"]
+                  routes:
+                  - match:
+                      prefix: "/"
+                    route:
+                      cluster: atenet_router
+                      timeout: 0s
+              http_filters:
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+      clusters:
+      - name: atenet_router
+        type: STRICT_DNS
+        connect_timeout: 5s
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            use_downstream_protocol_config:
+              http_protocol_options: {}
+              http2_protocol_options: {}
+        transport_socket:
+          name: envoy.transport_sockets.tls
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+            sni: atenet-router.ate-system.svc
+            common_tls_context:
+              tls_certificate_sds_secret_configs:
+              - name: podidentity_client_cert
+                sds_config:
+                  resource_api_version: V3
+                  path_config_source:
+                    path: /etc/envoy/sds-podidentity-cert.yaml
+              combined_validation_context:
+                default_validation_context:
+                  match_typed_subject_alt_names:
+                  - san_type: DNS
+                    matcher:
+                      exact: atenet-router.ate-system.svc
+                validation_context_sds_secret_config:
+                  name: servicedns_validation_context
+                  sds_config:
+                    resource_api_version: V3
+                    path_config_source:
+                      path: /etc/envoy/sds-servicedns-validation.yaml
+        load_assignment:
+          cluster_name: atenet_router
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: atenet-router.ate-system.svc.cluster.local
+                    port_value: 443
+  sds-podidentity-cert.yaml: |
+    resources:
+    - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+      name: podidentity_client_cert
+      tls_certificate:
+        certificate_chain: { filename: /run/podidentity.podcert.ate.dev/credential-bundle.pem }
+        private_key: { filename: /run/podidentity.podcert.ate.dev/credential-bundle.pem }
+        watched_directory: { path: /run/podidentity.podcert.ate.dev }
+  sds-servicedns-validation.yaml: |
+    resources:
+    - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+      name: servicedns_validation_context
+      validation_context:
+        trusted_ca: { filename: /run/servicedns-ca/ca.crt }
+        watched_directory: { path: /run/servicedns-ca }
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -60,6 +181,44 @@ spec:
         fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+      - name: invoker
+        # Same envoyproxy/envoy digest as cmd/dataplane/envoy/Dockerfile.
+        image: envoyproxy/envoy:v1.39.5@sha256:8fc594a5d85eb76dca24155cfb9208882406873932b20cf33649a0a611194c43
+        restartPolicy: Always
+        command:
+        - /usr/local/bin/envoy
+        args:
+        - -c
+        - /etc/envoy/envoy.yaml
+        - --concurrency
+        - "1"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 19980
+          protocol: TCP
+        # The runner starts after this probe passes.
+        startupProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 1
+          failureThreshold: 30
+        volumeMounts:
+        - name: invoker-config
+          mountPath: /etc/envoy
+          readOnly: true
+        - name: podidentity
+          mountPath: /run/podidentity.podcert.ate.dev
+          readOnly: true
+        - name: servicedns-ca
+          mountPath: /run/servicedns-ca
+          readOnly: true
       containers:
       - name: runner
         image: ${IMAGE}
@@ -109,3 +268,13 @@ spec:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: ca.crt
+      - name: invoker-config
+        configMap:
+          name: traffic-driver-invoker
+      - name: podidentity
+        projected:
+          sources:
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem

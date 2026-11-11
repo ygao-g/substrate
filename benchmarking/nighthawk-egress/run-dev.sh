@@ -34,7 +34,7 @@ DEST=""
 SKIP_DEPLOY=false
 VENV="${HOME}/.venvs/substrate-bench"
 NAMESPACE="benchmarking"
-INVOKER_PRINCIPAL="spiffe://cluster.local/ns/nighthawk/sa/traffic-driver-invoker"
+RUNNER_PRINCIPAL="spiffe://cluster.local/ns/benchmarking/sa/benchmark-runner"
 
 usage() {
   cat <<EOF
@@ -92,15 +92,15 @@ docker info >/dev/null 2>&1 || {
 if ! kubectl get deployment atenet-egress -n ate-system >/dev/null 2>&1 \
   || ! kubectl get deployment atenet-router -n ate-system >/dev/null 2>&1; then
   echo "ERROR: substrate is not deployed on ${CLUSTER_NAME}. Run:" >&2
-  echo "  go run ./cmd/ate-setup deploy ate-system --credential-provider='{\"name\":\"k8s.io\"}' --ingress-allowed-spiffe-ids=${INVOKER_PRINCIPAL}" >&2
+  echo "  go run ./cmd/ate-setup deploy ate-system --credential-provider='{\"name\":\"k8s.io\"}' --ingress-allowed-spiffe-ids=${RUNNER_PRINCIPAL}" >&2
   exit 1
 fi
 
 ROUTER_ARGS="$(kubectl get deployment atenet-router -n ate-system \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="atenet-router")].args[*]}')"
-if [[ "${ROUTER_ARGS}" != *"${INVOKER_PRINCIPAL}"* ]]; then
-  echo "ERROR: atenet-router does not allow ${INVOKER_PRINCIPAL}. Redeploy substrate with:" >&2
-  echo "  go run ./cmd/ate-setup deploy ate-system --credential-provider='{\"name\":\"k8s.io\"}' --ingress-allowed-spiffe-ids=${INVOKER_PRINCIPAL}" >&2
+if [[ "${ROUTER_ARGS}" != *"${RUNNER_PRINCIPAL}"* ]]; then
+  echo "ERROR: atenet-router does not allow ${RUNNER_PRINCIPAL}. Redeploy substrate with:" >&2
+  echo "  go run ./cmd/ate-setup deploy ate-system --credential-provider='{\"name\":\"k8s.io\"}' --ingress-allowed-spiffe-ids=${RUNNER_PRINCIPAL}" >&2
   exit 1
 fi
 
