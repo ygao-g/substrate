@@ -18,6 +18,7 @@ Uses a canned dict in the exact shape json_format.MessageToDict(
 preserving_proto_field_name=True) produces from a real session output
 (uint64 counters as strings, Durations as '30s' strings)."""
 
+import math
 import sys
 from pathlib import Path
 
@@ -194,6 +195,28 @@ def test_capacity_summary_no_testing_stage():
     summary = output_mod.capacity_summary(session, envoy_cpu=2, actors=10)
     assert summary["converged"] is False
     assert "max_total_rps" not in summary
+
+
+def test_rates_use_the_exact_stage_duration():
+    # Nighthawk (metrics_plugin_impl.cc, DurationToSeconds) divides by the
+    # duration cut to whole seconds: 19 for a stage of 19.990 s.
+    stage = benchmark_result(rps=25, http_2xx=1999)
+    stage["nighthawk_service_output"]["results"][0]["execution_duration"] = "19.990s"
+    for ev in stage["metric_evaluations"]:
+        if ev["metric_id"].endswith("/achieved-rps"):
+            ev["metric_value"] = 1999 / 19
+        if ev["metric_id"].endswith("/send-rate"):
+            ev["metric_value"] = 1999 / 19 / 100
+    session = {"session_status": {}, "adjusting_stage_results": [stage], "testing_stage_result": stage}
+
+    row = output_mod.stage_rows(session)[0]
+    assert math.isclose(row["metric_nighthawk.builtin_achieved_rps"], 100.0)
+    assert math.isclose(row["metric_nighthawk.builtin_send_rate"], 1.0)
+
+    summary = output_mod.capacity_summary(session, envoy_cpu=2, actors=100)
+    assert math.isclose(summary["slo_max_rps"], 100.0)
+    assert math.isclose(summary["metric_nighthawk.builtin_achieved_rps"], 100.0)
+    assert math.isclose(summary["metric_nighthawk.builtin_send_rate"], 1.0)
 
 
 if __name__ == "__main__":
