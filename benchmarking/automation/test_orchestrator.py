@@ -351,6 +351,18 @@ class NighthawkEgressTest(unittest.TestCase):
         bundle = volumes["servicedns-ca"]["projected"]["sources"][0]["clusterTrustBundle"]
         self.assertEqual(ca["trusted_ca"]["filename"], f"{mounts['servicedns-ca']}/{bundle['path']}")
 
+    def test_tests_yaml_egress_suites(self):
+        from testtypes import nighthawk_egress
+
+        path = os.path.join(os.path.dirname(__file__), "tests.yaml")
+        with open(path) as f:
+            tests = [t for t in yaml.safe_load(f)["tests"] if t.get("type") == "nighthawk-egress"]
+        self.assertEqual(len(tests), 3)
+        for t in tests:
+            nighthawk_egress.validate(t)
+            cfg = t["nighthawk-egress"]
+            self.assertEqual(cfg["envoyCpu"], 1)
+
     def _deployment_json(
         self,
         *,
