@@ -165,10 +165,20 @@ Start with `capacity.json`, drill into `stats.jsonl`:
 | file | contents |
 |---|---|
 | `capacity.json` | **the verdict**: `slo_max_rps` — the highest rate that passed every threshold (the number to track), `binding_threshold` — which limit defined it, plus the testing stage's metrics and p50/p95/p99 |
-| `stats.jsonl` | one record per stage: Nighthawk's builtin metrics under `metric_nighthawk.builtin_*` keys (note: `achieved_rps` counts requests *sent*, errors included), status counts, latency percentiles, and the stage's `failed_thresholds` |
+| `stats.jsonl` | one record per stage: Nighthawk's builtin metrics under `metric_nighthawk.builtin_*` keys (notes: `achieved_rps` counts requests *sent*, errors included. `achieved_rps` and `send_rate` are recomputed, see below), status counts, latency percentiles, and the stage's `failed_thresholds` |
 | `results.json` | full session, 1:1 with Nighthawk's output |
 | `spec.textproto`, `output.textproto` | exact Nighthawk input/output, for reproducibility |
 | `status.json`, `logs.txt` | run metadata + process logs |
+
+`achieved_rps`, `send_rate` and therefore `slo_max_rps` are computed from
+the exact stage duration. Nighthawk's own values divide by the duration cut
+to whole seconds, and so read high, never low. A stage ends within
+milliseconds of its nominal N seconds. One that ends just under N is divided
+by N-1 and reads high by 1/(N-1): 11% on a 10 s adjusting step, 1.7% on the
+60 s testing stage. One that ends at or just over N reads right. Nighthawk's
+values stay in `results.json`. Stage verdicts (`failed_thresholds`) are
+Nighthawk's and use its own values, so a stage that passed the send-rate
+threshold can show a `send_rate` under it.
 
 ## Tuning
 

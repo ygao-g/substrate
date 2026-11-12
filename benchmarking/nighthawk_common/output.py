@@ -21,9 +21,10 @@ artifacts runner.py uploads:
                  for compatibility with the locust pipeline.
   capacity.json  capacity_summary() — one-record verdict.
 
-Measurement keys come in three tiers: metric_nighthawk.builtin_* (verbatim
-builtin metrics), plain counters / *_ms conversions, and derived verdicts
-(slo_max_rps, failed_thresholds, binding_threshold — the last two use
+Measurement keys come in three tiers: metric_nighthawk.builtin_* (Nighthawk's
+builtin metrics, except achieved_rps and send_rate, which are recomputed from
+the exact stage duration), plain counters / *_ms conversions, and derived
+verdicts (slo_max_rps, failed_thresholds, binding_threshold — the last two use
 short native metric names, identifying thresholds).
 """
 
@@ -163,10 +164,12 @@ def _stage_row(stage: str, benchmark_result: dict) -> dict:
     attempted_key = _builtin_key("attempted-rps")
     achieved_key = _builtin_key("achieved-rps")
     row.setdefault(attempted_key, per_worker_rps * concurrency)
-    row.setdefault(achieved_key, (sent / duration_s) if duration_s else 0.0)
-    row.setdefault(
-        _builtin_key("send-rate"),
-        (row[achieved_key] / row[attempted_key]) if row[attempted_key] else 0.0,
+    # Nighthawk (metrics_plugin_impl.cc, DurationToSeconds) divides achieved-rps
+    # and send-rate by execution_duration truncated to whole seconds, so these
+    # two always use the exact duration.
+    row[achieved_key] = (sent / duration_s) if duration_s else 0.0
+    row[_builtin_key("send-rate")] = (
+        (row[achieved_key] / row[attempted_key]) if row[attempted_key] else 0.0
     )
     row.setdefault(
         _builtin_key("success-rate"), (http_2xx / sent) if sent else 0.0
