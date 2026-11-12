@@ -54,7 +54,9 @@ SAMPLE_OUTPUT = {
 }
 
 
-def _run_main(work_dir: Path, mode: str, *, output=None, client_exit=0, upload_error=None, wait_error=None, parse_error=None):
+def _run_main(
+    work_dir: Path, mode: str, *, output=None, client_exit=0, upload_error=None, wait_error=None, parse_error=None, extra_args=()
+):
     """Runs runner.main with Nighthawk mocked out. The client writes its
     output file only when output is given. Returns the exit code and the mocks."""
     proc = MagicMock(stdout=[CLIENT_LINE])
@@ -69,7 +71,7 @@ def _run_main(work_dir: Path, mode: str, *, output=None, client_exit=0, upload_e
         patch("runner.parse_output_textproto", return_value=output, side_effect=parse_error),
         patch("runner.spec_dict_to_textproto", return_value="fake textproto") as spec,
     ):
-        got = runner.main([*ARGS, "--mode", mode])
+        got = runner.main([*ARGS, "--mode", mode, *extra_args])
     return got, {"upload": upload, "popen": popen, "wait": wait, "spec": spec}
 
 
@@ -164,6 +166,24 @@ class TestRunner(unittest.TestCase):
             "converged": True,
         }
         self.assertEqual({k: cap.get(k) for k in want}, want)
+
+    def test_main_knobs_reach_spec_and_summary(self):
+        knobs = [
+            "--measuring-period", "30s",
+            "--convergence-deadline", "5m",
+            "--testing-stage-duration", "90s",
+            "--tail-latency-slo-ms", "50",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            _, mocks = _run_main(Path(tmp), "http", output=SAMPLE_OUTPUT, extra_args=knobs)
+            cap = json.loads((Path(tmp) / "capacity.json").read_text())
+        got = mocks["spec"].call_args[0][0]
+        self.assertEqual(got["measuring_period"], "30s")
+        self.assertEqual(got["convergence_deadline"], "300s")
+        self.assertEqual(got["testing_stage_duration"], "90s")
+        latency = got["metric_thresholds"][-1]["threshold_spec"]["scoring_function"]["typed_config"]
+        self.assertEqual(latency["upper_threshold"], 50 * 1_000_000.0)
+        self.assertEqual(cap["tail_latency_slo_ms"], 50.0)
 
     def test_main_passthrough_servicedns_ca(self):
         pem = "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n"

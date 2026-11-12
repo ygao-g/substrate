@@ -15,20 +15,29 @@
 """`type: nighthawk-egress` test definition for the benchmark orchestrator."""
 
 import json
+import math
 import os
 import subprocess
 from typing import Any
 
-from util import build_and_push, run, run_no_check
+from util import build_and_push, parse_duration_seconds, run, run_no_check
 
 TEST_TYPE = "nighthawk-egress"
 DOCKERFILE = "benchmarking/nighthawk-egress/Dockerfile"
 USES_SHARED_WORKLOADS = False
 
-DEFAULTS: dict[str, Any] = {"mode": "http"}
+DEFAULTS: dict[str, Any] = {
+    "mode": "http",
+    "measuringPeriod": "20s",
+    "convergenceDeadline": "600s",
+    "testingStageDuration": "60s",
+    "tailLatencySloMs": 25,
+}
 
 _REQUIRED = ("envoyCpu",)
 _VALID_MODES = ("http", "mitm", "passthrough")
+# One stage is one request through atenet-router, which ends a request after 5 minutes.
+_MAX_STAGE_S = 290
 _ALLOWED = set(DEFAULTS) | set(_REQUIRED)
 _UNSUPPORTED_TOP_LEVEL_KEYS = (
     "workerCount",
@@ -138,6 +147,16 @@ def validate(test: dict[str, Any]) -> None:
         )
     if "flags" in test:
         raise ValueError(f"nighthawk-egress test '{name}': put knobs under 'nighthawk-egress:'")
+    merged = _cfg(test)
+    slo = merged["tailLatencySloMs"]
+    if isinstance(slo, bool) or not isinstance(slo, (int, float)) or not 0 < slo < math.inf:
+        raise ValueError(f"nighthawk-egress test '{name}': tailLatencySloMs must be a finite number > 0")
+    for field in ("measuringPeriod", "convergenceDeadline", "testingStageDuration"):
+        seconds = parse_duration_seconds(str(merged[field]))
+        if seconds <= 0:
+            raise ValueError(f"nighthawk-egress test '{name}': {field} must be > 0")
+        if field != "convergenceDeadline" and seconds > _MAX_STAGE_S:
+            raise ValueError(f"nighthawk-egress test '{name}': {field} must be at most {_MAX_STAGE_S}s")
 
 
 def build_image(commit: str) -> str:
@@ -207,4 +226,8 @@ def job_subs(test: dict[str, Any]) -> dict[str, str]:
     return {
         "ENVOY_CPU": str(cfg["envoyCpu"]),
         "MODE": str(cfg["mode"]),
+        "MEASURING_PERIOD": str(cfg["measuringPeriod"]),
+        "CONVERGENCE_DEADLINE": str(cfg["convergenceDeadline"]),
+        "TESTING_STAGE_DURATION": str(cfg["testingStageDuration"]),
+        "TAIL_LATENCY_SLO_MS": str(cfg["tailLatencySloMs"]),
     }

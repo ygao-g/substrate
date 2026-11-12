@@ -275,6 +275,13 @@ class NighthawkEgressTest(unittest.TestCase):
             ("envoyCpu bool", {}, {"envoyCpu": True}, "envoyCpu must be a positive int"),
             ("envoyCpu string", {}, {"envoyCpu": "1"}, "envoyCpu must be a positive int"),
             ("unknown mode", {}, {"mode": "tcp"}, "mode must be one of"),
+            ("tailLatencySloMs zero", {}, {"tailLatencySloMs": 0}, "tailLatencySloMs must be a finite number > 0"),
+            ("tailLatencySloMs bool", {}, {"tailLatencySloMs": True}, "tailLatencySloMs must be a finite number > 0"),
+            ("tailLatencySloMs nan", {}, {"tailLatencySloMs": float("nan")}, "tailLatencySloMs must be a finite number > 0"),
+            ("bad duration", {}, {"measuringPeriod": "20 seconds"}, "unrecognized duration"),
+            ("zero duration", {}, {"convergenceDeadline": "0s"}, "convergenceDeadline must be > 0"),
+            ("long measuringPeriod", {}, {"measuringPeriod": "5m"}, "measuringPeriod must be at most 290s"),
+            ("long testingStageDuration", {}, {"testingStageDuration": "5m"}, "testingStageDuration must be at most 290s"),
         ]
         for label, changes, cfg_changes, want in cases:
             with self.subTest(label=label):
@@ -289,7 +296,14 @@ class NighthawkEgressTest(unittest.TestCase):
     def test_job_template_renders_args_labels_and_toleration(self):
         from testtypes import nighthawk_egress
 
-        test = self._entry(mode="passthrough", envoyCpu=4)
+        test = self._entry(
+            mode="passthrough",
+            envoyCpu=4,
+            tailLatencySloMs=50,
+            measuringPeriod="30s",
+            convergenceDeadline="5m",
+            testingStageDuration="90s",
+        )
         subs = {
             "JOB_NAME": "j",
             "IMAGE": "i",
@@ -311,6 +325,10 @@ class NighthawkEgressTest(unittest.TestCase):
         args = job["spec"]["template"]["spec"]["containers"][0]["args"]
         self.assertEqual(args[args.index("--mode") + 1], "passthrough")
         self.assertEqual(args[args.index("--envoy-cpu") + 1], "4")
+        self.assertEqual(args[args.index("--tail-latency-slo-ms") + 1], "50")
+        self.assertEqual(args[args.index("--measuring-period") + 1], "30s")
+        self.assertEqual(args[args.index("--convergence-deadline") + 1], "5m")
+        self.assertEqual(args[args.index("--testing-stage-duration") + 1], "90s")
         mounts = job["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
         self.assertIn({"name": "servicedns-ca", "mountPath": "/run/servicedns-ca", "readOnly": True}, mounts)
         vols = job["spec"]["template"]["spec"]["volumes"]

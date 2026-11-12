@@ -26,6 +26,10 @@ set -euo pipefail
 
 MODE="http"
 ENVOY_CPU=1
+TAIL_LATENCY_SLO_MS=25
+MEASURING_PERIOD="20s"
+TESTING_STAGE_DURATION="60s"
+CONVERGENCE_DEADLINE="600s"
 DEST=""
 SKIP_DEPLOY=false
 VENV="${HOME}/.venvs/substrate-bench"
@@ -37,6 +41,10 @@ usage() {
 Usage: $0 [options]
   --mode MODE                     http | mitm | passthrough (default: ${MODE})
   --envoy-cpu N                   atenet-egress cpu pin, the independent variable (default: ${ENVOY_CPU})
+  --tail-latency-slo-ms N         bound on the latency mean plus two standard deviations, in ms (default: ${TAIL_LATENCY_SLO_MS})
+  --measuring-period DUR          length of each search stage (default: ${MEASURING_PERIOD})
+  --testing-stage-duration DUR    length of the testing stage (default: ${TESTING_STAGE_DURATION})
+  --convergence-deadline DUR      time limit of the stages before the testing stage (default: ${CONVERGENCE_DEADLINE})
   --dest gs://BUCKET/PREFIX       results root (default: gs://\$BUCKET_NAME/nighthawk-egress-results)
   --skip-deploy                   reuse an already-deployed nighthawk rig (still shapes atenet-egress)
 EOF
@@ -47,6 +55,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) MODE="$2"; shift 2 ;;
     --envoy-cpu) ENVOY_CPU="$2"; shift 2 ;;
+    --tail-latency-slo-ms) TAIL_LATENCY_SLO_MS="$2"; shift 2 ;;
+    --measuring-period) MEASURING_PERIOD="$2"; shift 2 ;;
+    --testing-stage-duration) TESTING_STAGE_DURATION="$2"; shift 2 ;;
+    --convergence-deadline) CONVERGENCE_DEADLINE="$2"; shift 2 ;;
     --dest) DEST="$2"; shift 2 ;;
     --skip-deploy) SKIP_DEPLOY=true; shift ;;
     -h|--help) usage 0 ;;
@@ -93,11 +105,15 @@ if [[ "${ROUTER_ARGS}" != *"${RUNNER_PRINCIPAL}"* ]]; then
 fi
 
 echo ">>> run config:"
-echo "      cluster:     ${CLUSTER_NAME} (${CLUSTER_LOCATION})"
-echo "      mode:        ${MODE}"
-echo "      envoy_cpu:   ${ENVOY_CPU}"
-echo "      skip_deploy: ${SKIP_DEPLOY}"
-echo "      dest:        ${DEST}"
+echo "      cluster:                 ${CLUSTER_NAME} (${CLUSTER_LOCATION})"
+echo "      mode:                    ${MODE}"
+echo "      envoy_cpu:               ${ENVOY_CPU}"
+echo "      tail_latency_slo_ms:     ${TAIL_LATENCY_SLO_MS}"
+echo "      measuring_period:        ${MEASURING_PERIOD}"
+echo "      testing_stage_duration:  ${TESTING_STAGE_DURATION}"
+echo "      convergence_deadline:    ${CONVERGENCE_DEADLINE}"
+echo "      skip_deploy:             ${SKIP_DEPLOY}"
+echo "      dest:                    ${DEST}"
 
 ensure_venv "${VENV}"
 if ! "${VENV}/bin/python" -c 'import yaml' 2>/dev/null; then
@@ -106,9 +122,10 @@ if ! "${VENV}/bin/python" -c 'import yaml' 2>/dev/null; then
 fi
 PY="${VENV}/bin/python"
 
-# --- validate flags before building or touching the cluster ------------------
+# --- validate knobs before building or touching the cluster ------------------
 NAME="egress_gatewaycap_${MODE}_${ENVOY_CPU}cpu"
-export NAME MODE ENVOY_CPU SKIP_DEPLOY
+export NAME MODE ENVOY_CPU TAIL_LATENCY_SLO_MS MEASURING_PERIOD \
+  TESTING_STAGE_DURATION CONVERGENCE_DEADLINE SKIP_DEPLOY
 
 TEST_JSON="$("${PY}" - <<'EOF'
 import json
@@ -117,15 +134,27 @@ import sys
 
 sys.path.insert(0, "benchmarking/automation")
 import orchestrator
+from util import parse_duration_seconds
 
+# Nighthawk checks the deadline after a stage, so the search can pass it by one stage.
+wait_s = (
+    parse_duration_seconds(os.environ["CONVERGENCE_DEADLINE"])
+    + parse_duration_seconds(os.environ["MEASURING_PERIOD"])
+    + parse_duration_seconds(os.environ["TESTING_STAGE_DURATION"])
+    + 300
+)
 test = {
     "name": os.environ["NAME"],
     "type": "nighthawk-egress",
     "targetCluster": "dev",
-    "duration": "30m",
+    "duration": f"{wait_s}s",
     "nighthawk-egress": {
         "mode": os.environ["MODE"],
         "envoyCpu": int(os.environ["ENVOY_CPU"]),
+        "tailLatencySloMs": float(os.environ["TAIL_LATENCY_SLO_MS"]),
+        "measuringPeriod": os.environ["MEASURING_PERIOD"],
+        "testingStageDuration": os.environ["TESTING_STAGE_DURATION"],
+        "convergenceDeadline": os.environ["CONVERGENCE_DEADLINE"],
     },
 }
 orchestrator.validate_and_normalize_tests([test])
@@ -133,6 +162,7 @@ print(json.dumps(test))
 EOF
 )"
 export TEST_JSON
+WAIT_S="$("${PY}" -c 'import json, os, sys; sys.path.insert(0, "benchmarking/automation"); from util import parse_duration_seconds; print(parse_duration_seconds(json.loads(os.environ["TEST_JSON"])["duration"]))')"
 
 # --- runner image from the working tree --------------------------------------
 SHA7="$(git rev-parse --short=7 HEAD)"
@@ -192,7 +222,7 @@ print(orchestrator.render_template(tmpl, subs))
 EOF
 
 # --- wait, following the runner's log -----------------------------------------
-echo ">>> waiting for job/${JOB}"
+echo ">>> waiting up to ${WAIT_S}s for job/${JOB}"
 ( until kubectl logs -f "job/${JOB}" -n "${NAMESPACE}" 2>/dev/null; do sleep 5; done ) &
 LOGS_PID=$!
 stop_logs() {
@@ -201,7 +231,7 @@ stop_logs() {
 }
 trap stop_logs EXIT
 STATUS="timeout"
-for _ in $(seq 1 180); do  # 180 x 10s = 30 min, the duration of the tests.yaml entries
+for _ in $(seq 1 $(( (WAIT_S + 9) / 10 ))); do  # convergence deadline + one search stage + testing stage + 300s, in 10s steps
   JOB_STATUS="$(kubectl get job "${JOB}" -n "${NAMESPACE}" -o jsonpath='{.status.succeeded}|{.status.failed}' || true)"
   [[ "${JOB_STATUS%%|*}" == "1" ]] && { STATUS="complete"; break; }
   [[ "${JOB_STATUS##*|}" == "1" ]] && { STATUS="failed"; break; }

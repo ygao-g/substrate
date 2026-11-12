@@ -148,8 +148,7 @@
 # Deploys its own gVisor rig (`USES_SHARED_WORKLOADS = False`), so `sandboxClass`
 # must be `gvisor` and shared-workload fields (`workerCount`, `actorMemory`,
 # `actorCPU`, `workerMemory`, `workerWaitTimeout`, `isolate`) are rejected.
-# The block takes `envoyCpu` (required) and `mode` (`http`, `mitm` or
-# `passthrough`). See benchmarking/nighthawk-egress/README.md.
+# See the "Configuration knobs" table in benchmarking/nighthawk-egress/README.md.
 
 tests:
   - name: glutton_baseline_1_user

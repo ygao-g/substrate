@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -48,7 +49,10 @@ from nighthawk_common.output import (
 )
 from spec import (
     DEFAULT_CONCURRENCY,
+    DEFAULT_CONVERGENCE_DEADLINE_S,
+    DEFAULT_MEASURING_PERIOD_S,
     DEFAULT_TAIL_LATENCY_SLO_MS,
+    DEFAULT_TESTING_STAGE_S,
     MODE_URIS,
     build_egress_session_spec,
     spec_dict_to_textproto,
@@ -58,6 +62,13 @@ ADAPTIVE_CLIENT = "nighthawk_adaptive_load_client"
 INVOKER_ADDR = "127.0.0.1:19980"
 SERVICEDNS_CA_CERT = "/run/servicedns-ca/ca.crt"
 DESC_PATH = os.environ.get("NIGHTHAWK_DESC", "/app/nighthawk.desc")
+
+
+def parse_duration_seconds(s: str) -> int:
+    m = re.fullmatch(r"(\d+)\s*([smh]?)", str(s).strip())
+    if not m:
+        raise ValueError(f"unrecognized duration: {s!r}")
+    return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600}[m.group(2) or "s"]
 
 
 def load_servicedns_ca_pem(path: str | os.PathLike[str]) -> str:
@@ -77,6 +88,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dest", required=True)
     p.add_argument("--mode", required=True, choices=sorted(MODE_URIS))
     p.add_argument("--envoy-cpu", required=True, type=int, dest="envoy_cpu")
+    p.add_argument("--measuring-period", default=f"{DEFAULT_MEASURING_PERIOD_S}s", dest="measuring_period")
+    p.add_argument("--convergence-deadline", default=f"{DEFAULT_CONVERGENCE_DEADLINE_S}s", dest="convergence_deadline")
+    p.add_argument("--testing-stage-duration", default=f"{DEFAULT_TESTING_STAGE_S}s", dest="testing_stage_duration")
+    p.add_argument("--tail-latency-slo-ms", type=float, default=DEFAULT_TAIL_LATENCY_SLO_MS, dest="tail_latency_slo_ms")
     return p.parse_args(argv)
 
 
@@ -154,7 +169,14 @@ def main(argv: list[str] | None = None) -> int:
         servicedns_ca_pem = (
             load_servicedns_ca_pem(SERVICEDNS_CA_CERT) if args.mode == "passthrough" else None
         )
-        spec_dict = build_egress_session_spec(args.mode, servicedns_ca_pem=servicedns_ca_pem)
+        spec_dict = build_egress_session_spec(
+            args.mode,
+            measuring_period_s=parse_duration_seconds(args.measuring_period),
+            convergence_deadline_s=parse_duration_seconds(args.convergence_deadline),
+            testing_stage_s=parse_duration_seconds(args.testing_stage_duration),
+            tail_latency_slo_ms=args.tail_latency_slo_ms,
+            servicedns_ca_pem=servicedns_ca_pem,
+        )
         spec_path.write_text(spec_dict_to_textproto(spec_dict, DESC_PATH))
         adaptive_exit = run_adaptive_client(spec_path, output_path, logs_path)
         if adaptive_exit != 0:
@@ -170,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
                 # The rig runs one actor, nighthawk/tester.
                 actors=1,
                 client_concurrency=DEFAULT_CONCURRENCY,
-                tail_latency_slo_ms=DEFAULT_TAIL_LATENCY_SLO_MS,
+                tail_latency_slo_ms=args.tail_latency_slo_ms,
             )
             summary["mode"] = args.mode
             slo_max_rps = summary["slo_max_rps"]

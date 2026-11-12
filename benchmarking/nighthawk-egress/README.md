@@ -117,6 +117,19 @@ The Job fails when the adaptive client exits non-zero, the runner raises an erro
 
 In the runs so far the `passthrough` search ended on the `send-rate` threshold: its latency stayed under 25 ms, and `binding_threshold` was `send-rate` alone.
 
+### Configuration knobs (the `nighthawk-egress:` block)
+
+| Knob | `runner.py` flag | Default | Meaning |
+|---|---|---|---|
+| `envoyCpu` | `--envoy-cpu` | required | CPU request and limit of `envoy` and `ext-proc` in `deployment/atenet-egress`, and the Envoy `--concurrency`. |
+| `mode` | `--mode` | `http` | `http`, `mitm`, or `passthrough`. |
+| `tailLatencySloMs` | `--tail-latency-slo-ms` | `25` | Bound on the latency mean plus two standard deviations, in ms. |
+| `measuringPeriod` | `--measuring-period` | `20s` | Length of each search stage, at most `290s`. |
+| `convergenceDeadline` | `--convergence-deadline` | `600s` | Time limit of the stages before the testing stage. |
+| `testingStageDuration` | `--testing-stage-duration` | `60s` | Length of the testing stage, at most `290s`. |
+
+One stage is one request through `atenet-router`, and the router ends a request after 5 minutes. So a stage is at most `290s`.
+
 ### Quick dev run
 
 [`run-dev.sh`](run-dev.sh) runs one suite from the working tree. It needs `.ate-dev-env.sh` at the repo root, a running Docker daemon, and a Substrate install whose `--ingress-allowed-spiffe-ids` holds `spiffe://cluster.local/ns/benchmarking/sa/benchmark-runner`. It builds and pushes the runner image, pins `deployment/atenet-egress`, deploys the rig of the Setup section unless `--skip-deploy` is passed, submits the Job, and prints `capacity.json`:
@@ -127,7 +140,7 @@ In the runs so far the `passthrough` search ended on the `send-rate` threshold: 
 ./benchmarking/nighthawk-egress/run-dev.sh --skip-deploy --mode passthrough --envoy-cpu 1
 ```
 
-`--dest` sets the results root. The default is `gs://${BUCKET_NAME}/nighthawk-egress-results`.
+`--dest` sets the results root. The default is `gs://${BUCKET_NAME}/nighthawk-egress-results`. `--tail-latency-slo-ms`, `--measuring-period`, `--convergence-deadline` and `--testing-stage-duration` set the knobs of the table above.
 
 ## Cleanup
 

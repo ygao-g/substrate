@@ -46,7 +46,15 @@ DEFAULT_SEND_RATE_THRESHOLD = 0.9
 DEFAULT_TAIL_LATENCY_SLO_MS = 25.0
 
 
-def build_egress_session_spec(mode: str, *, servicedns_ca_pem: str | None = None) -> dict[str, Any]:
+def build_egress_session_spec(
+    mode: str,
+    *,
+    measuring_period_s: int = DEFAULT_MEASURING_PERIOD_S,
+    convergence_deadline_s: int = DEFAULT_CONVERGENCE_DEADLINE_S,
+    testing_stage_s: int = DEFAULT_TESTING_STAGE_S,
+    tail_latency_slo_ms: float = DEFAULT_TAIL_LATENCY_SLO_MS,
+    servicedns_ca_pem: str | None = None,
+) -> dict[str, Any]:
     target_uri = MODE_URIS[mode]
     traffic_template: dict[str, Any] = {
         "uri": target_uri,
@@ -89,10 +97,10 @@ def build_egress_session_spec(mode: str, *, servicedns_ca_pem: str | None = None
         client_concurrency=DEFAULT_CONCURRENCY,
         initial_total_rps=DEFAULT_INITIAL_RPS,
         exponential_factor=DEFAULT_EXP_FACTOR,
-        measuring_period_s=DEFAULT_MEASURING_PERIOD_S,
-        convergence_deadline_s=DEFAULT_CONVERGENCE_DEADLINE_S,
-        testing_stage_duration_s=DEFAULT_TESTING_STAGE_S,
+        measuring_period_s=measuring_period_s,
+        convergence_deadline_s=convergence_deadline_s,
+        testing_stage_duration_s=testing_stage_s,
         success_rate_threshold=DEFAULT_SUCCESS_RATE_THRESHOLD,
         send_rate_threshold=DEFAULT_SEND_RATE_THRESHOLD,
-        tail_latency_slo_ms=DEFAULT_TAIL_LATENCY_SLO_MS,
+        tail_latency_slo_ms=tail_latency_slo_ms,
     )
