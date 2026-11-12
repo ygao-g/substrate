@@ -199,6 +199,39 @@ def test_capacity_summary_no_testing_stage():
     assert "max_total_rps" not in summary
 
 
+def test_rates_use_the_exact_stage_duration():
+    # The stage sent 1950 requests in 19.5 s, with 100 rps attempted.
+    # Exact:     1950 / 19.5 s = 100 rps, send rate 1.0.
+    # Nighthawk: 1950 / 19 s = 102.6 rps, send rate 1.026. It divides by the
+    # duration cut to whole seconds (metrics_plugin_impl.cc, DurationToSeconds).
+    stage = {
+        "nighthawk_service_output": {
+            "results": [
+                {
+                    "name": "global",
+                    "execution_duration": "19.5s",
+                    "counters": [{"name": "upstream_rq_total", "value": "1950"}],
+                }
+            ],
+        },
+        "metric_evaluations": [
+            {"metric_id": "nighthawk.builtin/attempted-rps", "metric_value": 100.0},
+            {"metric_id": "nighthawk.builtin/achieved-rps", "metric_value": 102.6},
+            {"metric_id": "nighthawk.builtin/send-rate", "metric_value": 1.026},
+        ],
+    }
+    session = {"session_status": {}, "adjusting_stage_results": [stage], "testing_stage_result": stage}
+
+    row = output_mod.stage_rows(session)[0]
+    assert row["metric_nighthawk.builtin_achieved_rps"] == 100.0
+    assert row["metric_nighthawk.builtin_send_rate"] == 1.0
+
+    summary = output_mod.capacity_summary(session, envoy_cpu=2, actors=100)
+    assert summary["slo_max_rps"] == 100.0
+    assert summary["metric_nighthawk.builtin_achieved_rps"] == 100.0
+    assert summary["metric_nighthawk.builtin_send_rate"] == 1.0
+
+
 @pytest.mark.parametrize("testing_stage", [True, False])
 def test_write_artifacts(tmp_path, monkeypatch, testing_stage):
     session = dict(SESSION)
