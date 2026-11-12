@@ -30,7 +30,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -178,25 +177,6 @@ def run_adaptive_client(
     )
     pump_stream("adaptive", proc.stdout, logs)
     return proc.wait()
-
-
-def upload_to_gcs(local_path: Path, gcs_uri: str) -> None:
-    # Imported here so non-GCS use doesn't require google-cloud-storage.
-    from google.cloud import storage
-
-    bucket_name, _, blob_path = gcs_uri[len("gs://"):].partition("/")
-    storage.Client().bucket(bucket_name).blob(blob_path).upload_from_filename(
-        str(local_path)
-    )
-
-
-def upload(src: Path, dest: str) -> None:
-    if dest.startswith("gs://"):
-        upload_to_gcs(src, dest)
-    else:
-        dest_path = Path(dest)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src, dest_path)
 
 
 def log_run_config(args: argparse.Namespace, prefix: str, logs: TextIO) -> None:
@@ -375,7 +355,7 @@ def main() -> None:
             continue
         dest = f"{prefix}/{basename}"
         try:
-            upload(src, dest)
+            output_mod.upload(src, dest)
             print(f"Uploaded {src} -> {dest}", flush=True)
         except Exception as e:
             print(f"Upload of {src} failed: {e}", flush=True)
