@@ -117,6 +117,18 @@ The Job fails when the adaptive client exits non-zero, the runner raises an erro
 
 In the runs so far the `passthrough` search ended on the `send-rate` threshold: its latency stayed under 25 ms, and `binding_threshold` was `send-rate` alone.
 
+### Quick dev run
+
+[`run-dev.sh`](run-dev.sh) runs one suite from the working tree. It needs `.ate-dev-env.sh` at the repo root, a running Docker daemon, and a Substrate install whose `--ingress-allowed-spiffe-ids` holds `spiffe://cluster.local/ns/benchmarking/sa/benchmark-runner`. It builds and pushes the runner image, pins `deployment/atenet-egress`, deploys the rig of the Setup section unless `--skip-deploy` is passed, submits the Job, and prints `capacity.json`:
+
+```bash
+./benchmarking/nighthawk-egress/run-dev.sh --mode http --envoy-cpu 1
+./benchmarking/nighthawk-egress/run-dev.sh --skip-deploy --mode mitm --envoy-cpu 1
+./benchmarking/nighthawk-egress/run-dev.sh --skip-deploy --mode passthrough --envoy-cpu 1
+```
+
+`--dest` sets the results root. The default is `gs://${BUCKET_NAME}/nighthawk-egress-results`.
+
 ## Cleanup
 
 Delete the `nighthawk/tester` actor, actor template, atespace, and worker pool:
