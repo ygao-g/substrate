@@ -96,6 +96,27 @@ See [Nighthawk CLI help](https://github.com/envoyproxy/nighthawk#using-the-night
 | HTTPS (TLS MITM) | `https://nighthawk-server.nighthawk.svc:443` | `443` |
 | TLS Passthrough | `https://nighthawk-server.nighthawk.svc:8443` | `8443` |
 
+## Adaptive Capacity Suites
+
+[`benchmarking/automation/tests.yaml`](../automation/tests.yaml) holds three `type: nighthawk-egress` suites, one for each gateway mode: `egress_gatewaycap_http_1cpu`, `egress_gatewaycap_mitm_1cpu`, and `egress_gatewaycap_passthrough_1cpu`. The scheduled job in [benchmarking/automation](../automation/README.md) runs them. They support gVisor only.
+
+For each suite the orchestrator deploys Substrate, pins `deployment/atenet-egress` to 1 replica with `envoy` and `ext-proc` at `envoyCpu` cores each, deploys the rig of the Setup section, and submits one Job from `nighthawk-egress-runner-job.yaml.tmpl`. In the Job, `runner.py` builds the load spec for the mode (`spec.py`) and runs `nighthawk_adaptive_load_client` against `nighthawk_service` in the `nighthawk/tester` actor, through the `invoker` sidecar of the Job. The sidecar is an Envoy that adds the `ate-target-actor: nighthawk/tester` header and connects to `atenet-router` as `benchmarking/benchmark-runner`.
+
+The search starts at 500 requests per second in total, with 16 workers and 16 connections for each worker. It doubles the rate in 20 s stages until a stage fails a threshold, then narrows the range, and ends with one 60 s testing stage. The stages before the testing stage have a deadline of 600 s in total. A stage fails when the success rate is below 0.998, the send rate is below 0.9, or the latency mean plus two standard deviations is above 25 ms.
+
+The runner uploads these files to `<dest>/runs/<name>/run_date=<date>/run_ts=<ts>/run_tag=<tag>/`:
+
+| File | Content |
+|---|---|
+| `capacity.json` | The verdict. `slo_max_rps` is the achieved rate of the highest stage that passed every threshold, and `slo_max_stage` names that stage. `binding_threshold` lists the thresholds that failed in any stage. The other keys are those of the [nighthawk-ingress](../nighthawk-ingress/README.md) summary, plus `mode`. The runner writes this file only when the search succeeds. |
+| `status.json` | `adaptive_client_exit_code`, `slo_max_rps`, and `failures`, the reasons why the run does not count. |
+| `stats.jsonl`, `results.json` | One record for each stage, and the Nighthawk output as JSON. |
+| `spec.textproto`, `output.textproto`, `logs.txt` | The load spec, the raw Nighthawk output, and the client log. |
+
+The Job fails when the adaptive client exits non-zero, the runner raises an error, or an upload fails. The client exits non-zero and writes no output when a stage ends with an error, the first stage fails a threshold, or the search passes its deadline. The runner uploads the files that exist before it exits.
+
+In the runs so far the `passthrough` search ended on the `send-rate` threshold: its latency stayed under 25 ms, and `binding_threshold` was `send-rate` alone.
+
 ## Cleanup
 
 Delete the `nighthawk/tester` actor, actor template, atespace, and worker pool:
