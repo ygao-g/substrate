@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """Transforms Nighthawk's AdaptiveLoadSessionOutput textproto into the run
-artifacts runner.py uploads:
+artifacts, and uploads them with upload():
 
   results.json   parse_output_textproto() — the session as JSON, 1:1.
   stats.jsonl    stage_rows() -> stats_records() — one record per stage,
@@ -29,6 +29,8 @@ short native metric names, identifying thresholds).
 
 import json
 import re
+import shutil
+from pathlib import Path
 
 from nighthawk_common import spec as spec_mod
 
@@ -66,7 +68,7 @@ def _builtin_key(metric_name: str) -> str:
 
 def parse_output_textproto(text: str, desc_path: str) -> dict:
     # Imported here rather than at module level: this is the only function
-    # that needs protobuf. Everything below transforms plain dicts, so the
+    # that needs protobuf. The transforms below take plain dicts, so the
     # unit tests (which feed canned dicts) run without the runner image's
     # dependencies installed.
     from google.protobuf import json_format
@@ -260,3 +262,22 @@ def write_jsonl(records: list[dict], path) -> None:
     with open(path, "w") as f:
         for record in records:
             f.write(json.dumps(record) + "\n")
+
+
+def upload_to_gcs(local_path: Path, gcs_uri: str) -> None:
+    # Imported here so non-GCS use doesn't require google-cloud-storage.
+    from google.cloud import storage
+
+    bucket_name, _, blob_path = gcs_uri[len("gs://"):].partition("/")
+    storage.Client().bucket(bucket_name).blob(blob_path).upload_from_filename(
+        str(local_path)
+    )
+
+
+def upload(src: Path, dest: str) -> None:
+    if dest.startswith("gs://"):
+        upload_to_gcs(src, dest)
+    else:
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dest_path)
