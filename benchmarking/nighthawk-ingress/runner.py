@@ -30,7 +30,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -180,73 +179,6 @@ def run_adaptive_client(
     return proc.wait()
 
 
-def write_artifacts(
-    output_path: Path,
-    desc_path: str,
-    *,
-    tag: str,
-    name: str,
-    envoy_cpu: int,
-    actors: int,
-    client_concurrency: int | None,
-    tail_latency_slo_ms: float | None,
-) -> tuple[dict, bool]:
-    """Writes results.json, stats.jsonl and capacity.json next to the client
-    output at output_path.
-    Returns the summary and whether the output has a testing stage."""
-    work_dir = output_path.parent
-    output_dict = output_mod.parse_output_textproto(output_path.read_text(), desc_path)
-    (work_dir / "results.json").write_text(json.dumps(output_dict, indent=2))
-    rows = output_mod.stage_rows(output_dict)
-    output_mod.write_jsonl(output_mod.stats_records(rows, tag, name), work_dir / "stats.jsonl")
-    summary = output_mod.capacity_summary(
-        output_dict,
-        envoy_cpu=envoy_cpu,
-        actors=actors,
-        client_concurrency=client_concurrency,
-        tail_latency_slo_ms=tail_latency_slo_ms,
-    )
-    (work_dir / "capacity.json").write_text(json.dumps(summary, indent=2))
-    return summary, any(row["stage"] == "testing" for row in rows)
-
-
-def upload_to_gcs(local_path: Path, gcs_uri: str) -> None:
-    # Imported here so non-GCS use doesn't require google-cloud-storage.
-    from google.cloud import storage
-
-    bucket_name, _, blob_path = gcs_uri[len("gs://"):].partition("/")
-    storage.Client().bucket(bucket_name).blob(blob_path).upload_from_filename(
-        str(local_path)
-    )
-
-
-def upload(src: Path, dest: str) -> None:
-    if dest.startswith("gs://"):
-        upload_to_gcs(src, dest)
-    else:
-        dest_path = Path(dest)
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src, dest_path)
-
-
-def upload_files(paths: list[Path], prefix: str) -> list[str]:
-    """Uploads each path that exists to <prefix>/<name> and prints one line
-    per path. Returns one line per failed upload."""
-    failures = []
-    for src in paths:
-        if not src.exists():
-            print(f"Skipping {src}: not produced", flush=True)
-            continue
-        dest = f"{prefix}/{src.name}"
-        try:
-            upload(src, dest)
-            print(f"Uploaded {src} -> {dest}", flush=True)
-        except Exception as e:
-            print(f"Upload of {src} failed: {e}", flush=True)
-            failures.append(f"upload of {src.name} failed: {e}")
-    return failures
-
-
 def log_run_config(args: argparse.Namespace, prefix: str, logs: TextIO) -> None:
     lines = [
         "==== Run config ====",
@@ -351,7 +283,7 @@ def main() -> None:
             tee(logs, f"{ADAPTIVE_CLIENT} exited with code {adaptive_exit}")
 
             if output_path.exists():
-                summary, testing_stage_parsed = write_artifacts(
+                summary, testing_stage_parsed = output_mod.write_artifacts(
                     output_path,
                     DESC_PATH,
                     tag=args.tag,
@@ -397,7 +329,7 @@ def main() -> None:
         )
     )
 
-    upload_failures = upload_files(
+    upload_failures = output_mod.upload_files(
         [
             status_path,
             logs_path,

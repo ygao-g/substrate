@@ -12,19 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for upload() and upload_files() of runner.py. They use pytest fixtures."""
+"""Unit tests for upload() and upload_files() of nighthawk_common/output.py. They use pytest fixtures."""
 
 import sys
-import types
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-# actors.py imports the ateapi client code, which only the image has.
-sys.modules.setdefault("actors", types.ModuleType("actors"))
 
-from runner import upload, upload_files
+from nighthawk_common.output import upload, upload_files
 
 
 def test_upload_copies_to_a_local_path(tmp_path):
@@ -56,7 +52,7 @@ def test_upload_files_goes_on_after_a_missing_file_and_a_failure(tmp_path, capsy
         if src == failing:
             raise OSError("bucket gone")
 
-    with mock.patch("runner.upload", side_effect=fake_upload) as fake:
+    with mock.patch("nighthawk_common.output.upload", side_effect=fake_upload) as fake:
         failures = upload_files([first, missing, failing, last], "gs://bucket/run")
 
     assert failures == ["upload of results.json failed: bucket gone"]
