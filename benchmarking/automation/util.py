@@ -58,6 +58,26 @@ def build_and_push(image: str, dockerfile: str) -> str:
     return image
 
 
+def bake_and_push(image: str, bake_file: str, target: str) -> str:
+    """docker buildx bake of one target, tagged as image, + push, from the
+    repo root."""
+    run(
+        [
+            "docker",
+            "buildx",
+            "bake",
+            "-f",
+            bake_file,
+            "--load",
+            "--set",
+            f"{target}.tags={image}",
+            target,
+        ]
+    )
+    run(["docker", "push", image])
+    return image
+
+
 def parse_duration_seconds(s: str) -> int:
     m = re.fullmatch(r"(\d+)\s*([smh]?)", s.strip())
     if not m:

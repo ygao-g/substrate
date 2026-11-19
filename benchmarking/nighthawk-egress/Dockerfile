@@ -13,40 +13,19 @@
 # limitations under the License.
 
 # Nighthawk egress-capacity benchmark runner image. Build context is the
-# repo root. Always build with --platform linux/amd64
-# (envoyproxy/nighthawk-dev publishes no arm64 images):
-#   docker build --platform linux/amd64 -f benchmarking/nighthawk-egress/Dockerfile .
+# repo root. Build it through the bake file, which supplies nighthawk.desc
+# as the "protogen" context:
+#   docker buildx bake -f benchmarking/nighthawk_common/docker-bake.hcl --load \
+#     --set nighthawk-egress.tags=<image> nighthawk-egress
+# A plain docker build -f of this file fails: it looks for an image named
+# protogen.
 
-# The three pins move together, as in benchmarking/nighthawk-ingress/Dockerfile.
-# NIGHTHAWK_IMAGE_DIGEST is also the nighthawk_service image in
-# traffic-driver-template.yaml.tmpl: the adaptive client here calls that service.
-ARG NIGHTHAWK_COMMIT=21f3f100b86b11e5211e5672ade956c87baaa75c
-ARG ENVOY_COMMIT=ad01ae36a702169140334ebadb2d0fc3be56327e
+# NIGHTHAWK_IMAGE_DIGEST moves together with the commit pins in
+# benchmarking/nighthawk_common/protogen/Dockerfile. It is also the
+# nighthawk_service image in traffic-driver-template.yaml.tmpl: the adaptive
+# client here calls that service.
 ARG NIGHTHAWK_IMAGE_DIGEST=sha256:7729902afea9d83f593b240690ba7d6e8fff04f6215ada538cfb4c1452b2553e
 
-# --- Stage 1: proto descriptor set -----------------------------------------
-FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30 AS protogen
-ARG NIGHTHAWK_COMMIT
-ARG ENVOY_COMMIT
-COPY benchmarking/locust/codegen/requirements.txt /tmp/codegen-requirements.txt
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -r /tmp/codegen-requirements.txt
-
-RUN git clone --depth 1 https://github.com/cncf/xds /src/xds \
-    && git clone --depth 1 https://github.com/bufbuild/protoc-gen-validate /src/pgv \
-    && git clone --depth 1 https://github.com/googleapis/googleapis /src/googleapis
-RUN git init /src/nighthawk \
-    && git -C /src/nighthawk fetch --depth 1 https://github.com/envoyproxy/nighthawk "${NIGHTHAWK_COMMIT}" \
-    && git -C /src/nighthawk checkout FETCH_HEAD
-RUN git init /src/envoy \
-    && git -C /src/envoy fetch --depth 1 https://github.com/envoyproxy/envoy "${ENVOY_COMMIT}" \
-    && git -C /src/envoy checkout FETCH_HEAD
-
-COPY benchmarking/nighthawk_common/protogen/generate_descriptor.sh /gen.sh
-RUN bash /gen.sh /out/nighthawk.desc
-
-# --- Stage 2: runtime -------------------------------------------------------
 FROM envoyproxy/nighthawk-dev@${NIGHTHAWK_IMAGE_DIGEST}
 
 COPY benchmarking/nighthawk-egress/requirements.txt /tmp/requirements.txt

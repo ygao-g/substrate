@@ -20,7 +20,8 @@ To run the cold resume tests from your workstation instead, see
 2. Orchestrator waits for DIND, copies the appropriate `ate-dev-env.sh`, runs
    `gcloud container clusters get-credentials` for the test cluster.
 3. Shallow-clones `--repo` at `--branch`, captures the commit hash.
-4. `docker build && docker push` builds the runner image for each test type
+4. `docker build && docker push`, or `docker buildx bake && docker push` for
+   the Nighthawk types, builds the runner image for each test type
    in use, tagged with the commit hash: `${KO_DOCKER_REPO}/locust-test:<commit>`,
    `${KO_DOCKER_REPO}/nighthawk-ingress-test:<commit>` and/or
    `${KO_DOCKER_REPO}/nighthawk-egress-test:<commit>`.

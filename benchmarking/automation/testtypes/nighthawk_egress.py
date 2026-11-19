@@ -19,10 +19,10 @@ import os
 import subprocess
 from typing import Any
 
-from util import build_and_push, run, run_no_check
+from util import bake_and_push, run, run_no_check
 
 TEST_TYPE = "nighthawk-egress"
-DOCKERFILE = "benchmarking/nighthawk-egress/Dockerfile"
+BAKE_FILE = "benchmarking/nighthawk_common/docker-bake.hcl"
 USES_SHARED_WORKLOADS = False
 
 _REQUIRED = ("envoyCpu", "mode")
@@ -135,9 +135,10 @@ def validate(test: dict[str, Any]) -> None:
 
 
 def build_image(commit: str) -> str:
-    return build_and_push(
+    return bake_and_push(
         f"{os.environ['KO_DOCKER_REPO']}/nighthawk-egress-test:{commit}",
-        DOCKERFILE,
+        BAKE_FILE,
+        "nighthawk-egress",
     )
 
 

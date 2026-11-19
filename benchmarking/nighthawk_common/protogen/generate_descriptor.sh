@@ -16,7 +16,7 @@
 # Generate nighthawk.desc to avoid putting a large number of
 # dependencies into the repository for running the benchmark.
 #
-# Source trees are cloned by the Dockerfile protogen stage:
+# Source trees are cloned by the Dockerfile next to this script:
 #   /src/nighthawk   envoyproxy/nighthawk  (pinned commit)
 #   /src/envoy       envoyproxy/envoy      (nighthawk's ENVOY_COMMIT pin)
 #   /src/xds         cncf/xds              (xds/ + udpa/ import roots)

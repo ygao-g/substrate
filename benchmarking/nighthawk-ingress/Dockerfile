@@ -13,49 +13,18 @@
 # limitations under the License.
 
 # Nighthawk router-capacity benchmark runner image. Build context is the
-# repo root; always build with --platform linux/amd64
-# (envoyproxy/nighthawk-dev publishes no arm64 images):
-#   docker build --platform linux/amd64 -f benchmarking/nighthawk-ingress/Dockerfile .
+# repo root. Build it through the bake file, which supplies nighthawk.desc
+# as the "protogen" context:
+#   docker buildx bake -f benchmarking/nighthawk_common/docker-bake.hcl --load \
+#     --set nighthawk-ingress.tags=<image> nighthawk-ingress
+# A plain docker build -f of this file fails: it looks for an image named
+# protogen.
 
-# The three pins move together: NIGHTHAWK_IMAGE_DIGEST is the digest of the
-# Docker Hub tag envoyproxy/nighthawk-dev:<NIGHTHAWK_COMMIT> (resolve with
-# docker buildx imagetools inspect), and ENVOY_COMMIT is nighthawk's envoy
-# pin from bazel/repositories.bzl at that commit.
-ARG NIGHTHAWK_COMMIT=21f3f100b86b11e5211e5672ade956c87baaa75c
-ARG ENVOY_COMMIT=ad01ae36a702169140334ebadb2d0fc3be56327e
+# NIGHTHAWK_IMAGE_DIGEST moves together with the commit pins in
+# benchmarking/nighthawk_common/protogen/Dockerfile.
 ARG NIGHTHAWK_IMAGE_DIGEST=sha256:7729902afea9d83f593b240690ba7d6e8fff04f6215ada538cfb4c1452b2553e
 
-# --- Stage 1: proto descriptor set -----------------------------------------
-# nighthawk_service speaks protobuf: spec.py builds the adaptive-load session
-# spec and output.py parses the result, and those message trees pull in types
-# from envoy, xds, protoc-gen-validate and googleapis. This stage compiles
-# that whole closure into one FileDescriptorSet, which spec.py/output.py load
-# at runtime.
-FROM python:3.12-slim AS protogen
-ARG NIGHTHAWK_COMMIT
-ARG ENVOY_COMMIT
-# Same grpcio-tools pin as the ateapi client stage below.
-COPY benchmarking/locust/codegen/requirements.txt /tmp/codegen-requirements.txt
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -r /tmp/codegen-requirements.txt
-
-# Shallow-fetch each tree at its pin. nighthawk/envoy are pinned to bare
-# commits, which clone --branch can't fetch, hence init+fetch.
-RUN git clone --depth 1 https://github.com/cncf/xds /src/xds \
-    && git clone --depth 1 https://github.com/bufbuild/protoc-gen-validate /src/pgv \
-    && git clone --depth 1 https://github.com/googleapis/googleapis /src/googleapis
-RUN git init /src/nighthawk \
-    && git -C /src/nighthawk fetch --depth 1 https://github.com/envoyproxy/nighthawk "${NIGHTHAWK_COMMIT}" \
-    && git -C /src/nighthawk checkout FETCH_HEAD
-RUN git init /src/envoy \
-    && git -C /src/envoy fetch --depth 1 https://github.com/envoyproxy/envoy "${ENVOY_COMMIT}" \
-    && git -C /src/envoy checkout FETCH_HEAD
-
-COPY benchmarking/nighthawk_common/protogen/generate_descriptor.sh /gen.sh
-RUN bash /gen.sh /out/nighthawk.desc
-
-# --- Stage 2: ateapi Python clients ------------------------------------------
+# --- Stage 1: ateapi Python clients ------------------------------------------
 # Generated from the protos rather than checked in; see
 # benchmarking/locust/codegen/generate.sh. Only ateapi: the ingress benchmark
 # never talks to glutton.
@@ -67,7 +36,7 @@ COPY benchmarking/locust/codegen/generate.sh benchmarking/locust/codegen/
 COPY api api
 RUN PYTHON=python3 OUT_DIR=/out benchmarking/locust/codegen/generate.sh api/ateapi/v1/ateapi.proto
 
-# --- Stage 3: runtime -------------------------------------------------------
+# --- Stage 2: runtime -------------------------------------------------------
 # nighthawk-dev has no stable tags; pinned by digest so the pull is
 # immutable. Ships the nighthawk_* binaries in /usr/local/bin on ubuntu.
 FROM envoyproxy/nighthawk-dev@${NIGHTHAWK_IMAGE_DIGEST}
