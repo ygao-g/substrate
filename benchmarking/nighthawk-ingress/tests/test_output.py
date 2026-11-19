@@ -18,12 +18,20 @@ Uses a canned dict in the exact shape json_format.MessageToDict(
 preserving_proto_field_name=True) produces from a real session output
 (uint64 counters as strings, Durations as '30s' strings)."""
 
+import json
 import sys
+import types
 from pathlib import Path
 
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# actors.py imports the ateapi client code, which only the image has.
+sys.modules.setdefault("actors", types.ModuleType("actors"))
 
 from nighthawk_common import output as output_mod
+import runner
 
 
 def benchmark_result(
@@ -194,6 +202,39 @@ def test_capacity_summary_no_testing_stage():
     summary = output_mod.capacity_summary(session, envoy_cpu=2, actors=10)
     assert summary["converged"] is False
     assert "max_total_rps" not in summary
+
+
+@pytest.mark.parametrize("testing_stage", [True, False])
+def test_write_artifacts(tmp_path, monkeypatch, testing_stage):
+    session = dict(SESSION)
+    if not testing_stage:
+        del session["testing_stage_result"]
+    monkeypatch.setattr(output_mod, "parse_output_textproto", lambda text, desc_path: session)
+    output_path = tmp_path / "output.textproto"
+    output_path.write_text("textproto")
+
+    summary, got_testing_stage = runner.write_artifacts(
+        output_path,
+        "nighthawk.desc",
+        tag="abc123",
+        name="cap2",
+        envoy_cpu=4,
+        actors=100,
+        client_concurrency=16,
+        tail_latency_slo_ms=None,
+    )
+
+    assert got_testing_stage is testing_stage
+    results = (tmp_path / "results.json").read_text()
+    assert json.loads(results) == session
+    capacity = (tmp_path / "capacity.json").read_text()
+    assert json.loads(capacity) == summary
+    stats = [json.loads(line) for line in (tmp_path / "stats.jsonl").read_text().splitlines()]
+    assert [rec["metric"] for rec in stats] == [
+        "nighthawk_adjusting_000",
+        "nighthawk_adjusting_001",
+    ] + (["nighthawk_testing"] if testing_stage else [])
+    assert {(rec["tag"], rec["test_name"]) for rec in stats} == {("abc123", "cap2")}
 
 
 if __name__ == "__main__":
