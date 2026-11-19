@@ -16,7 +16,7 @@
 
 The dict-shape tests run anywhere (stdlib only, `python3 tests/test_spec.py`
 or pytest). The textproto round-trip test needs the FileDescriptorSet built
-by the Docker protogen stage and self-skips when NIGHTHAWK_DESC is absent
+by the protogen Dockerfile and self-skips when NIGHTHAWK_DESC is absent
 (i.e. outside the runner image):
   docker run --rm --entrypoint python3 <image> -m pytest /app/tests
 """

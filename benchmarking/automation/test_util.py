@@ -53,6 +53,32 @@ class BuildAndPushTest(unittest.TestCase):
         self.assertEqual(push_cmd, ["docker", "push", "gcr.io/p/repo/img:tag"])
 
 
+class BakeAndPushTest(unittest.TestCase):
+    @mock.patch("util.run")
+    def test_bakes_one_target_as_image_and_pushes(self, run_mock):
+        image = util.bake_and_push(
+            "gcr.io/p/repo/img:tag", "path/docker-bake.hcl", "some-target"
+        )
+
+        self.assertEqual(image, "gcr.io/p/repo/img:tag")
+        bake_cmd, push_cmd = (c.args[0] for c in run_mock.call_args_list)
+        self.assertEqual(
+            bake_cmd,
+            [
+                "docker",
+                "buildx",
+                "bake",
+                "-f",
+                "path/docker-bake.hcl",
+                "--load",
+                "--set",
+                "some-target.tags=gcr.io/p/repo/img:tag",
+                "some-target",
+            ],
+        )
+        self.assertEqual(push_cmd, ["docker", "push", "gcr.io/p/repo/img:tag"])
+
+
 class IsolateTest(unittest.TestCase):
     def test_absent(self):
         test = {"name": "t"}

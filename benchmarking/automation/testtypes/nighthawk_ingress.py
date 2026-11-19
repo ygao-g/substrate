@@ -25,7 +25,7 @@ import os
 import re
 from typing import Any
 
-from util import build_and_push, parse_duration_seconds, run
+from util import bake_and_push, parse_duration_seconds, run
 
 TEST_TYPE = "nighthawk-ingress"
 USES_SHARED_WORKLOADS = True
@@ -114,9 +114,10 @@ def validate(test: dict[str, Any]) -> None:
 
 def build_image(commit: str) -> str:
     """Build & push the nighthawk capacity-benchmark runner image."""
-    return build_and_push(
+    return bake_and_push(
         f"{os.environ['KO_DOCKER_REPO']}/nighthawk-ingress-test:{commit}",
-        "benchmarking/nighthawk-ingress/Dockerfile",
+        "benchmarking/nighthawk_common/docker-bake.hcl",
+        "nighthawk-ingress",
     )
 
 

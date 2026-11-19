@@ -144,7 +144,8 @@ Then each benchmark run is one command, ~8–10 min:
 
 Flags: `--envoy-cpu`, `--actors`, `--tail-latency-slo-ms`, `--atespace`,
 `--dest` (see
-`--help`). It needs a running Docker daemon and gcloud/kubectl credentials.
+`--help`). It needs a running Docker daemon, the docker buildx plugin and
+gcloud/kubectl credentials.
 
 Notes:
 

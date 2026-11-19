@@ -77,6 +77,10 @@ docker info >/dev/null 2>&1 || {
   echo "ERROR: docker daemon not running (the runner image is built locally)" >&2
   exit 1
 }
+docker buildx version >/dev/null 2>&1 || {
+  echo "ERROR: docker buildx not found (the runner image is built with docker buildx bake)" >&2
+  exit 1
+}
 
 kubectl get deployment atenet-router -n ate-system >/dev/null 2>&1 || {
   echo "ERROR: substrate is not deployed on ${CLUSTER_NAME}. Run:" >&2
@@ -131,10 +135,10 @@ DIRTY=""
 TAG="quick-${SHA7}${DIRTY}-$(date +%H%M%S)"
 IMAGE="${KO_DOCKER_REPO}/nighthawk-ingress-test:${TAG}"
 echo ">>> building ${IMAGE} from the working tree"
-# --platform is required: the clusters are amd64 and the default target on
-# an arm64 host produces an image the nodes cannot pull.
-docker build --platform linux/amd64 \
-  -f benchmarking/nighthawk-ingress/Dockerfile -t "${IMAGE}" .
+# The bake file builds for linux/amd64: the clusters are amd64 and the
+# default platform on an arm64 host produces an image the nodes cannot pull.
+docker buildx bake -f benchmarking/nighthawk_common/docker-bake.hcl --load \
+  --set "nighthawk-ingress.tags=${IMAGE}" nighthawk-ingress
 docker push "${IMAGE}"
 
 # --- render + submit the Job ---------------------------------------------------
